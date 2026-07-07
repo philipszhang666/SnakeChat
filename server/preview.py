@@ -12,7 +12,18 @@ import os
 import zipfile
 from urllib.parse import quote
 
+from . import config
 from .sandbox import check_path_or_error
+
+
+def _preview_flag_enabled(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if value is None:
+        return False
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 
 class _ResponseZipWriter:
@@ -91,10 +102,18 @@ class PreviewMixin:
         rel = (qs.get('path') or [''])[0]
         download_mode = (qs.get('download') or ['0'])[0] == '1'
         archive_mode = (qs.get('archive') or [''])[0].lower()
-        path, err = check_path_or_error(rel, must_exist=True)
-        if err:
-            self._send_preview_error(403, err)
-            return
+        full_access_token = None
+        try:
+            full_access_token = config.bind_request_full_access(
+                _preview_flag_enabled((qs.get('allow_full_access') or qs.get('full_access') or ['0'])[0])
+            )
+            path, err = check_path_or_error(rel, must_exist=True)
+            if err:
+                self._send_preview_error(403, err)
+                return
+        finally:
+            if full_access_token is not None:
+                config.reset_request_full_access(full_access_token)
         if os.path.isdir(path):
             if download_mode and archive_mode == 'zip':
                 self._send_directory_zip(path, rel)

@@ -50,6 +50,34 @@ const INLINE_FILE_MIN_MAIN_WIDTH = 920;
 const INLINE_FILE_MIN_CHAT_WIDTH = 460;
 const INLINE_FILE_MIN_FILE_WIDTH = 360;
 const FILE_EXPLORER_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
+const FILE_EXPLORER_QUICK_ACCESS_LEGACY_KEY = 'aichat_file_explorer_quick_access_v1';
+const FILE_EXPLORER_QUICK_ACCESS_KEY_PREFIX = 'aichat_file_explorer_quick_access_v2';
+const FILE_EXPLORER_QUICK_ACCESS_MAX = 10;
+const FILE_EXPLORER_QUICK_ACCESS_LABEL_MAX = 40;
+
+function fileExplorerBackendContext(options = {}) {
+  return {
+    ...(options && typeof options === 'object' ? options : {}),
+    allowFullAccess: true
+  };
+}
+
+function fileExplorerStorageGet(key) {
+  try {
+    if (typeof storage !== 'undefined' && storage && typeof storage.get === 'function') return storage.get(key);
+  } catch (_) {}
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function fileExplorerStorageSet(key, value) {
+  try {
+    if (typeof storage !== 'undefined' && storage && typeof storage.set === 'function') {
+      storage.set(key, value);
+      return;
+    }
+  } catch (_) {}
+  try { localStorage.setItem(key, value); } catch (_) {}
+}
 
 const FILE_EXPLORER_TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'markdown', 'js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx',
@@ -63,7 +91,11 @@ const FILE_EXPLORER_TEXT_EXTENSIONS = new Set([
 
 function normalizeExplorerPath(path) {
   let p = String(path || '.').replace(/\\/g, '/').trim();
-  if (!p || p === '/') return '.';
+  if (!p) return '.';
+  if (p === '/') return '/';
+  if (/^[A-Za-z]:\/?$/.test(p)) return `${p.charAt(0).toUpperCase()}:/`;
+  if (/^\/\/[^/]+\/[^/]+/.test(p)) return p.replace(/\/+$/g, '');
+  if (isAbsoluteExplorerPath(p)) return p.replace(/\/+$/g, '') || '/';
   p = p.replace(/^\/+/, '').replace(/\/+$/g, '');
   return p || '.';
 }
@@ -113,13 +145,6 @@ function resolveFileExplorerOpenPath(path) {
     };
   }
 
-  if (isAbsoluteExplorerPath(raw) && workspaceRoot) {
-    return {
-      ok: false,
-      error: `该绝对路径不在当前工作区内，不能直接打开：${raw}`
-    };
-  }
-
   return { ok: true, path: normalizeExplorerPath(raw) };
 }
 
@@ -127,15 +152,45 @@ function joinExplorerPath(base, name) {
   const root = normalizeExplorerPath(base);
   const cleanName = String(name || '').replace(/[\\/]+/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
   if (!cleanName) return root;
+  if (root === '/') return `/${cleanName}`;
+  if (/^[A-Za-z]:\/?$/.test(root)) return `${root.replace(/\/?$/, '/')}${cleanName}`;
   return root === '.' ? cleanName : `${root}/${cleanName}`;
 }
 
 function parentExplorerPath(path) {
   const p = normalizeExplorerPath(path);
   if (p === '.') return '.';
+  if (p === '/') return '/';
+  if (/^[A-Za-z]:\/?$/.test(p)) return `${p.charAt(0).toUpperCase()}:/`;
+  if (/^[A-Za-z]:\//.test(p)) {
+    const drive = p.slice(0, 3);
+    const rest = p.slice(3).split('/').filter(Boolean);
+    if (!rest.length) return drive;
+    rest.pop();
+    return rest.length ? `${drive}${rest.join('/')}` : drive;
+  }
+  if (p.startsWith('/')) {
+    const parts = p.slice(1).split('/').filter(Boolean);
+    if (!parts.length) return '/';
+    parts.pop();
+    return parts.length ? `/${parts.join('/')}` : '/';
+  }
   const parts = p.split('/').filter(Boolean);
   parts.pop();
   return parts.length ? parts.join('/') : '.';
+}
+
+function currentFileExplorerParentPath() {
+  const current = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+  if (current === '.') {
+    const absolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath || fileExplorerWorkspaceRoot());
+    if (absolute) {
+      const normalizedAbsolute = normalizeExplorerPath(absolute);
+      const parent = parentExplorerPath(normalizedAbsolute);
+      if (parent && parent !== normalizedAbsolute) return parent;
+    }
+  }
+  return parentExplorerPath(current);
 }
 
 function trimFileExplorerAbsolutePath(path) {
@@ -192,12 +247,183 @@ function fileExplorerPathRelativeToCurrent(path) {
 
 function fileExplorerAbsolutePathFor(path) {
   const normalizedPath = normalizeExplorerPath(path);
+  if (isAbsoluteExplorerPath(normalizedPath)) return trimFileExplorerAbsolutePath(normalizedPath);
   const currentAbsolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath);
   const currentRelative = fileExplorerPathRelativeToCurrent(normalizedPath);
   if (currentAbsolute && currentRelative) {
     return joinFileExplorerAbsolutePath(currentAbsolute, currentRelative);
   }
   return joinFileExplorerAbsolutePath(fileExplorerWorkspaceRoot(), normalizedPath);
+}
+
+function fileExplorerQuickAccessKey(path) {
+  const normalized = normalizeExplorerPath(path);
+  return isWindowsAbsoluteExplorerPath(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+function fileExplorerNormalizeBackendUrl(url) {
+  return String(url || '').trim().replace(/\/+$/g, '').toLowerCase();
+}
+
+function fileExplorerNormalizeSshCommand(command) {
+  return String(command || '').trim().replace(/\s+/g, ' ');
+}
+
+function fileExplorerRemoteConnectionConfigSnapshot() {
+  try {
+    if (typeof loadRemoteConnectionConfig === 'function') {
+      const cfg = loadRemoteConnectionConfig();
+      return cfg && typeof cfg === 'object' ? cfg : {};
+    }
+  } catch (_) {}
+  return {};
+}
+
+function fileExplorerQuickAccessScope() {
+  const controllerUrl = typeof REMOTE_CONTROLLER !== 'undefined' && REMOTE_CONTROLLER && REMOTE_CONTROLLER.serverUrl
+    ? REMOTE_CONTROLLER.serverUrl
+    : ((typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || 'http://localhost:8765');
+  if (!isFileExplorerRemoteMode()) return `local|${fileExplorerNormalizeBackendUrl(controllerUrl)}`;
+
+  const cfg = fileExplorerRemoteConnectionConfigSnapshot();
+  const sshCommand = fileExplorerNormalizeSshCommand(cfg.sshCommand || cfg.ssh_command || '');
+  const remoteAgentPort = String(cfg.remoteAgentPort || cfg.remote_agent_port || '').trim();
+  const fallbackUrl = fileExplorerNormalizeBackendUrl((typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || '');
+  if (sshCommand) return `remote|ssh:${sshCommand}|agent:${remoteAgentPort || 'default'}`;
+  return `remote|url:${fallbackUrl || 'unknown'}`;
+}
+
+function fileExplorerQuickAccessStorageKey() {
+  return `${FILE_EXPLORER_QUICK_ACCESS_KEY_PREFIX}:${encodeURIComponent(fileExplorerQuickAccessScope())}`;
+}
+
+function fileExplorerClientLooksWindows() {
+  try {
+    const platform = (navigator && navigator.userAgentData && navigator.userAgentData.platform)
+      || (navigator && navigator.platform)
+      || '';
+    return /win/i.test(String(platform));
+  } catch (_) {
+    return false;
+  }
+}
+
+function fileExplorerQuickAccessPathMatchesBackend(path) {
+  const normalized = normalizeExplorerPath(path);
+  if (!normalized || normalized === '.' || !isAbsoluteExplorerPath(normalized)) return false;
+  let workspaceRoot = normalizeExplorerPath(fileExplorerWorkspaceRoot());
+  if ((!workspaceRoot || !isAbsoluteExplorerPath(workspaceRoot)) && isFileExplorerRemoteMode()) {
+    const cfg = fileExplorerRemoteConnectionConfigSnapshot();
+    workspaceRoot = normalizeExplorerPath(cfg.remoteWorkspace || cfg.workspace || '');
+  }
+  if (!workspaceRoot || !isAbsoluteExplorerPath(workspaceRoot)) {
+    if (!isFileExplorerRemoteMode() && fileExplorerClientLooksWindows()) return isWindowsAbsoluteExplorerPath(normalized);
+    return true;
+  }
+  if (isWindowsAbsoluteExplorerPath(workspaceRoot)) return isWindowsAbsoluteExplorerPath(normalized);
+  if (isPosixAbsoluteExplorerPath(workspaceRoot)) return isPosixAbsoluteExplorerPath(normalized);
+  return true;
+}
+
+function normalizeFileExplorerQuickAccessRows(rows) {
+  const seen = new Set();
+  const out = [];
+  for (const item of Array.isArray(rows) ? rows : []) {
+    const path = normalizeExplorerPath(item && typeof item === 'object' ? item.path : item);
+    if (!fileExplorerQuickAccessPathMatchesBackend(path)) continue;
+    const key = fileExplorerQuickAccessKey(path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ path });
+    if (out.length >= FILE_EXPLORER_QUICK_ACCESS_MAX) break;
+  }
+  return out;
+}
+
+function readFileExplorerQuickAccessRows(key) {
+  try {
+    const raw = fileExplorerStorageGet(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return {
+      found: raw !== null && raw !== undefined,
+      rows: Array.isArray(parsed) ? parsed : []
+    };
+  } catch (_) {
+    return { found: true, rows: [] };
+  }
+}
+
+function loadFileExplorerQuickAccess() {
+  const key = fileExplorerQuickAccessStorageKey();
+  const scoped = readFileExplorerQuickAccessRows(key);
+  if (scoped.found) return normalizeFileExplorerQuickAccessRows(scoped.rows);
+
+  if (!isFileExplorerRemoteMode()) {
+    const legacy = normalizeFileExplorerQuickAccessRows(readFileExplorerQuickAccessRows(FILE_EXPLORER_QUICK_ACCESS_LEGACY_KEY).rows);
+    if (legacy.length) saveFileExplorerQuickAccess(legacy);
+    return legacy;
+  }
+
+  return [];
+}
+
+function saveFileExplorerQuickAccess(rows) {
+  fileExplorerStorageSet(
+    fileExplorerQuickAccessStorageKey(),
+    JSON.stringify(normalizeFileExplorerQuickAccessRows(rows))
+  );
+}
+
+function shortenFileExplorerQuickAccessPath(path) {
+  const text = String(path || '');
+  if (fileExplorerQuickAccessLabelWidth(text) <= FILE_EXPLORER_QUICK_ACCESS_LABEL_MAX) return text;
+  return `...${fileExplorerQuickAccessTailByWidth(text, FILE_EXPLORER_QUICK_ACCESS_LABEL_MAX - 3)}`;
+}
+
+function fileExplorerQuickAccessLabelWidth(text) {
+  let width = 0;
+  for (const char of String(text || '')) width += fileExplorerQuickAccessCharWidth(char);
+  return width;
+}
+
+function fileExplorerQuickAccessTailByWidth(text, maxWidth) {
+  const chars = Array.from(String(text || ''));
+  let width = 0;
+  let tail = '';
+  for (let i = chars.length - 1; i >= 0; i -= 1) {
+    const char = chars[i];
+    const charWidth = fileExplorerQuickAccessCharWidth(char);
+    if (width + charWidth > maxWidth) break;
+    tail = `${char}${tail}`;
+    width += charWidth;
+  }
+  return tail;
+}
+
+function fileExplorerQuickAccessCharWidth(char) {
+  return (char.codePointAt(0) || 0) > 0xff ? 2 : 1;
+}
+
+function currentFileExplorerAbsoluteDir() {
+  return normalizeExplorerPath(fileExplorerAbsolutePathFor(FILE_EXPLORER_STATE.path) || FILE_EXPLORER_STATE.path);
+}
+
+function currentFileExplorerQuickAccessIndex(rows = loadFileExplorerQuickAccess()) {
+  const key = fileExplorerQuickAccessKey(currentFileExplorerAbsoluteDir());
+  return rows.findIndex(item => fileExplorerQuickAccessKey(item.path) === key);
+}
+
+function removeCurrentFolderFromQuickAccess() {
+  const rows = loadFileExplorerQuickAccess();
+  const index = currentFileExplorerQuickAccessIndex(rows);
+  if (index < 0) {
+    fileExplorerToast('当前目录不在快速访问中');
+    return;
+  }
+  const removed = rows[index].path;
+  rows.splice(index, 1);
+  saveFileExplorerQuickAccess(rows);
+  fileExplorerToast(`已移出快速访问：${shortenFileExplorerQuickAccessPath(removed)}`);
 }
 
 function isFileExplorerRemoteMode() {
@@ -281,7 +507,7 @@ function isFileExplorerMediaFile(path) {
 async function fileExplorerPreviewUrl(path) {
   if (typeof TERMINAL_CONFIG === 'undefined') throw new Error('本地服务配置未加载');
   const base = (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765').replace(/\/+$/, '');
-  return `${base}/preview-file?path=${encodeURIComponent(normalizeExplorerPath(path))}`;
+  return `${base}/preview-file?path=${encodeURIComponent(normalizeExplorerPath(path))}&allow_full_access=1`;
 }
 
 function setFileEditorStatus(message, kind = '') {
@@ -872,6 +1098,16 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="upload-files" data-remote-only="true">上传文件</button>
       <button type="button" data-action="upload-folder" data-remote-only="true">上传文件夹</button>
       <button type="button" data-action="paste" data-paste-only="true" hidden>粘贴</button>
+      <button type="button" data-action="add-quick-access" data-add-quick-access-only>添加到快速访问</button>
+      <button type="button" data-action="remove-quick-access" data-current-quick-access-only hidden>移出快速访问</button>
+      <div class="file-explorer-menu-submenu" data-quick-access-wrapper hidden>
+        <button class="file-explorer-submenu-trigger" type="button" data-action="quick-access-menu" aria-haspopup="true">
+          <span>快速访问</span>
+          <span class="file-explorer-submenu-arrow">›</span>
+        </button>
+        <div class="file-explorer-submenu-panel" data-quick-access-list></div>
+      </div>
+      <button type="button" data-action="return-sandbox-root">切回沙箱目录</button>
       <button type="button" data-action="new-file">新建文件</button>
       <button type="button" data-action="new-folder">新建文件夹</button>
       <button type="button" data-action="copy-path">复制相对路径</button>
@@ -881,6 +1117,43 @@ function ensureFileExplorerContextMenu() {
   `;
   document.body.appendChild(menu);
   return menu;
+}
+
+function renderFileExplorerQuickAccessMenu(menu = ensureFileExplorerContextMenu()) {
+  const wrapper = menu.querySelector('[data-quick-access-wrapper]');
+  const list = menu.querySelector('[data-quick-access-list]');
+  if (!wrapper || !list) return;
+  const rows = loadFileExplorerQuickAccess();
+  wrapper.hidden = rows.length === 0;
+  list.innerHTML = rows.map(item => {
+    const path = normalizeExplorerPath(item.path);
+    return `
+      <button class="file-explorer-quick-access-item" type="button" data-action="open-quick-access" data-path="${escapeHtml(path)}" title="${escapeHtml(path)}">
+        <span class="file-explorer-quick-access-path">${escapeHtml(shortenFileExplorerQuickAccessPath(path))}</span>
+      </button>
+    `;
+  }).join('');
+}
+
+function addCurrentFolderToQuickAccess() {
+  const path = currentFileExplorerAbsoluteDir();
+  if (!path || path === '.') {
+    fileExplorerToast('无法获取当前目录绝对路径');
+    return;
+  }
+  const rows = loadFileExplorerQuickAccess();
+  const key = fileExplorerQuickAccessKey(path);
+  const next = [{ path }, ...rows.filter(item => fileExplorerQuickAccessKey(item.path) !== key)]
+    .slice(0, FILE_EXPLORER_QUICK_ACCESS_MAX);
+  saveFileExplorerQuickAccess(next);
+  fileExplorerToast(`已添加到快速访问：${shortenFileExplorerQuickAccessPath(path)}`);
+}
+
+async function returnFileExplorerToSandboxRoot() {
+  const ok = await loadFileExplorer('.');
+  if (!ok) return;
+  const root = fileExplorerWorkspaceRoot();
+  fileExplorerToast(root ? `已切回沙箱目录：${shortenFileExplorerQuickAccessPath(root)}` : '已切回沙箱目录');
 }
 
 function hideFileExplorerContextMenu() {
@@ -895,7 +1168,7 @@ function renderFileExplorer() {
   const list = document.getElementById('fileExplorerList');
   const upBtn = document.getElementById('fileExplorerUpBtn');
   setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
-  if (upBtn) upBtn.disabled = FILE_EXPLORER_STATE.path === '.';
+  if (upBtn) upBtn.disabled = currentFileExplorerParentPath() === FILE_EXPLORER_STATE.path;
   if (!list) return;
 
   const entries = fileExplorerSort(FILE_EXPLORER_STATE.entries);
@@ -920,14 +1193,14 @@ function renderFileExplorer() {
 }
 
 async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
-  if (FILE_EXPLORER_STATE.loading) return;
+  if (FILE_EXPLORER_STATE.loading) return false;
   FILE_EXPLORER_STATE.loading = true;
   FILE_EXPLORER_STATE.path = normalizeExplorerPath(path);
   if (!options.silent) renderFileExplorerLoading();
   setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path });
+    const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取目录失败');
     noteFileExplorerAbsolutePath(r.path, FILE_EXPLORER_STATE.path);
@@ -935,11 +1208,13 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
     FILE_EXPLORER_STATE.autoRefreshSignature = fileExplorerEntriesSignature(FILE_EXPLORER_STATE.entries);
     FILE_EXPLORER_STATE.autoRefreshPath = FILE_EXPLORER_STATE.path;
     renderFileExplorer();
+    return true;
   } catch (e) {
     const list = document.getElementById('fileExplorerList');
     if (list) {
       list.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(e.message || String(e))}</div>`;
     }
+    return false;
   } finally {
     FILE_EXPLORER_STATE.loading = false;
   }
@@ -964,7 +1239,7 @@ async function pollFileExplorerChanges() {
   const path = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
   try {
     if (typeof callAgentBackend !== 'function') return;
-    const r = await callAgentBackend('list_dir', { path });
+    const r = await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string' || !r || !r.ok) return;
     if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !FILE_EXPLORER_STATE.visible) return;
     noteFileExplorerAbsolutePath(r.path, path);
@@ -1100,7 +1375,7 @@ async function uploadExplorerFileInChunks(file, targetFilePath, progress = {}) {
       },
       undefined,
       undefined,
-      { skipConfirm: true }
+      fileExplorerBackendContext({ skipConfirm: true })
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '上传失败');
@@ -1588,7 +1863,7 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
   setInlineFileStatus('正在读取...', 'loading');
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('read_file', { path: normalizedPath });
+    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
     setContent(r.content || '', false);
@@ -1781,7 +2056,7 @@ async function openFileEditor(path) {
   setFileEditorStatus('正在读取...', 'loading');
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('read_file', { path: normalizedPath });
+    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
     textarea.value = r.content || '';
@@ -1835,7 +2110,8 @@ async function saveFileEditor() {
       'write_file',
       { path, content },
       '保存文本文件修改',
-      `[保存文件] ${path}\n\n字符数：${content.length}\n\n${preview}`
+      `[保存文件] ${path}\n\n字符数：${content.length}\n\n${preview}`,
+      fileExplorerBackendContext()
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
@@ -1868,7 +2144,7 @@ async function openFileWithSystemDefault(path) {
   }
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('open_file_default', { path: normalizedPath });
+    const r = await callAgentBackend('open_file_default', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '系统默认应用打开失败');
     fileExplorerToast(`已使用系统默认应用打开：${fileExplorerBasename(normalizedPath)}`);
@@ -1899,7 +2175,7 @@ function siblingExplorerPath(path, newName) {
   const parent = parentExplorerPath(path);
   const cleanName = String(newName || '').replace(/[\\/]+/g, '').trim();
   if (!cleanName) return '';
-  return parent === '.' ? cleanName : `${parent}/${cleanName}`;
+  return joinExplorerPath(parent, cleanName);
 }
 
 function fileExplorerBasename(path) {
@@ -1915,7 +2191,7 @@ async function compileTexFile(path = FILE_EXPLORER_STATE.contextPath) {
   try {
     fileExplorerToast('正在调用 xelatex 编译...');
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('compile_tex', { path: normalizedPath }, { skipConfirm: true });
+    const r = await callAgentBackend('compile_tex', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) {
       const installHint = r && r.install_hint ? `\n${r.install_hint}` : '';
@@ -2175,8 +2451,44 @@ function openMediaViewerInNewTab() {
 }
 
 function fileExplorerGoUp() {
-  const parent = parentExplorerPath(FILE_EXPLORER_STATE.path);
+  const parent = currentFileExplorerParentPath();
   if (parent !== FILE_EXPLORER_STATE.path) loadFileExplorer(parent);
+}
+
+function fileExplorerItemTextRight(item) {
+  const name = item ? item.querySelector('.file-explorer-name') : null;
+  if (!name) return 0;
+  const nameRect = name.getBoundingClientRect();
+  let textRight = nameRect.left;
+  const range = document.createRange();
+  try {
+    range.selectNodeContents(name);
+    const rects = Array.from(range.getClientRects());
+    for (const rect of rects) textRight = Math.max(textRight, rect.right);
+  } catch (_) {
+    textRight = nameRect.right;
+  } finally {
+    try { range.detach(); } catch (_) {}
+  }
+  return Math.min(textRight, nameRect.right);
+}
+
+function isFileExplorerItemBlankEvent(event, item) {
+  if (!event || !item) return false;
+  const itemRect = item.getBoundingClientRect();
+  if (event.clientX < itemRect.left || event.clientX > itemRect.right) return false;
+  const meta = item.querySelector('.file-explorer-meta');
+  if (meta && meta.contains(event.target)) return false;
+  const metaRect = meta ? meta.getBoundingClientRect() : null;
+  if (metaRect && event.clientX >= metaRect.left - 4 && event.clientX <= metaRect.right + 4) return false;
+  const textRight = fileExplorerItemTextRight(item);
+  return !!textRight && event.clientX > textRight + 18;
+}
+
+function fileExplorerItemFromPointerEvent(event) {
+  const item = event.target.closest('.file-explorer-item');
+  if (!item) return null;
+  return isFileExplorerItemBlankEvent(event, item) ? null : item;
 }
 
 function showFileExplorerContextMenu(event, item) {
@@ -2189,6 +2501,7 @@ function showFileExplorerContextMenu(event, item) {
   FILE_EXPLORER_STATE.contextScope = isItem ? 'item' : 'blank';
 
   const menu = ensureFileExplorerContextMenu();
+  renderFileExplorerQuickAccessMenu(menu);
   menu.querySelectorAll('[data-menu-section]').forEach(section => {
     section.hidden = section.dataset.menuSection !== FILE_EXPLORER_STATE.contextScope;
   });
@@ -2202,17 +2515,27 @@ function showFileExplorerContextMenu(event, item) {
   menu.querySelectorAll('[data-remote-only]').forEach(btn => {
     btn.hidden = !isFileExplorerRemoteMode();
   });
+  const currentInQuickAccess = FILE_EXPLORER_STATE.contextScope === 'blank'
+    && currentFileExplorerQuickAccessIndex() >= 0;
+  menu.querySelectorAll('[data-current-quick-access-only]').forEach(btn => {
+    btn.hidden = !currentInQuickAccess;
+  });
+  menu.querySelectorAll('[data-add-quick-access-only]').forEach(btn => {
+    btn.hidden = currentInQuickAccess;
+  });
   menu.hidden = false;
   const rect = menu.getBoundingClientRect();
   const padding = 8;
-  const left = Math.min(event.clientX, window.innerWidth - rect.width - padding);
+  const hasQuickAccess = loadFileExplorerQuickAccess().length > 0 && FILE_EXPLORER_STATE.contextScope === 'blank';
+  const submenuReserve = hasQuickAccess ? 330 : 0;
+  const left = Math.min(event.clientX, window.innerWidth - rect.width - submenuReserve - padding);
   const top = Math.min(event.clientY, window.innerHeight - rect.height - padding);
   menu.style.left = `${Math.max(padding, left)}px`;
   menu.style.top = `${Math.max(padding, top)}px`;
 }
 
 function handleFileExplorerClick(event) {
-  const item = event.target.closest('.file-explorer-item');
+  const item = fileExplorerItemFromPointerEvent(event);
   if (!item) return;
   const path = item.dataset.path || '.';
   const type = item.dataset.type || '';
@@ -2220,7 +2543,7 @@ function handleFileExplorerClick(event) {
 }
 
 function handleFileExplorerContextMenu(event) {
-  const item = event.target.closest('.file-explorer-item');
+  const item = fileExplorerItemFromPointerEvent(event);
   const list = event.currentTarget;
   if (!item && list && !list.contains(event.target)) return;
   showFileExplorerContextMenu(event, item || null);
@@ -2242,7 +2565,7 @@ async function createFileExplorerFile(basePath = FILE_EXPLORER_STATE.contextPath
     return;
   }
   try {
-    const r = await callAgentBackend('create_file', { path, content: '' }, { skipConfirm: true });
+    const r = await callAgentBackend('create_file', { path, content: '' }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '新建文件失败');
     fileExplorerToast('已新建文件');
@@ -2262,7 +2585,7 @@ async function createFileExplorerFolder(basePath = FILE_EXPLORER_STATE.contextPa
     return;
   }
   try {
-    const r = await callAgentBackend('create_dir', { path }, { skipConfirm: true });
+    const r = await callAgentBackend('create_dir', { path }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '新建文件夹失败');
     fileExplorerToast('已新建文件夹');
@@ -2275,7 +2598,7 @@ async function createFileExplorerFolder(basePath = FILE_EXPLORER_STATE.contextPa
 async function switchFileExplorerWorkspace(path = FILE_EXPLORER_STATE.contextPath) {
   const normalizedPath = normalizeExplorerPath(path || FILE_EXPLORER_STATE.path);
   try {
-    const r = await callAgentBackend('set_workspace', { path: normalizedPath }, { skipConfirm: true });
+    const r = await callAgentBackend('set_workspace', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '切换工作区失败');
     if (typeof noteRemoteWorkspaceChanged === 'function') noteRemoteWorkspaceChanged(r.workspace || r.cwd || normalizedPath);
@@ -2377,7 +2700,7 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
       { path: clip.path, target_dir: normalizedTargetDir, dedupe: true },
       undefined,
       undefined,
-      { skipConfirm: true }
+      fileExplorerBackendContext({ skipConfirm: true })
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '粘贴失败');
@@ -2406,7 +2729,7 @@ function downloadFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, type =
   }
   const base = (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765').replace(/\/+$/, '');
   const archive = type === 'dir' ? '&archive=zip' : '';
-  const url = `${base}/preview-file?path=${encodeURIComponent(normalizedPath)}&download=1${archive}`;
+  const url = `${base}/preview-file?path=${encodeURIComponent(normalizedPath)}&download=1${archive}&allow_full_access=1`;
   const a = document.createElement('a');
   a.href = url;
   a.download = type === 'dir' ? `${fileExplorerBasename(normalizedPath) || 'folder'}.zip` : fileExplorerBasename(normalizedPath);
@@ -2429,7 +2752,7 @@ async function renameFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
   }
   if (newPath === normalizedPath) return;
   try {
-    const r = await callAgentBackend('rename_file', { path: normalizedPath, new_path: newPath }, { skipConfirm: true });
+    const r = await callAgentBackend('rename_file', { path: normalizedPath, new_path: newPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '重命名失败');
     if (FILE_EXPLORER_STATE.editorPath === normalizedPath) FILE_EXPLORER_STATE.editorPath = newPath;
@@ -2446,7 +2769,7 @@ async function renameFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
 async function deleteFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
   const normalizedPath = normalizeExplorerPath(path);
   try {
-    const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, { skipConfirm: true });
+    const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
     if (FILE_EXPLORER_STATE.editorPath === normalizedPath) closeFileEditor(true);
@@ -2465,11 +2788,18 @@ function handleFileExplorerContextMenuAction(event) {
   if (!btn) return;
   const path = FILE_EXPLORER_STATE.contextPath;
   const type = FILE_EXPLORER_STATE.contextType;
-  hideFileExplorerContextMenu();
-  if (!path) return;
   const action = btn.dataset.action;
-  if (isFileExplorerRemoteOnlyAction(action) && !requireFileExplorerRemoteAction()) return;
-  if (action === 'open') openFileExplorerPath(path, type);
+  if (action === 'quick-access-menu') return;
+  hideFileExplorerContextMenu();
+  if (action === 'add-quick-access') addCurrentFolderToQuickAccess();
+  else if (action === 'remove-quick-access') removeCurrentFolderFromQuickAccess();
+  else if (action === 'open-quick-access') {
+    const quickPath = btn.dataset.path || '';
+    if (quickPath) loadFileExplorer(quickPath);
+  } else if (action === 'return-sandbox-root') returnFileExplorerToSandboxRoot();
+  else if (!path) return;
+  else if (isFileExplorerRemoteOnlyAction(action) && !requireFileExplorerRemoteAction()) return;
+  else if (action === 'open') openFileExplorerPath(path, type);
   else if (action === 'compile-tex') compileTexFile(path);
   else if (action === 'copy-item') copyFileExplorerItem(path, type);
   else if (action === 'cut-item') cutFileExplorerItem(path, type);

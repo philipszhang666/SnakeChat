@@ -2047,7 +2047,7 @@ function sealInterruptedToolFlows(targetChat) {
     const inner = document.getElementById('messagesInner');
     if (inner) {
       inner
-        .querySelectorAll('.tool-flow-group[data-interrupted="true"]:not(.collapsed), .tool-flow-group[data-interrupted="true"] .tool-call:not(.collapsed)')
+        .querySelectorAll('.tool-flow-group[data-interrupted="true"]:not(.collapsed)')
         .forEach(el => el.classList.add('collapsed'));
     }
   }

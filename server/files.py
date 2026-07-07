@@ -227,9 +227,18 @@ def _new_checkpoint_id():
 
 def _workspace_rel_path(abs_path):
     try:
-        return os.path.relpath(os.path.realpath(abs_path), config.WORKSPACE_ROOT).replace(os.sep, '/')
+        real = os.path.realpath(abs_path)
+        rel = os.path.relpath(real, config.WORKSPACE_ROOT).replace(os.sep, '/')
+        if rel and rel != '..' and not rel.startswith('../') and '/../' not in rel and not os.path.isabs(rel):
+            return rel
     except Exception:
-        return os.path.basename(abs_path)
+        real = os.path.realpath(abs_path)
+    digest = hashlib.sha256(real.encode('utf-8', errors='surrogatepass')).hexdigest()[:16]
+    drive, _ = os.path.splitdrive(real)
+    drive_label = re.sub(r'[^A-Za-z0-9_.-]+', '_', drive.strip(':\\/') or 'root')
+    base = os.path.basename(real.rstrip(os.sep)) or 'path'
+    safe_base = re.sub(r'[^A-Za-z0-9_.-]+', '_', base) or 'path'
+    return f'__outside__/{drive_label}/{digest}_{safe_base}'
 
 
 def _checkpoint_dir_for(checkpoint_id):
