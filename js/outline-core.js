@@ -1220,6 +1220,7 @@ async function callAPIWithOutline(options = {}) {
         const msg = j.choices?.[0]?.message;
         if (msg) {
           assistantMsg = { role: 'assistant', content: msg.content || '' };
+          if (typeof msg.reasoning_content === 'string') assistantMsg.reasoning_content = msg.reasoning_content;
           if (msg.tool_calls?.length) {
             toolCalls = msg.tool_calls;
             assistantMsg.tool_calls = toolCalls;

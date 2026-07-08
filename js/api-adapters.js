@@ -40,6 +40,15 @@ function normalizeOpenAIToolCall(tc) {
   };
 }
 
+function attachOpenAIReasoningContent(outMsg, sourceMsg) {
+  if (!outMsg || outMsg.role !== 'assistant' || !sourceMsg) return outMsg;
+  if (Object.prototype.hasOwnProperty.call(sourceMsg, 'reasoning_content')
+    && typeof sourceMsg.reasoning_content === 'string') {
+    outMsg.reasoning_content = sourceMsg.reasoning_content;
+  }
+  return outMsg;
+}
+
 function appendTextTail(existing, text) {
   const current = typeof existing === 'string' ? existing : '';
   return current ? `${current}\n\n${text}` : text;
@@ -146,9 +155,9 @@ function buildOpenAIMessages(history, options = {}) {
     if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length) {
       const toolCalls = m.tool_calls.map(normalizeOpenAIToolCall).filter(Boolean);
       if (toolCalls.length) {
-        out.push({ role: 'assistant', content: m.content || '', tool_calls: toolCalls });
+        out.push(attachOpenAIReasoningContent({ role: 'assistant', content: m.content || '', tool_calls: toolCalls }, m));
       } else if (m.content) {
-        out.push({ role: 'assistant', content: m.content || '' });
+        out.push(attachOpenAIReasoningContent({ role: 'assistant', content: m.content || '' }, m));
       }
       continue;
     }
@@ -175,7 +184,7 @@ function buildOpenAIMessages(history, options = {}) {
       }
       out.push({ role: m.role, content: parts });
     } else {
-      out.push({ role: m.role, content: textContent });
+      out.push(attachOpenAIReasoningContent({ role: m.role, content: textContent }, m));
     }
   }
   

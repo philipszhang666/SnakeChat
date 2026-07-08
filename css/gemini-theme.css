@@ -1720,6 +1720,44 @@ input::placeholder{
   letter-spacing:-.01em;
 }
 
+.file-details-modal{
+  width:min(640px,94vw);
+  height:min(720px,calc(100vh - 32px));
+  max-height:86vh;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+
+.file-details-modal h2{
+  flex:0 0 auto;
+  margin-bottom:12px;
+}
+
+.file-details-content{
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+  padding-right:2px;
+}
+
+.file-details-section{
+  flex:0 0 auto;
+  min-height:0;
+}
+
+.file-details-footer{
+  flex:0 0 auto;
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid var(--border);
+  background:var(--gemini-surface);
+}
+
 .modal-close,
 .trace-close,
 .lms-panel-close{

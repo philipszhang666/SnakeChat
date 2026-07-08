@@ -332,6 +332,20 @@ function responsesEventKey(j, item) {
   return String(key);
 }
 
+function _assistantHasOutput(text, toolCalls) {
+  return !!String(text || '').trim() || (Array.isArray(toolCalls) && toolCalls.length > 0);
+}
+
+function _assistantMessageHasOutput(msg) {
+  return !!(msg && _assistantHasOutput(msg.content, msg.tool_calls));
+}
+
+function _emptyAssistantResponseError(source) {
+  const err = new Error(`AI 返回了空响应（${source || 'assistant'}）：没有文本，也没有工具调用。可能是网络中断、上游服务异常或兼容接口丢包，已按可重试错误处理。`);
+  err.name = 'EmptyAssistantResponseError';
+  return err;
+}
+
 // ⭐ 单次 fetch 硬超时（毫秒）
 // 即使外部 abort 失灵（某些浏览器/代理在 TCP 阶段卡死），到点也会强行抛错
 const API_FETCH_TIMEOUT_MS = 5 * 60 * 1000;  // 5 分钟
@@ -346,6 +360,7 @@ function _isRetryableError(e, httpStatus, signal) {
   if (!signal && apiCoreState.abortCtrl && apiCoreState.abortCtrl.signal && apiCoreState.abortCtrl.signal.aborted) return false;
   // Token 拿不到这种本地配置错，重试也没用
   if (e && e.name === 'LocalProxyAuthError') return false;
+  if (e && e.name === 'EmptyAssistantResponseError') return true;
   
   // HTTP 状态码：5xx 服务端临时错 + 429 限流 + 408 超时 + 502/503/504 网关错都重试
   if (httpStatus) {
@@ -709,6 +724,9 @@ async function callAPI(roundLimit, options = {}) {
           const txt = await resp.text();
           await handleNonStream(txt, c, lastIdx, ct, { url, method: 'POST', headers: requestHeaders, body });
         }
+        if (!_assistantMessageHasOutput(c.messages[lastIdx])) {
+          throw _emptyAssistantResponseError('主对话');
+        }
         
         succeeded = true;
         break;  // 跳出重试循环
@@ -1011,6 +1029,7 @@ async function handleStream(resp, c, lastIdx, reqCtx) {
   let responsesOutput = null;
   let streamUsage = null;
   let streamFinishedByProtocol = false;
+  let openAIReasoningContent = '';
   let rawAccumulated = '';  // ⭐ 累积原始 SSE 文本，用于响应预览
   
   while (true) {
@@ -1104,6 +1123,9 @@ async function handleStream(resp, c, lastIdx, reqCtx) {
         } else {
           const delta = j.choices?.[0]?.delta;
           if (delta) {
+            if (delta.reasoning_content) {
+              openAIReasoningContent += delta.reasoning_content;
+            }
             if (delta.content) {
               // ⭐ 立即标记首字时间
               if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
@@ -1139,6 +1161,7 @@ async function handleStream(resp, c, lastIdx, reqCtx) {
   
   const openaiTcs = Object.values(tcMap);
   if (openaiTcs.length) c.messages[lastIdx].tool_calls = openaiTcs;
+  if (openAIReasoningContent) c.messages[lastIdx].reasoning_content = openAIReasoningContent;
   
   const anthropicTcs = Object.values(anthropicToolBlocks);
   if (anthropicTcs.length) {
@@ -1274,9 +1297,10 @@ async function handleNonStream(txt, c, lastIdx, ct, reqCtx) {
     const msg = j.choices?.[0]?.message;
     if (msg) {
       c.messages[lastIdx].content = msg.content || '';
+      if (typeof msg.reasoning_content === 'string') c.messages[lastIdx].reasoning_content = msg.reasoning_content;
       if (msg.tool_calls?.length) c.messages[lastIdx].tool_calls = msg.tool_calls;
     } else {
-      c.messages[lastIdx].content = '(无响应)';
+      c.messages[lastIdx].content = '';
     }
     if (j.usage && typeof recordUsageFromResponse === 'function') {
       recordUsageFromResponse(c, j.usage, { model: reqCtx?.body?.model });
@@ -1450,6 +1474,9 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         } else {
           content = j.choices?.[0]?.message?.content || '';
         }
+        if (!String(content || '').trim()) {
+          throw _emptyAssistantResponseError('辅助调用');
+        }
         return finalizePrivacyAuxiliaryText(content, body, 'helper');
       } catch (attemptErr) {
         lastErr = attemptErr;
@@ -1578,6 +1605,10 @@ async function runAgentLoop({
   // 后者用于跨越 abortCtrl 重建边界的"软停止"（例如用户在等待 API 时点了暂停）
   const _isStopped = typeof isStopped === 'function' ? isStopped : () => !!apiCoreState.stopRequested;
   const _isAborted = () => (signal && signal.aborted) || _isStopped();
+  const maxAttempts = retryMaxAttemptsToTotalAttempts(s.retryMaxAttempts);
+  const maxAttemptsLabel = retryTotalAttemptsLabel(maxAttempts);
+  const baseDelay = Math.max(100, parseInt(s.retryBaseDelayMs) || 1000);
+  const emptyResponseAttemptsByRound = {};
   
   for (let round = 0; round < toolRoundLimit + 2; round++) {
     // 中断检查
@@ -1693,6 +1724,7 @@ async function runAgentLoop({
     let assistantText = '';
     let assistantToolCalls = [];   // [{id, name, arguments(string)}]
     let assistantResponsesOutput = null;
+    let assistantReasoningContent = '';
     let usage = null;
     
     const ct = resp.headers.get('content-type') || '';
@@ -1805,6 +1837,9 @@ async function runAgentLoop({
             } else {
               const delta = j.choices?.[0]?.delta;
               if (delta) {
+                if (delta.reasoning_content) {
+                  assistantReasoningContent += delta.reasoning_content;
+                }
                 if (delta.content) {
                   assistantText += delta.content;
                   _emit({ type: 'text_delta', text: delta.content });
@@ -1886,6 +1921,7 @@ async function runAgentLoop({
         const msg = j.choices?.[0]?.message;
         if (msg) {
           assistantText = msg.content || '';
+          if (typeof msg.reasoning_content === 'string') assistantReasoningContent = msg.reasoning_content;
           if (assistantText) _emit({ type: 'text_delta', text: assistantText });
           if (msg.tool_calls?.length) {
             assistantToolCalls = msg.tool_calls.map(tc => ({
@@ -1923,8 +1959,31 @@ async function runAgentLoop({
       assistantText = privacyGuardFinalizeText(assistantText, { source: 'agent-loop', context: privacyContext });
     }
 
+    if (!_assistantHasOutput(assistantText, assistantToolCalls)) {
+      const emptyAttempt = (emptyResponseAttemptsByRound[round] || 0) + 1;
+      emptyResponseAttemptsByRound[round] = emptyAttempt;
+      const remaining = maxAttempts - emptyAttempt;
+      const err = _emptyAssistantResponseError('隔离工具循环');
+      if (remaining > 0) {
+        const wait = _retryDelay(emptyAttempt, null, baseDelay);
+        console.warn(`[runAgentLoop] 第 ${emptyAttempt}/${maxAttemptsLabel} 次收到空响应，${wait}ms 后重试同一轮`);
+        _emit({
+          type: 'retry',
+          round: round + 1,
+          attempt: emptyAttempt,
+          wait,
+          reason: err.message
+        });
+        await _sleepAbortable(wait, signal);
+        round -= 1;
+        continue;
+      }
+      throw err;
+    }
+
     // 把 assistant 消息加入内部 messages
     const assistantMsg = { role: 'assistant', content: assistantText };
+    if (assistantReasoningContent) assistantMsg.reasoning_content = assistantReasoningContent;
     if (assistantResponsesOutput) assistantMsg._responsesOutput = assistantResponsesOutput;
     if (assistantToolCalls.length) {
       assistantMsg.tool_calls = assistantToolCalls.map(tc => ({
