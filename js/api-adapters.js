@@ -40,6 +40,76 @@ function normalizeOpenAIToolCall(tc) {
   };
 }
 
+function appendTextTail(existing, text) {
+  const current = typeof existing === 'string' ? existing : '';
+  return current ? `${current}\n\n${text}` : text;
+}
+
+function appendTailTextPart(parts, text, type = 'text') {
+  const list = Array.isArray(parts) ? parts : [];
+  const last = list[list.length - 1];
+  if (last && last.type === type) {
+    last.text = appendTextTail(last.text, text);
+  } else {
+    list.push({ type, text });
+  }
+  return list;
+}
+
+function appendOpenAITailUserPrompt(messages, prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return messages;
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'user') {
+    if (typeof last.content === 'string') {
+      last.content = appendTextTail(last.content, text);
+    } else if (Array.isArray(last.content)) {
+      last.content = appendTailTextPart(last.content, text, 'text');
+    } else {
+      last.content = text;
+    }
+  } else {
+    messages.push({ role: 'user', content: text });
+  }
+  return messages;
+}
+
+function appendAnthropicTailUserPrompt(messages, prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return messages;
+  const last = messages[messages.length - 1];
+  if (last && last.role === 'user') {
+    if (typeof last.content === 'string') {
+      last.content = appendTextTail(last.content, text);
+    } else if (Array.isArray(last.content)) {
+      last.content = appendTailTextPart(last.content, text, 'text');
+    } else {
+      last.content = text;
+    }
+  } else {
+    messages.push({ role: 'user', content: text });
+  }
+  return messages;
+}
+
+function appendResponsesTailUserPrompt(input, prompt) {
+  const text = String(prompt || '').trim();
+  if (!text) return input;
+  const last = input[input.length - 1];
+  if (last && last.role === 'user') {
+    if (typeof last.content === 'string') {
+      last.content = appendTextTail(last.content, text);
+    } else if (Array.isArray(last.content)) {
+      last.content = appendTailTextPart(last.content, text, 'input_text');
+    } else {
+      last.content = text;
+    }
+  } else {
+    input.push({ role: 'user', content: text });
+  }
+  return input;
+}
+
 function buildOpenAIMessages(history, options = {}) {
   history = (history || []).filter(m =>
     m && !m._hiddenFromAI && !m._textToolCallSuppressed && (!m._textToolCallRecovery || options.includeTextToolCallRecovery)
@@ -51,9 +121,6 @@ function buildOpenAIMessages(history, options = {}) {
   let systemPrompt = typeof getEffectiveSystemPrompt === 'function'
     ? getEffectiveSystemPrompt()
     : apiAdapterState.settings.systemPrompt;
-  if (options.extraSystemPrompt) {
-    systemPrompt = [systemPrompt, options.extraSystemPrompt].filter(Boolean).join('\n\n');
-  }
   if (typeof privacyGuardSanitizeSystemText === 'function') {
     systemPrompt = privacyGuardSanitizeSystemText(systemPrompt, { includeResponseGuard: options.includeResponseGuard !== false });
   }
@@ -112,6 +179,9 @@ function buildOpenAIMessages(history, options = {}) {
     }
   }
   
+  // Keep transient prompts at the tail so early prompt-cache prefixes remain stable.
+  appendOpenAITailUserPrompt(out, options.extraSystemPrompt);
+
   // ⭐ 关键修复：确保每个 assistant(tool_calls) 后面都有对应的 tool 消息
   // 否则 DeepSeek/OpenAI 会报 400："An assistant message with 'tool_calls' must be followed by tool messages"
   return fixOpenAIMessageSequence(out);
@@ -240,7 +310,9 @@ function buildOpenAIResponsesInput(history, options = {}) {
       out.push({ role: m.role, content: textContent });
     }
   }
-  
+
+  appendResponsesTailUserPrompt(out, options.extraSystemPrompt);
+
   return fixOpenAIResponsesInputSequence(out);
 }
 
@@ -384,7 +456,7 @@ function buildAnthropicMessages(history, options = {}) {
     }
   }
   
-  // ⭐ 第二步：把摘要 prepend 到第一条"纯 user"消息内容前（保持 system 字段稳定 → 命中 prompt cache）
+  // ⭐ 第二步：把摘要 prepend 到第一条"纯 user"消息内容前
   if (summaryText) {
     const summaryBlock = `【对话历史摘要】\n${summaryText}\n\n---\n\n`;
     // ⭐ 关键修复：必须找"不含 tool_result 的 user 消息"
@@ -416,8 +488,11 @@ function buildAnthropicMessages(history, options = {}) {
       out.unshift({ role: 'user', content: summaryBlock });
     }
   }
-  
-  // ⭐ 第三步：修复格式（自动补全缺失的 tool_result）
+
+  // Extra transient prompts are appended at the tail; do not disturb cached prefixes.
+  appendAnthropicTailUserPrompt(out, options.extraSystemPrompt);
+
+  // ⭐ 第四步：修复格式（自动补全缺失的 tool_result）
   return fixAnthropicMessageSequence(out);
 }
 

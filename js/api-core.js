@@ -74,9 +74,8 @@ function _buildRequestBodyInternal(history, modelOverride, streamOverride, optio
   let systemContent = typeof getEffectiveSystemPrompt === 'function'
     ? getEffectiveSystemPrompt()
     : (s.systemPrompt || '');
-  if (options.extraSystemPrompt) {
-    systemContent = [systemContent, options.extraSystemPrompt].filter(Boolean).join('\n\n');
-  }
+  // ⭐ extraSystemPrompt（如工具预算提示）不再拼入 system，改为各适配器追加到尾部 user 提示中
+  // 保持 system 和早期 messages 前缀稳定，最大化 prompt cache 命中率
   const usesTopLevelSystem = s.apiFormat === 'anthropic'
     || s.apiFormat === 'responses'
     || !!(s.useCustomJson && s.jsonTemplate && s.jsonTemplate.trim());
@@ -513,7 +512,18 @@ async function callAPI(roundLimit, options = {}) {
   const toolBudgetLimit = Math.max(0, parseInt(s.maxToolRounds, 10) || 0);
   const toolRoundsUsed = Math.max(0, toolBudgetLimit - roundLimit);
   const mainToolsAllowedThisRound = taskUseTools && roundLimit > 0;
-  const shouldInjectMainToolBudgetPrompt = taskUseTools || !!options.textToolCallRecoveryUsed;
+  const mainToolBudgetRemaining = mainToolsAllowedThisRound
+    ? Math.max(0, toolBudgetLimit - toolRoundsUsed)
+    : 0;
+  const lowToolBudgetThreshold = 3;
+  const isLowToolBudgetThresholdRound = mainToolsAllowedThisRound
+    && mainToolBudgetRemaining > 1
+    && mainToolBudgetRemaining <= lowToolBudgetThreshold
+    && (toolRoundsUsed === 0 || mainToolBudgetRemaining === lowToolBudgetThreshold);
+  const isLastToolBudgetRound = mainToolsAllowedThisRound && mainToolBudgetRemaining === 1;
+  const shouldInjectMainToolBudgetPrompt = !!options.textToolCallRecoveryUsed
+    || (taskUseTools && (!mainToolsAllowedThisRound || isLowToolBudgetThresholdRound || isLastToolBudgetRound));
+  const shouldCheckMainTextToolCallRecovery = taskUseTools || !!options.textToolCallRecoveryUsed;
   const mainToolBudgetPromptParts = [];
   if (shouldInjectMainToolBudgetPrompt) {
     mainToolBudgetPromptParts.push(buildAgentLoopToolBudgetPrompt({
@@ -740,7 +750,7 @@ async function callAPI(roundLimit, options = {}) {
     }
     
     const msg = c.messages[lastIdx];
-    if (msg && shouldInjectMainToolBudgetPrompt && !msg.tool_calls?.length && agentLoopLooksLikeTextToolCall(msg.content)) {
+    if (msg && shouldCheckMainTextToolCallRecovery && !msg.tool_calls?.length && agentLoopLooksLikeTextToolCall(msg.content)) {
       if (!options.textToolCallRecoveryUsed) {
         if (typeof cancelPendingStreamFlush === 'function') cancelPendingStreamFlush();
         msg._hiddenFromUI = true;
@@ -1594,22 +1604,31 @@ async function runAgentLoop({
     // ----- 构造请求 -----
     // 用现有适配器把内部 messages 转成 API 格式
     const buildLoopBody = () => {
-      const apiMessages = s.apiFormat === 'anthropic'
-        ? buildAnthropicMessages(messages)
-        : (s.apiFormat === 'responses' ? buildOpenAIResponsesInput(messages) : buildOpenAIMessages(messages));
       const allowToolsThisRound = hasUsableTools && !forceFinalNoTools && round < toolRoundLimit;
-      const rawLoopSystemPrompt = [
-        effectiveSystemPrompt,
-        buildAgentLoopToolBudgetPrompt({
-          hasTools: hasUsableTools && !forceFinalNoTools,
-          round,
-          maxRounds: toolRoundLimit,
-          forceFinal: forceFinalNoTools
-        })
-      ].filter(Boolean).join('\n\n');
+      const loopToolBudgetRemaining = allowToolsThisRound ? Math.max(0, toolRoundLimit - round) : 0;
+      const lowLoopToolBudgetThreshold = 3;
+      const isLowLoopToolBudgetThresholdRound = allowToolsThisRound
+        && loopToolBudgetRemaining > 1
+        && loopToolBudgetRemaining <= lowLoopToolBudgetThreshold
+        && (round === 0 || loopToolBudgetRemaining === lowLoopToolBudgetThreshold);
+      const isLastLoopToolBudgetRound = allowToolsThisRound && loopToolBudgetRemaining === 1;
+      const shouldInjectLoopToolBudgetPrompt = forceFinalNoTools
+        || (hasUsableTools && (!allowToolsThisRound || isLowLoopToolBudgetThresholdRound || isLastLoopToolBudgetRound));
+      const loopToolBudgetPrompt = shouldInjectLoopToolBudgetPrompt
+        ? buildAgentLoopToolBudgetPrompt({
+            hasTools: hasUsableTools && !forceFinalNoTools,
+            round,
+            maxRounds: toolRoundLimit,
+            forceFinal: forceFinalNoTools || !allowToolsThisRound
+          })
+        : '';
+      const adapterOptions = loopToolBudgetPrompt ? { extraSystemPrompt: loopToolBudgetPrompt } : undefined;
+      const apiMessages = s.apiFormat === 'anthropic'
+        ? buildAnthropicMessages(messages, adapterOptions)
+        : (s.apiFormat === 'responses' ? buildOpenAIResponsesInput(messages, adapterOptions) : buildOpenAIMessages(messages, adapterOptions));
       const loopSystemPrompt = typeof privacyGuardSanitizeSystemText === 'function'
-        ? privacyGuardSanitizeSystemText(rawLoopSystemPrompt, { includeResponseGuard: true })
-        : rawLoopSystemPrompt;
+        ? privacyGuardSanitizeSystemText(effectiveSystemPrompt, { includeResponseGuard: true })
+        : effectiveSystemPrompt;
       let nextBody;
       if (s.apiFormat === 'anthropic') {
         nextBody = {
