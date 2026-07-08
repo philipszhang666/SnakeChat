@@ -1092,6 +1092,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="rename">重命名</button>
       <button type="button" data-action="copy-path">复制相对路径</button>
       <button type="button" data-action="copy-absolute-path">复制绝对路径</button>
+      <button type="button" data-action="details">详情</button>
       <button type="button" data-action="delete">删除</button>
     </div>
     <div data-menu-section="blank">
@@ -1101,7 +1102,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="add-quick-access" data-add-quick-access-only>添加到快速访问</button>
       <button type="button" data-action="remove-quick-access" data-current-quick-access-only hidden>移出快速访问</button>
       <div class="file-explorer-menu-submenu" data-quick-access-wrapper hidden>
-        <button class="file-explorer-submenu-trigger" type="button" data-action="quick-access-menu" aria-haspopup="true">
+        <button class="file-explorer-submenu-trigger" type="button" aria-haspopup="true" tabindex="-1">
           <span>快速访问</span>
           <span class="file-explorer-submenu-arrow">›</span>
         </button>
@@ -1112,6 +1113,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="new-folder">新建文件夹</button>
       <button type="button" data-action="copy-path">复制相对路径</button>
       <button type="button" data-action="copy-absolute-path">复制绝对路径</button>
+      <button type="button" data-action="details">详情</button>
       <button type="button" data-action="switch-workspace">切换工作区</button>
     </div>
   `;
@@ -2639,6 +2641,231 @@ async function copyFileExplorerAbsolutePath(path = FILE_EXPLORER_STATE.contextPa
   }
 }
 
+function closeFileExplorerDetails() {
+  const modal = document.getElementById('fileExplorerDetailsModal');
+  if (modal) modal.classList.remove('show');
+}
+
+function ensureFileExplorerDetailsModal() {
+  let modal = document.getElementById('fileExplorerDetailsModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'fileExplorerDetailsModal';
+  modal.className = 'modal-mask file-details-mask';
+  modal.innerHTML = `
+    <div class="modal file-details-modal">
+      <h2>
+        <span>详情</span>
+        <button class="modal-close" type="button" data-file-details-close>×</button>
+      </h2>
+      <div id="fileExplorerDetailsContent" class="file-details-content">
+        <div class="file-details-empty">正在读取详情...</div>
+      </div>
+      <div class="modal-footer file-details-footer">
+        <button class="btn" type="button" data-file-details-close>关闭</button>
+      </div>
+    </div>
+  `;
+  modal.addEventListener('click', event => {
+    if (event.target === modal || event.target.closest('[data-file-details-close]')) {
+      closeFileExplorerDetails();
+    }
+  });
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function fileExplorerPlatformLabel(platform) {
+  const value = String(platform || '').toLowerCase();
+  if (value === 'windows') return 'Windows';
+  if (value === 'linux') return 'Linux';
+  if (value === 'darwin') return 'macOS';
+  return value || '未知';
+}
+
+function fileExplorerKindLabel(kind, fallbackType = '') {
+  const value = String(kind || fallbackType || '').toLowerCase();
+  const labels = {
+    dir: '文件夹',
+    file: '文件',
+    symlink: '符号链接',
+    fifo: '命名管道',
+    socket: 'Socket',
+    char_device: '字符设备',
+    block_device: '块设备',
+    other: '其他'
+  };
+  return labels[value] || value || '未知';
+}
+
+function fileExplorerBooleanLabel(value) {
+  return value ? '是' : '否';
+}
+
+function fileExplorerHasDetailValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function formatFileExplorerDetailBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  const text = unit === 0 ? String(bytes) : size.toFixed(unit === 1 ? 1 : 2);
+  return unit === 0 ? `${text} ${units[unit]}` : `${text} ${units[unit]} (${bytes} B)`;
+}
+
+function formatFileExplorerDetailTime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+  try {
+    return new Date(seconds * 1000).toLocaleString('zh-CN', { hour12: false });
+  } catch (_) {
+    return '';
+  }
+}
+
+function fileExplorerDetailAttrsText(attrs) {
+  if (!attrs || typeof attrs !== 'object') return '';
+  const flags = [];
+  if (attrs.read_only) flags.push('只读');
+  if (attrs.hidden) flags.push('隐藏');
+  if (attrs.system) flags.push('系统');
+  if (attrs.archive) flags.push('存档');
+  if (attrs.temporary) flags.push('临时');
+  if (attrs.compressed) flags.push('压缩');
+  if (attrs.encrypted) flags.push('加密');
+  return flags.length ? flags.join('、') : '普通';
+}
+
+function fileExplorerDetailRowsHtml(rows) {
+  return rows
+    .filter(row => row && fileExplorerHasDetailValue(row.value))
+    .map(row => {
+      const value = String(row.value);
+      const valueHtml = row.code
+        ? `<code title="${escapeHtml(value)}">${escapeHtml(value)}</code>`
+        : escapeHtml(value);
+      return `
+        <div class="file-details-row">
+          <div class="file-details-label">${escapeHtml(row.label)}</div>
+          <div class="file-details-value">${valueHtml}</div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function fileExplorerDetailSectionHtml(title, rows) {
+  const body = fileExplorerDetailRowsHtml(rows);
+  if (!body) return '';
+  return `
+    <section class="file-details-section">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="file-details-grid">${body}</div>
+    </section>
+  `;
+}
+
+function renderFileExplorerDetails(info) {
+  const modal = ensureFileExplorerDetailsModal();
+  const content = modal.querySelector('#fileExplorerDetailsContent');
+  if (!content) return;
+  const platform = String(info.platform || '').toLowerCase();
+  const isWindows = platform === 'windows';
+  const attrs = info.windows_attributes && typeof info.windows_attributes === 'object' ? info.windows_attributes : null;
+  const name = info.name || fileExplorerBasename(info.path || FILE_EXPLORER_STATE.contextPath);
+  const typeLabel = fileExplorerKindLabel(info.kind, info.type);
+  const absolutePath = info.absolute_path || info.path || '';
+  const realPath = info.real_path && info.real_path !== absolutePath ? info.real_path : '';
+  const owner = info.user ? `${info.user} (${info.uid})` : info.uid;
+  const group = info.group ? `${info.group} (${info.gid})` : info.gid;
+  const platformSectionTitle = isWindows ? 'Windows 详情' : (platform === 'linux' ? 'Linux 详情' : `${fileExplorerPlatformLabel(platform)} 详情`);
+
+  const commonRows = [
+    { label: '名称', value: name },
+    { label: '类型', value: typeLabel },
+    { label: '平台', value: fileExplorerPlatformLabel(platform) },
+    { label: '绝对路径', value: absolutePath, code: true },
+    { label: '真实路径', value: realPath, code: true },
+    { label: '所在目录', value: info.parent, code: true },
+    { label: '扩展名', value: info.extension ? `.${info.extension}` : '' },
+    { label: '大小', value: formatFileExplorerDetailBytes(info.size) },
+    { label: '修改时间', value: formatFileExplorerDetailTime(info.modified) },
+    { label: '访问时间', value: formatFileExplorerDetailTime(info.accessed) }
+  ];
+
+  const platformRows = isWindows ? [
+    { label: '创建时间', value: formatFileExplorerDetailTime(info.created) },
+    { label: '所在盘符', value: info.drive, code: true },
+    { label: '文件属性', value: fileExplorerDetailAttrsText(attrs) },
+    { label: '只读', value: fileExplorerBooleanLabel(attrs && fileExplorerHasDetailValue(attrs.read_only) ? attrs.read_only : !info.writable) },
+    { label: '隐藏', value: attrs && fileExplorerHasDetailValue(attrs.hidden) ? fileExplorerBooleanLabel(attrs.hidden) : '' },
+    { label: '系统', value: attrs && fileExplorerHasDetailValue(attrs.system) ? fileExplorerBooleanLabel(attrs.system) : '' },
+    { label: '存档', value: attrs && fileExplorerHasDetailValue(attrs.archive) ? fileExplorerBooleanLabel(attrs.archive) : '' },
+    { label: '可读', value: fileExplorerBooleanLabel(info.readable) },
+    { label: '可写', value: fileExplorerBooleanLabel(info.writable) },
+    { label: '可执行', value: fileExplorerBooleanLabel(info.executable) }
+  ] : [
+    { label: '权限', value: info.permissions },
+    { label: '八进制权限', value: info.mode_octal },
+    { label: '所有者', value: owner },
+    { label: '用户组', value: group },
+    { label: 'Inode', value: info.inode },
+    { label: '设备号', value: info.device },
+    { label: '硬链接数', value: info.hard_links },
+    { label: '状态变更时间', value: formatFileExplorerDetailTime(info.changed) },
+    { label: '符号链接目标', value: info.symlink_target, code: true },
+    { label: '链接本身大小', value: info.is_symlink ? formatFileExplorerDetailBytes(info.link_size) : '' },
+    { label: '可读', value: fileExplorerBooleanLabel(info.readable) },
+    { label: '可写', value: fileExplorerBooleanLabel(info.writable) },
+    { label: '可执行', value: fileExplorerBooleanLabel(info.executable) }
+  ];
+
+  content.innerHTML = `
+    <div class="file-details-head">
+      <div class="file-details-type">${escapeHtml(typeLabel)} · ${escapeHtml(fileExplorerPlatformLabel(platform))}</div>
+      <div class="file-details-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+      ${absolutePath ? `<code title="${escapeHtml(absolutePath)}">${escapeHtml(absolutePath)}</code>` : ''}
+    </div>
+    ${fileExplorerDetailSectionHtml('基础信息', commonRows)}
+    ${fileExplorerDetailSectionHtml(platformSectionTitle, platformRows)}
+  `;
+}
+
+async function showFileExplorerDetails(path = FILE_EXPLORER_STATE.contextPath) {
+  const normalizedPath = normalizeExplorerPath(path || FILE_EXPLORER_STATE.path);
+  const modal = ensureFileExplorerDetailsModal();
+  const content = modal.querySelector('#fileExplorerDetailsContent');
+  if (content) {
+    content.innerHTML = `
+      <div class="file-details-head">
+        <div class="file-details-type">正在读取详情</div>
+        <div class="file-details-name" title="${escapeHtml(normalizedPath)}">${escapeHtml(fileExplorerBasename(normalizedPath) || normalizedPath)}</div>
+        <code title="${escapeHtml(normalizedPath)}">${escapeHtml(normalizedPath)}</code>
+      </div>
+      <div class="file-details-empty">正在读取文件系统信息...</div>
+    `;
+  }
+  modal.classList.add('show');
+  try {
+    if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
+    const r = await callAgentBackend('file_info', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    if (typeof r === 'string') throw new Error(r);
+    if (!r || !r.ok) throw new Error((r && r.error) || '读取详情失败');
+    renderFileExplorerDetails(r);
+  } catch (e) {
+    if (content) {
+      content.innerHTML = `<div class="file-details-empty error">${escapeHtml(e.message || String(e))}</div>`;
+    }
+  }
+}
+
 function setFileExplorerClipboard(path, type, mode = 'copy') {
   const normalizedPath = normalizeExplorerPath(path);
   if (!normalizedPath) return false;
@@ -2789,7 +3016,6 @@ function handleFileExplorerContextMenuAction(event) {
   const path = FILE_EXPLORER_STATE.contextPath;
   const type = FILE_EXPLORER_STATE.contextType;
   const action = btn.dataset.action;
-  if (action === 'quick-access-menu') return;
   hideFileExplorerContextMenu();
   if (action === 'add-quick-access') addCurrentFolderToQuickAccess();
   else if (action === 'remove-quick-access') removeCurrentFolderFromQuickAccess();
@@ -2810,6 +3036,7 @@ function handleFileExplorerContextMenuAction(event) {
   else if (action === 'rename') renameFileExplorerPath(path);
   else if (action === 'copy-path') copyFileExplorerRelativePath(path);
   else if (action === 'copy-absolute-path') copyFileExplorerAbsolutePath(path);
+  else if (action === 'details') showFileExplorerDetails(path);
   else if (action === 'delete') deleteFileExplorerPath(path);
   else if (action === 'new-file') createFileExplorerFile(path);
   else if (action === 'new-folder') createFileExplorerFolder(path);
@@ -2829,7 +3056,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!event.target.closest('#fileExplorerContextMenu')) hideFileExplorerContextMenu();
   });
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape') hideFileExplorerContextMenu();
+    if (event.key === 'Escape') {
+      hideFileExplorerContextMenu();
+      closeFileExplorerDetails();
+    }
   });
   window.addEventListener('resize', enforceInlineFileResponsive);
   bindInlineFileResizer();

@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -100,6 +101,76 @@ def _dedupe_copy_target(path, source_is_dir):
     if not os.path.exists(path):
         return path
     return _copy_candidate_path(path, source_is_dir)
+
+
+def _file_info_platform():
+    if sys.platform.startswith('win'):
+        return 'windows'
+    if sys.platform.startswith('linux'):
+        return 'linux'
+    if sys.platform == 'darwin':
+        return 'darwin'
+    return sys.platform or os.name
+
+
+def _file_info_kind(mode):
+    if stat.S_ISDIR(mode):
+        return 'dir'
+    if stat.S_ISREG(mode):
+        return 'file'
+    if stat.S_ISLNK(mode):
+        return 'symlink'
+    if stat.S_ISFIFO(mode):
+        return 'fifo'
+    if stat.S_ISSOCK(mode):
+        return 'socket'
+    if stat.S_ISCHR(mode):
+        return 'char_device'
+    if stat.S_ISBLK(mode):
+        return 'block_device'
+    return 'other'
+
+
+def _posix_user_name(uid):
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return ''
+
+
+def _posix_group_name(gid):
+    try:
+        import grp
+        return grp.getgrgid(gid).gr_name
+    except Exception:
+        return ''
+
+
+def _windows_file_attributes(path, st):
+    attrs = getattr(st, 'st_file_attributes', None)
+    if attrs is None and os.name == 'nt':
+        try:
+            import ctypes
+            attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+            if attrs == 0xFFFFFFFF:
+                attrs = None
+        except Exception:
+            attrs = None
+    if attrs is None:
+        return None
+    attrs = int(attrs)
+    return {
+        'raw': attrs,
+        'read_only': bool(attrs & 0x0001),
+        'hidden': bool(attrs & 0x0002),
+        'system': bool(attrs & 0x0004),
+        'directory': bool(attrs & 0x0010),
+        'archive': bool(attrs & 0x0020),
+        'temporary': bool(attrs & 0x0100),
+        'compressed': bool(attrs & 0x0800),
+        'encrypted': bool(attrs & 0x4000),
+    }
 
 
 def _parse_hunk_header(line):
@@ -1369,13 +1440,68 @@ class FilesMixin:
             return self.response.json(200, {'ok': False, 'error': '路径不存在'})
         try:
             st = os.stat(path)
-            self.response.json(200, {
+            lst = os.lstat(path)
+            mode_bits = stat.S_IMODE(lst.st_mode)
+            platform_name = _file_info_platform()
+            kind = _file_info_kind(lst.st_mode)
+            name = os.path.basename(os.path.normpath(path)) or path
+            parent = os.path.dirname(os.path.abspath(path))
+            _, ext = os.path.splitext(name)
+            created = getattr(st, 'st_birthtime', None)
+            if created is None and platform_name == 'windows':
+                created = st.st_ctime
+            symlink_target = ''
+            if os.path.islink(path):
+                try:
+                    symlink_target = os.readlink(path)
+                except OSError:
+                    symlink_target = ''
+
+            payload = {
                 'ok': True,
+                # Keep the original fields for existing callers.
                 'path': path,
                 'type': 'dir' if os.path.isdir(path) else 'file',
                 'size': st.st_size,
-                'modified': st.st_mtime
-            })
+                'modified': st.st_mtime,
+                'platform': platform_name,
+                'name': name,
+                'parent': parent,
+                'absolute_path': os.path.abspath(path),
+                'real_path': os.path.realpath(path),
+                'kind': kind,
+                'extension': ext[1:] if ext else '',
+                'is_dir': os.path.isdir(path),
+                'is_file': os.path.isfile(path),
+                'is_symlink': os.path.islink(path),
+                'symlink_target': symlink_target,
+                'link_size': lst.st_size,
+                'accessed': st.st_atime,
+                'changed': st.st_ctime,
+                'created': created,
+                'mode': int(lst.st_mode),
+                'mode_octal': format(mode_bits, '04o'),
+                'permissions': stat.filemode(lst.st_mode),
+                'readable': os.access(path, os.R_OK),
+                'writable': os.access(path, os.W_OK),
+                'executable': os.access(path, os.X_OK),
+                'inode': getattr(lst, 'st_ino', None),
+                'device': getattr(lst, 'st_dev', None),
+                'hard_links': getattr(lst, 'st_nlink', None),
+                'uid': getattr(lst, 'st_uid', None),
+                'gid': getattr(lst, 'st_gid', None),
+            }
+
+            if platform_name == 'windows':
+                payload['drive'] = os.path.splitdrive(os.path.abspath(path))[0]
+                payload['windows_attributes'] = _windows_file_attributes(path, st)
+            else:
+                uid = payload.get('uid')
+                gid = payload.get('gid')
+                payload['user'] = _posix_user_name(uid) if uid is not None else ''
+                payload['group'] = _posix_group_name(gid) if gid is not None else ''
+
+            self.response.json(200, payload)
         except Exception as e:
             self.response.json(200, {'ok': False, 'error': str(e)})
 

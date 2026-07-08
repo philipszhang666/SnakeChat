@@ -720,7 +720,14 @@ function renderDialogExplorerItems(dm) {
 
   // Bind area-level events
   area.oncontextmenu = function(e) {
-    if (e.target === area || e.target.classList.contains('dialog-explorer-empty')) {
+    const item = e.target && e.target.closest
+      ? e.target.closest('.dialog-explorer-item[data-explorer-type][data-explorer-id]')
+      : null;
+    if (item && area.contains(item)) {
+      return dialogExplorerContextMenu(e, item.dataset.explorerType || '', item.dataset.explorerId || '');
+    }
+    const isEmpty = e.target && e.target.classList && e.target.classList.contains('dialog-explorer-empty');
+    if (e.target === area || isEmpty) {
       return dialogExplorerContextMenu(e, 'area', '');
     }
   };
@@ -904,6 +911,10 @@ let _dialogExplorerContextTarget = null;
 function dialogExplorerContextMenu(e, type, id) {
   e.preventDefault();
   e.stopPropagation();
+  if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+  document.removeEventListener('click', dialogExplorerHideContext);
+  document.removeEventListener('contextmenu', dialogExplorerHideContext);
+  document.removeEventListener('scroll', dialogExplorerHideContext, true);
   _dialogExplorerContextTarget = { type, id };
   const menu = document.getElementById('dialogExplorerContextMenu');
   if (!menu) return false;
