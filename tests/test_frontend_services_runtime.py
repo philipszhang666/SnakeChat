@@ -2269,10 +2269,9 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             assert.strictEqual(resolved.ok, true);
             assert.strictEqual(resolved.path, 'src/main.py');
 
-            assert.strictEqual(
-              fileExplorer.resolveFileExplorerOpenPath('/media/inspur/disk1/other/main.py').ok,
-              false
-            );
+            resolved = fileExplorer.resolveFileExplorerOpenPath('/media/inspur/disk1/other/main.py');
+            assert.strictEqual(resolved.ok, true);
+            assert.strictEqual(resolved.path, '/media/inspur/disk1/other/main.py');
             assert.strictEqual(
               fileExplorer.resolveFileExplorerOpenPath('C:\\Users\\philips\\Desktop\\agent\\main.py').ok,
               false

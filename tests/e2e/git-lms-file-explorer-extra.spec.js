@@ -58,7 +58,13 @@ async function openFileFromExplorer(page, name) {
 }
 
 async function openFileContextMenu(page, name) {
-  await page.locator('.file-explorer-item').filter({ hasText: name }).click({ button: 'right' });
+  const nameLocator = page
+    .locator('.file-explorer-item')
+    .filter({ hasText: name })
+    .locator('.file-explorer-name');
+  const box = await nameLocator.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box.x + 4, box.y + box.height / 2, { button: 'right' });
   await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
 }
 

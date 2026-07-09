@@ -238,6 +238,10 @@ function renderUserMsgActions(idx) {
     </div>`;
 }
 
+function renderUserPlainTextContent(text) {
+  return escapeHtml(String(text || ''));
+}
+
 function editResendUserMsg(idx) {
   const c = chatCurrentChat();
   if (!c || !c.messages[idx] || c.messages[idx].role !== 'user') return;
@@ -1031,16 +1035,20 @@ function updateMsgContentNode(idx, targetChat, options = {}) {
   if (!wrap) return false;
 
   const shouldFollow = (typeof isNearBottom !== 'function' || isNearBottom());
-  if (!m._firstTokenAt && (m.content || (m.tool_calls && m.tool_calls.length))) {
+  if (m.role !== 'user' && !m._firstTokenAt && (m.content || (m.tool_calls && m.tool_calls.length))) {
     m._firstTokenAt = Date.now();
   }
-  if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(m);
+  if (m.role !== 'user' && typeof markMsgTimerActivity === 'function') markMsgTimerActivity(m);
 
-  const isStreaming = !m._endTime && options.streaming !== false;
-  const renderFn = isStreaming && typeof renderMarkdownStreaming === 'function'
-    ? renderMarkdownStreaming
-    : renderMarkdown;
-  wrap.innerHTML = renderFn(m.content || '') + (isStreaming ? '<span class="cursor"></span>' : '');
+  const isStreaming = m.role !== 'user' && !m._endTime && options.streaming !== false;
+  if (m.role === 'user') {
+    wrap.innerHTML = renderUserPlainTextContent(m.content || '');
+  } else {
+    const renderFn = isStreaming && typeof renderMarkdownStreaming === 'function'
+      ? renderMarkdownStreaming
+      : renderMarkdown;
+    wrap.innerHTML = renderFn(m.content || '') + (isStreaming ? '<span class="cursor"></span>' : '');
+  }
 
   const timer = msgNode.querySelector(`.msg-timer[data-msg-idx="${idx}"]`);
   if (timer) {
@@ -1231,6 +1239,7 @@ function renderMsg(m, idx) {
   const hasPlanBadge = m.plan && m.plan.steps && m.plan.steps.length > 0;
   const hasOutlineBadge = m.outline && m.outline.items && m.outline.items.length > 0;
   const hasPptBadge = !!m.pptMode;
+  const mainContentHtml = isUser ? renderUserPlainTextContent(m.content || '') : renderMarkdown(m.content || '');
   
   return `
     <div class="message" data-idx="${idx}">
@@ -1246,7 +1255,7 @@ function renderMsg(m, idx) {
         </div>
         ${attsHtml}
         ${toolCallsHtml}
-        ${(m.plan || m.outline || m.reflection || m.pptMode) ? '' : `<div class="msg-content">${renderMarkdown(m.content || '')}</div>`}
+        ${(m.plan || m.outline || m.reflection || m.pptMode) ? '' : `<div class="msg-content${isUser ? ' user-plain-text' : ''}">${mainContentHtml}</div>`}
         ${planHtml}
         ${outlineHtml}
         ${pptHtml}

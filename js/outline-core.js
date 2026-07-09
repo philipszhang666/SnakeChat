@@ -631,6 +631,32 @@ function outlineBuildResponsesInput(history, conversationMessages) {
   return out;
 }
 
+function outlineBuildOpenAICompatMessages(history) {
+  const list = Array.isArray(history) ? history : [];
+  if (typeof buildOpenAIMessages === 'function') {
+    return buildOpenAIMessages(list, { includeResponseGuard: false })
+      .filter(m => m && m.role !== 'system');
+  }
+  return list
+    .filter(m => m && !m._hiddenFromAI && !m._isCompressing)
+    .map(m => {
+      const out = { role: m.role, content: m.content || '' };
+      if (m.role === 'assistant'
+        && Object.prototype.hasOwnProperty.call(m, 'reasoning_content')
+        && typeof m.reasoning_content === 'string') {
+        out.reasoning_content = m.reasoning_content;
+      }
+      if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        out.tool_calls = m.tool_calls.map(tc => JSON.parse(JSON.stringify(tc)));
+      }
+      if (m.role === 'tool') {
+        out.tool_call_id = m.tool_call_id;
+        if (m.name) out.name = m.name;
+      }
+      return out;
+    });
+}
+
 function outlineNormalizeUsage(usage) {
   return outlineCoreState.settings.apiFormat === 'responses' && typeof normalizeResponsesUsage === 'function'
     ? normalizeResponsesUsage(usage)
@@ -744,16 +770,19 @@ async function _outlineFetchJsonWithRetry(url, init, abortSignal, onProgress) {
     try {
       const resp = await _outlineFetchWithTimeout(url, init, abortSignal, OUTLINE_FETCH_TIMEOUT_MS);
       if (typeof recordRequest === 'function') recordRequest();
+      const readOutlineResponseText = (typeof _apiReadResponseText === 'function')
+        ? _apiReadResponseText
+        : async r => await r.text();
       if (!resp.ok) {
         httpStatus = resp.status;
         retryAfter = resp.headers.get('retry-after');
-        const t = await resp.text();
+        const t = await readOutlineResponseText(resp, abortSignal);
         const err = new Error(`HTTP ${resp.status}: ${t.slice(0, 300)}`);
         err.httpStatus = resp.status;
         err.retryAfter = retryAfter;
         throw err;
       }
-      const _rawText = await resp.text();
+      const _rawText = await readOutlineResponseText(resp, abortSignal);
       let j;
       try { j = JSON.parse(_rawText); }
       catch (e) { throw new Error('JSON 解析失败：' + _rawText.slice(0, 300)); }
@@ -1104,12 +1133,12 @@ async function callAPIWithOutline(options = {}) {
         };
         if (tools.length) body.tools = tools;
       } else {
-        const baseMsgs = (typeof buildOpenAIMessages === 'function')
-          ? buildOpenAIMessages(safeHistory, { includeResponseGuard: false }).filter(m => m.role !== 'system') : [];
+        const baseMsgs = outlineBuildOpenAICompatMessages(safeHistory);
+        const outlineMsgs = outlineBuildOpenAICompatMessages(safeConversationMessages);
         const allMsgs = [
           { role: 'system', content: safeSystemPrompt },
           ...baseMsgs,
-          ...safeConversationMessages
+          ...outlineMsgs
         ];
         const fixedMsgs = (typeof fixOpenAIMessageSequence === 'function')
           ? fixOpenAIMessageSequence(allMsgs)
@@ -1125,10 +1154,7 @@ async function callAPIWithOutline(options = {}) {
       }
       return body;
       };
-      body = typeof withPrivacyGuardRequest === 'function'
-        ? withPrivacyGuardRequest(buildOutlineRoundBody, { source: 'outline', silentReport: true })
-        : buildOutlineRoundBody();
-      
+
       if (typeof ensureContextBeforeAgentRun === 'function') {
         aiMsg.outline.progressText = `🗜️ 第 ${loop + 1}/${maxRounds} 轮 · 检查上下文...`;
         onUpdate();
@@ -1143,6 +1169,10 @@ async function callAPIWithOutline(options = {}) {
         });
         if (!ok) throw new Error('自动压缩失败，已暂停大纲模式请求');
       }
+
+      body = typeof withPrivacyGuardRequest === 'function'
+        ? withPrivacyGuardRequest(buildOutlineRoundBody, { source: 'outline', silentReport: true })
+        : buildOutlineRoundBody();
       
       // ----- 限速 -----
       if (typeof applyRateLimit === 'function') {
@@ -1703,12 +1733,12 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
       // 🔑 关键：不传 tools 字段
     };
   } else {
-    const baseMsgs = (typeof buildOpenAIMessages === 'function')
-      ? buildOpenAIMessages(safeHistory, { includeResponseGuard: false }).filter(m => m.role !== 'system') : [];
+    const baseMsgs = outlineBuildOpenAICompatMessages(safeHistory);
+    const outlineMsgs = outlineBuildOpenAICompatMessages(safeConversationMessages);
     const allMsgs = [
       { role: 'system', content: safeFinalSystemPrompt },
       ...baseMsgs,
-      ...safeConversationMessages,
+      ...outlineMsgs,
       { role: 'user', content: safeFinalUserMsg }
     ];
     const fixedMsgs = (typeof fixOpenAIMessageSequence === 'function')

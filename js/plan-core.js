@@ -1137,12 +1137,15 @@ async function runMiniAgent(userPrompt, model, systemPrompt, step, onUpdate, sou
       recordRequest();
     }
     
+    const readPlanResponseText = (typeof _apiReadResponseText === 'function')
+      ? _apiReadResponseText
+      : async r => await r.text();
     if (!resp.ok) {
-      const t = await resp.text();
+      const t = await readPlanResponseText(resp, abortSignal, isStopped);
       throw new Error(`HTTP ${resp.status}: ${t.slice(0, 300)}`);
     }
     
-    const _rawText = await resp.text();
+    const _rawText = await readPlanResponseText(resp, abortSignal, isStopped);
     let j;
     try { j = JSON.parse(_rawText); } catch (e) { throw new Error('JSON 解析失败：' + _rawText.slice(0, 300)); }
     if (j.error) throw new Error(`API 错误：${j.error.message || JSON.stringify(j.error)}`);

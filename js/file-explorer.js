@@ -2493,6 +2493,10 @@ function fileExplorerItemFromPointerEvent(event) {
   return isFileExplorerItemBlankEvent(event, item) ? null : item;
 }
 
+function fileExplorerItemButtonFromEvent(event) {
+  return event && event.target ? event.target.closest('.file-explorer-item') : null;
+}
+
 function showFileExplorerContextMenu(event, item) {
   event.preventDefault();
   const isItem = !!item;
@@ -2537,7 +2541,7 @@ function showFileExplorerContextMenu(event, item) {
 }
 
 function handleFileExplorerClick(event) {
-  const item = fileExplorerItemFromPointerEvent(event);
+  const item = fileExplorerItemButtonFromEvent(event);
   if (!item) return;
   const path = item.dataset.path || '.';
   const type = item.dataset.type || '';

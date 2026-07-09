@@ -418,6 +418,127 @@ function _sleepAbortable(ms, signal) {
   });
 }
 
+function _apiAbortError() {
+  const err = new Error('用户中断');
+  err.name = 'AbortError';
+  return err;
+}
+
+function _apiIsAbortRequested(signal, isStopped) {
+  if (signal && signal.aborted) return true;
+  if (typeof isStopped === 'function') {
+    try {
+      return !!isStopped();
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function _apiThrowIfAbortRequested(signal, isStopped) {
+  if (_apiIsAbortRequested(signal, isStopped)) throw _apiAbortError();
+}
+
+function _apiAbortWaiter(signal, isStopped, onAbort) {
+  let settled = false;
+  let timer = null;
+  let abortHandler = null;
+  let rejectFn = null;
+
+  const cleanup = () => {
+    if (signal && abortHandler) {
+      try { signal.removeEventListener('abort', abortHandler); } catch (_) {}
+    }
+    if (timer) clearInterval(timer);
+    timer = null;
+    abortHandler = null;
+  };
+
+  const abort = () => {
+    if (settled) return;
+    settled = true;
+    try { if (typeof onAbort === 'function') onAbort(); } catch (_) {}
+    cleanup();
+    if (rejectFn) rejectFn(_apiAbortError());
+  };
+
+  const promise = new Promise((_, reject) => {
+    rejectFn = reject;
+    if (_apiIsAbortRequested(signal, isStopped)) {
+      abort();
+      return;
+    }
+    abortHandler = abort;
+    if (signal) signal.addEventListener('abort', abortHandler, { once: true });
+    if (typeof isStopped === 'function') {
+      timer = setInterval(() => {
+        if (_apiIsAbortRequested(null, isStopped)) abort();
+      }, 100);
+    }
+  });
+
+  return {
+    promise,
+    cancel() {
+      settled = true;
+      cleanup();
+    }
+  };
+}
+
+async function _apiReadStreamChunk(reader, signal, isStopped) {
+  _apiThrowIfAbortRequested(signal, isStopped);
+  const waiter = _apiAbortWaiter(signal, isStopped, () => {
+    try {
+      const cancelResult = reader && reader.cancel && reader.cancel();
+      if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
+    } catch (_) {}
+  });
+  try {
+    return await Promise.race([reader.read(), waiter.promise]);
+  } finally {
+    waiter.cancel();
+  }
+}
+
+function _apiCleanupResponseAbortBridge(resp) {
+  const cleanup = resp && resp._apiAbortCleanup;
+  if (typeof cleanup === 'function') {
+    try { cleanup(); } catch (_) {}
+    try { Object.defineProperty(resp, '_apiAbortCleanup', { value: null, configurable: true }); } catch (_) {}
+  }
+}
+
+async function _apiReadResponseText(resp, signal, isStopped) {
+  _apiThrowIfAbortRequested(signal, isStopped);
+  if (resp && resp.body && typeof resp.body.getReader === 'function') {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let txt = '';
+    try {
+      while (true) {
+        const { done, value } = await _apiReadStreamChunk(reader, signal, isStopped);
+        if (done) break;
+        txt += decoder.decode(value, { stream: true });
+      }
+      txt += decoder.decode();
+      return txt;
+    } finally {
+      _apiCleanupResponseAbortBridge(resp);
+      try { if (reader.releaseLock) reader.releaseLock(); } catch (_) {}
+    }
+  }
+
+  const waiter = _apiAbortWaiter(signal, isStopped, () => {});
+  try {
+    return await Promise.race([resp.text(), waiter.promise]);
+  } finally {
+    waiter.cancel();
+    _apiCleanupResponseAbortBridge(resp);
+  }
+}
+
 // 与 outline-core.js 中 _outlineFetchWithTimeout 同理：合并外部 signal 和内部超时
 async function _apiFetchWithTimeout(url, init, externalSignal, timeoutMs) {
   const timeoutCtrl = new AbortController();
@@ -460,12 +581,28 @@ async function _apiFetchWithTimeout(url, init, externalSignal, timeoutMs) {
     console.warn('[apiFetch] 代理改写失败，回退到直连:', e);
   }
   
-  return fetch(realUrl, realInit).finally(() => {
+  const cleanupExternalAbort = () => {
+    if (externalSignal && externalAbortHandler) {
+      try { externalSignal.removeEventListener('abort', externalAbortHandler); } catch (_) {}
+    }
+    externalAbortHandler = null;
+  };
+
+  return fetch(realUrl, realInit).then(resp => {
     clearTimeout(timer);
     if (externalSignal && externalAbortHandler) {
-      externalSignal.removeEventListener('abort', externalAbortHandler);
+      // Keep the bridge alive after headers arrive; response body reads still need abort.
+      try {
+        Object.defineProperty(resp, '_apiAbortCleanup', {
+          value: cleanupExternalAbort,
+          configurable: true
+        });
+      } catch (_) {}
     }
+    return resp;
   }).catch(e => {
+    clearTimeout(timer);
+    cleanupExternalAbort();
     if (e.name === 'AbortError' && externalSignal && !externalSignal.aborted) {
       const err = new Error(`⏱ 请求超时（${Math.round((timeoutMs || API_FETCH_TIMEOUT_MS) / 1000)}s 无响应）`);
       err.name = 'TimeoutError';
@@ -702,7 +839,7 @@ async function callAPI(roundLimit, options = {}) {
         if (!resp.ok) {
           httpStatus = resp.status;
           retryAfter = resp.headers.get('retry-after');
-          const t = await resp.text();
+          const t = await _apiReadResponseText(resp, abortCtrl.signal, isMainToolStopRequested);
           if (typeof saveRequestToHistory === 'function') {
             saveRequestToHistory(url, requestHeaders, body, t, `HTTP ${resp.status}`);
           }
@@ -719,9 +856,15 @@ async function callAPI(roundLimit, options = {}) {
                              || ctLower.includes('stream+json')
                              || (body.stream && !ctLower.includes('json') && !ctLower.includes('html'));
         if (body.stream && looksLikeStream && resp.body && typeof resp.body.getReader === 'function') {
-          await handleStream(resp, c, lastIdx, { url, method: 'POST', headers: requestHeaders, body });
+          await handleStream(
+            resp,
+            c,
+            lastIdx,
+            { url, method: 'POST', headers: requestHeaders, body },
+            { signal: abortCtrl.signal, isStopped: isMainToolStopRequested }
+          );
         } else {
-          const txt = await resp.text();
+          const txt = await _apiReadResponseText(resp, abortCtrl.signal, isMainToolStopRequested);
           await handleNonStream(txt, c, lastIdx, ct, { url, method: 'POST', headers: requestHeaders, body });
         }
         if (!_assistantMessageHasOutput(c.messages[lastIdx])) {
@@ -1018,7 +1161,7 @@ async function callAPI(roundLimit, options = {}) {
   }
 }
 
-async function handleStream(resp, c, lastIdx, reqCtx) {
+async function handleStream(resp, c, lastIdx, reqCtx, readOptions = {}) {
   const s = apiCoreState.settings;
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
@@ -1032,131 +1175,136 @@ async function handleStream(resp, c, lastIdx, reqCtx) {
   let openAIReasoningContent = '';
   let rawAccumulated = '';  // ⭐ 累积原始 SSE 文本，用于响应预览
   
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value, { stream: true });
-    rawAccumulated += chunk;  // ⭐ 保留原始字节流
-    buf += chunk;
-    const lines = buf.split('\n');
-    buf = lines.pop();
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t || !t.startsWith('data:')) continue;
-      const data = t.slice(5).trim();
-      if (data === '[DONE]') {
-        streamFinishedByProtocol = true;
-        break;
-      }
-      try {
-        const j = JSON.parse(data);
-        if (s.apiFormat === 'anthropic') {
-          if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') {
-            // ⭐ 立即标记首字时间（让 timer 立刻从"等待"切到"流式中"）
-            if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
-            c.messages[lastIdx].content += j.delta.text || '';
-            if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
-            updateLastMsg(c, lastIdx);
-          }
-          if (j.type === 'content_block_start' && j.content_block?.type === 'tool_use') {
-            const idx = j.index ?? 0;
-            anthropicToolBlocks[idx] = {
-              id: j.content_block.id,
-              name: j.content_block.name,
-              partial_input: ''
-            };
-          }
-          if (j.type === 'content_block_delta' && j.delta?.type === 'input_json_delta') {
-            const idx = j.index ?? 0;
-            if (anthropicToolBlocks[idx]) {
-              anthropicToolBlocks[idx].partial_input += j.delta.partial_json || '';
-            }
-          }
-          if (j.type === 'message_start' && j.message?.usage) {
-            streamUsage = j.message.usage;
-          }
-          if (j.type === 'message_delta' && j.usage) {
-            streamUsage = { ...streamUsage, ...j.usage };
-          }
-          if (j.type === 'message_stop') {
-            streamFinishedByProtocol = true;
-          }
-        } else if (s.apiFormat === 'responses') {
-          if (j.type === 'response.output_text.delta') {
-            if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
-            c.messages[lastIdx].content += j.delta || '';
-            if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
-            updateLastMsg(c, lastIdx);
-          }
-          if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
-            const key = responsesEventKey(j, j.item);
-            responsesToolBlocks[key] = {
-              id: j.item.call_id || j.item.id || key,
-              name: j.item.name || '',
-              arguments: j.item.arguments || ''
-            };
-          }
-          if (j.type === 'response.function_call_arguments.delta') {
-            const key = responsesEventKey(j);
-            if (!responsesToolBlocks[key]) {
-              responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
-            }
-            responsesToolBlocks[key].arguments += j.delta || '';
-          }
-          if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
-            const key = responsesEventKey(j, j.item);
-            responsesToolBlocks[key] = {
-              id: j.item.call_id || j.item.id || key,
-              name: j.item.name || responsesToolBlocks[key]?.name || '',
-              arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
-            };
-          }
-          if (j.type === 'response.completed' && j.response) {
-            responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
-            streamUsage = normalizeResponsesUsage(j.response.usage) || streamUsage;
-            if (!c.messages[lastIdx].content) {
-              c.messages[lastIdx].content = extractResponsesText(j.response);
-              updateLastMsg(c, lastIdx);
-            }
-            streamFinishedByProtocol = true;
-          }
-        } else {
-          const delta = j.choices?.[0]?.delta;
-          if (delta) {
-            if (delta.reasoning_content) {
-              openAIReasoningContent += delta.reasoning_content;
-            }
-            if (delta.content) {
-              // ⭐ 立即标记首字时间
+  try {
+    while (true) {
+      const { done, value } = await _apiReadStreamChunk(reader, readOptions.signal, readOptions.isStopped);
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      rawAccumulated += chunk;  // ⭐ 保留原始字节流
+      buf += chunk;
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t || !t.startsWith('data:')) continue;
+        const data = t.slice(5).trim();
+        if (data === '[DONE]') {
+          streamFinishedByProtocol = true;
+          break;
+        }
+        try {
+          const j = JSON.parse(data);
+          if (s.apiFormat === 'anthropic') {
+            if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') {
+              // ⭐ 立即标记首字时间（让 timer 立刻从"等待"切到"流式中"）
               if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
-              c.messages[lastIdx].content += delta.content;
+              c.messages[lastIdx].content += j.delta.text || '';
               if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
               updateLastMsg(c, lastIdx);
             }
-            if (delta.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const idx = tc.index ?? 0;
-                if (!tcMap[idx]) tcMap[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
-                if (tc.id) tcMap[idx].id = tc.id;
-                if (tc.function?.name) tcMap[idx].function.name += tc.function.name;
-                if (tc.function?.arguments) tcMap[idx].function.arguments += tc.function.arguments;
+            if (j.type === 'content_block_start' && j.content_block?.type === 'tool_use') {
+              const idx = j.index ?? 0;
+              anthropicToolBlocks[idx] = {
+                id: j.content_block.id,
+                name: j.content_block.name,
+                partial_input: ''
+              };
+            }
+            if (j.type === 'content_block_delta' && j.delta?.type === 'input_json_delta') {
+              const idx = j.index ?? 0;
+              if (anthropicToolBlocks[idx]) {
+                anthropicToolBlocks[idx].partial_input += j.delta.partial_json || '';
               }
             }
+            if (j.type === 'message_start' && j.message?.usage) {
+              streamUsage = j.message.usage;
+            }
+            if (j.type === 'message_delta' && j.usage) {
+              streamUsage = { ...streamUsage, ...j.usage };
+            }
+            if (j.type === 'message_stop') {
+              streamFinishedByProtocol = true;
+            }
+          } else if (s.apiFormat === 'responses') {
+            if (j.type === 'response.output_text.delta') {
+              if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
+              c.messages[lastIdx].content += j.delta || '';
+              if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
+              updateLastMsg(c, lastIdx);
+            }
+            if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
+              const key = responsesEventKey(j, j.item);
+              responsesToolBlocks[key] = {
+                id: j.item.call_id || j.item.id || key,
+                name: j.item.name || '',
+                arguments: j.item.arguments || ''
+              };
+            }
+            if (j.type === 'response.function_call_arguments.delta') {
+              const key = responsesEventKey(j);
+              if (!responsesToolBlocks[key]) {
+                responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
+              }
+              responsesToolBlocks[key].arguments += j.delta || '';
+            }
+            if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
+              const key = responsesEventKey(j, j.item);
+              responsesToolBlocks[key] = {
+                id: j.item.call_id || j.item.id || key,
+                name: j.item.name || responsesToolBlocks[key]?.name || '',
+                arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
+              };
+            }
+            if (j.type === 'response.completed' && j.response) {
+              responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
+              streamUsage = normalizeResponsesUsage(j.response.usage) || streamUsage;
+              if (!c.messages[lastIdx].content) {
+                c.messages[lastIdx].content = extractResponsesText(j.response);
+                updateLastMsg(c, lastIdx);
+              }
+              streamFinishedByProtocol = true;
+            }
+          } else {
+            const delta = j.choices?.[0]?.delta;
+            if (delta) {
+              if (delta.reasoning_content) {
+                openAIReasoningContent += delta.reasoning_content;
+              }
+              if (delta.content) {
+                // ⭐ 立即标记首字时间
+                if (!c.messages[lastIdx]._firstTokenAt) c.messages[lastIdx]._firstTokenAt = Date.now();
+                c.messages[lastIdx].content += delta.content;
+                if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
+                updateLastMsg(c, lastIdx);
+              }
+              if (delta.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
+                  if (!tcMap[idx]) tcMap[idx] = { id: tc.id || '', type: 'function', function: { name: '', arguments: '' } };
+                  if (tc.id) tcMap[idx].id = tc.id;
+                  if (tc.function?.name) tcMap[idx].function.name += tc.function.name;
+                  if (tc.function?.arguments) tcMap[idx].function.arguments += tc.function.arguments;
+                }
+              }
+            }
+            if (j.usage) {
+              streamUsage = j.usage;
+            }
           }
-          if (j.usage) {
-            streamUsage = j.usage;
-          }
-        }
-      } catch (e) {}
-      if (streamFinishedByProtocol) break;
+        } catch (e) {}
+        if (streamFinishedByProtocol) break;
+      }
+      if (streamFinishedByProtocol) {
+        try {
+          const cancelResult = reader.cancel();
+          if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
+        } catch (_) {}
+        break;
+      }
     }
-    if (streamFinishedByProtocol) {
-      try {
-        const cancelResult = reader.cancel();
-        if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
-      } catch (_) {}
-      break;
-    }
+  } finally {
+    _apiCleanupResponseAbortBridge(resp);
+    try { if (reader.releaseLock) reader.releaseLock(); } catch (_) {}
   }
   
   const openaiTcs = Object.values(tcMap);
@@ -1419,7 +1567,7 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         }
         
         const ct = resp.headers.get('content-type') || '';
-        const txt = await resp.text();
+        const txt = await _apiReadResponseText(resp, signal, isStopped);
         if (!resp.ok) {
           httpStatus = resp.status;
           retryAfter = resp.headers.get('retry-after');
@@ -1716,7 +1864,7 @@ async function runAgentLoop({
     if (typeof recordRequest === 'function') recordRequest();
     
     if (!resp.ok) {
-      const t = await resp.text();
+      const t = await _apiReadResponseText(resp, signal, _isStopped);
       throw new Error(`HTTP ${resp.status}: ${t.slice(0, 500)}`);
     }
     
@@ -1745,127 +1893,128 @@ async function runAgentLoop({
       let rawAccumulated = '';
       let streamFinishedByProtocol = false;
       
-      while (true) {
-        if (_isAborted()) {
-          try { reader.cancel(); } catch (_) {}
-          const err = new Error('用户中断'); err.name = 'AbortError'; throw err;
-        }
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        rawAccumulated += chunk;
-        buf += chunk;
-        const lines = buf.split('\n');
-        buf = lines.pop();
-        for (const line of lines) {
-          const t = line.trim();
-          if (!t || !t.startsWith('data:')) continue;
-          const data = t.slice(5).trim();
-          if (data === '[DONE]') {
-            streamFinishedByProtocol = true;
-            break;
-          }
-          try {
-            const j = JSON.parse(data);
-            if (s.apiFormat === 'anthropic') {
-              if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') {
-                const delta = j.delta.text || '';
-                assistantText += delta;
-                _emit({ type: 'text_delta', text: delta });
-              }
-              if (j.type === 'content_block_start' && j.content_block?.type === 'tool_use') {
-                const idx = j.index ?? 0;
-                anthropicToolBlocks[idx] = {
-                  id: j.content_block.id,
-                  name: j.content_block.name,
-                  partial_input: ''
-                };
-              }
-              if (j.type === 'content_block_delta' && j.delta?.type === 'input_json_delta') {
-                const idx = j.index ?? 0;
-                if (anthropicToolBlocks[idx]) {
-                  anthropicToolBlocks[idx].partial_input += j.delta.partial_json || '';
+      try {
+        while (true) {
+          const { done, value } = await _apiReadStreamChunk(reader, signal, _isStopped);
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          rawAccumulated += chunk;
+          buf += chunk;
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            const t = line.trim();
+            if (!t || !t.startsWith('data:')) continue;
+            const data = t.slice(5).trim();
+            if (data === '[DONE]') {
+              streamFinishedByProtocol = true;
+              break;
+            }
+            try {
+              const j = JSON.parse(data);
+              if (s.apiFormat === 'anthropic') {
+                if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') {
+                  const delta = j.delta.text || '';
+                  assistantText += delta;
+                  _emit({ type: 'text_delta', text: delta });
                 }
-              }
-              if (j.type === 'message_start' && j.message?.usage) {
-                usage = { ...(usage || {}), ...j.message.usage };
-              }
-              if (j.type === 'message_delta' && j.usage) {
-                usage = { ...(usage || {}), ...j.usage };
-              }
-              if (j.type === 'message_stop') {
-                streamFinishedByProtocol = true;
-              }
-            } else if (s.apiFormat === 'responses') {
-              if (j.type === 'response.output_text.delta') {
-                const delta = j.delta || '';
-                assistantText += delta;
-                _emit({ type: 'text_delta', text: delta });
-              }
-              if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
-                const key = responsesEventKey(j, j.item);
-                responsesToolBlocks[key] = {
-                  id: j.item.call_id || j.item.id || key,
-                  name: j.item.name || '',
-                  arguments: j.item.arguments || ''
-                };
-              }
-              if (j.type === 'response.function_call_arguments.delta') {
-                const key = responsesEventKey(j);
-                if (!responsesToolBlocks[key]) {
-                  responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
+                if (j.type === 'content_block_start' && j.content_block?.type === 'tool_use') {
+                  const idx = j.index ?? 0;
+                  anthropicToolBlocks[idx] = {
+                    id: j.content_block.id,
+                    name: j.content_block.name,
+                    partial_input: ''
+                  };
                 }
-                responsesToolBlocks[key].arguments += j.delta || '';
-              }
-              if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
-                const key = responsesEventKey(j, j.item);
-                responsesToolBlocks[key] = {
-                  id: j.item.call_id || j.item.id || key,
-                  name: j.item.name || responsesToolBlocks[key]?.name || '',
-                  arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
-                };
-              }
-              if (j.type === 'response.completed' && j.response) {
-                responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
-                usage = normalizeResponsesUsage(j.response.usage) || usage;
-                if (!assistantText) {
-                  assistantText = extractResponsesText(j.response);
-                  if (assistantText) _emit({ type: 'text_delta', text: assistantText });
-                }
-                streamFinishedByProtocol = true;
-              }
-            } else {
-              const delta = j.choices?.[0]?.delta;
-              if (delta) {
-                if (delta.reasoning_content) {
-                  assistantReasoningContent += delta.reasoning_content;
-                }
-                if (delta.content) {
-                  assistantText += delta.content;
-                  _emit({ type: 'text_delta', text: delta.content });
-                }
-                if (delta.tool_calls) {
-                  for (const tc of delta.tool_calls) {
-                    const idx = tc.index ?? 0;
-                    if (!tcMap[idx]) tcMap[idx] = { id: tc.id || '', function: { name: '', arguments: '' } };
-                    if (tc.id) tcMap[idx].id = tc.id;
-                    if (tc.function?.name) tcMap[idx].function.name += tc.function.name;
-                    if (tc.function?.arguments) tcMap[idx].function.arguments += tc.function.arguments;
+                if (j.type === 'content_block_delta' && j.delta?.type === 'input_json_delta') {
+                  const idx = j.index ?? 0;
+                  if (anthropicToolBlocks[idx]) {
+                    anthropicToolBlocks[idx].partial_input += j.delta.partial_json || '';
                   }
                 }
+                if (j.type === 'message_start' && j.message?.usage) {
+                  usage = { ...(usage || {}), ...j.message.usage };
+                }
+                if (j.type === 'message_delta' && j.usage) {
+                  usage = { ...(usage || {}), ...j.usage };
+                }
+                if (j.type === 'message_stop') {
+                  streamFinishedByProtocol = true;
+                }
+              } else if (s.apiFormat === 'responses') {
+                if (j.type === 'response.output_text.delta') {
+                  const delta = j.delta || '';
+                  assistantText += delta;
+                  _emit({ type: 'text_delta', text: delta });
+                }
+                if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
+                  const key = responsesEventKey(j, j.item);
+                  responsesToolBlocks[key] = {
+                    id: j.item.call_id || j.item.id || key,
+                    name: j.item.name || '',
+                    arguments: j.item.arguments || ''
+                  };
+                }
+                if (j.type === 'response.function_call_arguments.delta') {
+                  const key = responsesEventKey(j);
+                  if (!responsesToolBlocks[key]) {
+                    responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
+                  }
+                  responsesToolBlocks[key].arguments += j.delta || '';
+                }
+                if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
+                  const key = responsesEventKey(j, j.item);
+                  responsesToolBlocks[key] = {
+                    id: j.item.call_id || j.item.id || key,
+                    name: j.item.name || responsesToolBlocks[key]?.name || '',
+                    arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
+                  };
+                }
+                if (j.type === 'response.completed' && j.response) {
+                  responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
+                  usage = normalizeResponsesUsage(j.response.usage) || usage;
+                  if (!assistantText) {
+                    assistantText = extractResponsesText(j.response);
+                    if (assistantText) _emit({ type: 'text_delta', text: assistantText });
+                  }
+                  streamFinishedByProtocol = true;
+                }
+              } else {
+                const delta = j.choices?.[0]?.delta;
+                if (delta) {
+                  if (delta.reasoning_content) {
+                    assistantReasoningContent += delta.reasoning_content;
+                  }
+                  if (delta.content) {
+                    assistantText += delta.content;
+                    _emit({ type: 'text_delta', text: delta.content });
+                  }
+                  if (delta.tool_calls) {
+                    for (const tc of delta.tool_calls) {
+                      const idx = tc.index ?? 0;
+                      if (!tcMap[idx]) tcMap[idx] = { id: tc.id || '', function: { name: '', arguments: '' } };
+                      if (tc.id) tcMap[idx].id = tc.id;
+                      if (tc.function?.name) tcMap[idx].function.name += tc.function.name;
+                      if (tc.function?.arguments) tcMap[idx].function.arguments += tc.function.arguments;
+                    }
+                  }
+                }
+                if (j.usage) usage = j.usage;
               }
-              if (j.usage) usage = j.usage;
-            }
-          } catch (e) {}
-          if (streamFinishedByProtocol) break;
+            } catch (e) {}
+            if (streamFinishedByProtocol) break;
+          }
+          if (streamFinishedByProtocol) {
+            try {
+              const cancelResult = reader.cancel();
+              if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
+            } catch (_) {}
+            break;
+          }
         }
-        if (streamFinishedByProtocol) {
-          try {
-            const cancelResult = reader.cancel();
-            if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
-          } catch (_) {}
-          break;
-        }
+      } finally {
+        _apiCleanupResponseAbortBridge(resp);
+        try { if (reader.releaseLock) reader.releaseLock(); } catch (_) {}
       }
       
       // 整理 tool_calls
@@ -1898,7 +2047,7 @@ async function runAgentLoop({
       }
     } else {
       // === 非流式解析 ===
-      const txt = await resp.text();
+      const txt = await _apiReadResponseText(resp, signal, _isStopped);
       let j;
       try { j = JSON.parse(txt); } catch (e) { throw new Error('JSON 解析失败：' + txt.slice(0, 200)); }
       if (j.error) throw new Error(`API 错误：${j.error.message || JSON.stringify(j.error)}`);
@@ -2178,6 +2327,8 @@ window.AgentApp.define('apiCore', {
   buildAgentLoopToolBudgetPrompt,
   agentLoopLooksLikeTextToolCall,
   runAgentLoop,
+  _apiReadResponseText,
+  _apiReadStreamChunk,
   _apiFetchWithTimeout
 });
 

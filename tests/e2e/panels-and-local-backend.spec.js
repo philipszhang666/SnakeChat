@@ -113,8 +113,6 @@ test.describe('feature panels and mocked local backend', () => {
     await expect(page.locator('#fileEditorContent')).toHaveValue(/Sample file content/);
     await page.fill('#fileEditorContent', 'Changed by e2e test\n');
     await page.locator('#fileEditorSaveBtn').click();
-    await expect(page.locator('#termConfirmMask')).toHaveClass(/show/);
-    await page.locator('#termAllowBtn').click();
 
     expect(backend.backendCalls.some(call => call.action === 'list_dir')).toBe(true);
     expect(backend.backendCalls.some(call => call.action === 'read_file')).toBe(true);

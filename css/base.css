@@ -380,6 +380,7 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 .msg-timer .timer-done{color:var(--text-secondary);opacity:.7}
 @keyframes timerPulse{0%,100%{opacity:1}50%{opacity:.55}}
 .msg-content{line-height:1.7;font-size:14.5px;word-wrap:break-word}
+.msg-content.user-plain-text{white-space:pre-wrap;overflow-wrap:anywhere}
 .msg-content p{margin:6px 0}
 .msg-content ul,.msg-content ol{padding-left:24px;margin:6px 0}
 .msg-content li{margin:2px 0}

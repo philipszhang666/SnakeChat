@@ -697,6 +697,19 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('data-handler="copyCode"', markdown_js)
         self.assertIn('data-value="${codeId}"', markdown_js)
 
+    def test_user_messages_render_as_plain_text(self):
+        chat_js = (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
+
+        self.assertIn('function renderUserPlainTextContent(text)', chat_js)
+        self.assertIn(
+            "const mainContentHtml = isUser ? renderUserPlainTextContent(m.content || '') : renderMarkdown(m.content || '');",
+            chat_js,
+        )
+        self.assertIn('<div class="msg-content${isUser ? \' user-plain-text\' : \'\'}">${mainContentHtml}</div>', chat_js)
+        self.assertIn("if (m.role === 'user') {\n    wrap.innerHTML = renderUserPlainTextContent(m.content || '');", chat_js)
+        self.assertIn('.msg-content.user-plain-text{white-space:pre-wrap;overflow-wrap:anywhere}', base_css)
+
     def test_beacon_consumes_state_module(self):
         beacon_js = (ROOT / 'js' / 'beacon.js').read_text(encoding='utf-8')
         beacon_code = '\n'.join(
@@ -2903,9 +2916,9 @@ class FrontendModuleTests(unittest.TestCase):
     def test_file_explorer_delete_uses_recursive_directory_delete(self):
         file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
 
-        self.assertIn(
-            "callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, { skipConfirm: true })",
-            file_explorer_js
+        self.assertRegex(
+            file_explorer_js,
+            r"callAgentBackend\(\s*'delete_file',\s*\{ path: normalizedPath, recursive: true \}[\s\S]+fileExplorerBackendContext\(\{ skipConfirm: true \}\)"
         )
 
 

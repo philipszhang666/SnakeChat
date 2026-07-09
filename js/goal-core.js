@@ -1411,6 +1411,10 @@ function pauseGoal(goalId) {
   goal.status = 'paused';
   pushGoalEvent(goal, 'paused', { reason: 'Paused by user.' });
   saveGoals();
+  renderGoalPanel();
+  updateGoalButton();
+  GoalCoreUiService.renderChatList();
+  GoalCoreUiService.updateSendBtn();
 }
 
 function cancelGoal(goalId) {
@@ -1425,6 +1429,10 @@ function cancelGoal(goalId) {
   goal.cancelledAt = nowIso();
   pushGoalEvent(goal, 'cancelled', { reason: 'Cancelled by user.' });
   saveGoals();
+  renderGoalPanel();
+  updateGoalButton();
+  GoalCoreUiService.renderChatList();
+  GoalCoreUiService.updateSendBtn();
 }
 
 function deleteGoal(goalId) {
