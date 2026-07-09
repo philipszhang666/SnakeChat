@@ -24,6 +24,13 @@ function renderUnsafeMarkdownLink(label, url) {
   return safeUrl ? `${safeLabel} (${escapeHtml(safeUrl)})` : safeLabel;
 }
 
+function renderMarkdownFilePathAnchor(rawPath, options = {}) {
+  const normalized = normalizeMarkdownFileLinkPath(rawPath);
+  const cls = options.inlineCode ? 'file-path-link inline-code-file-link' : 'file-path-link';
+  const label = options.inlineCode ? `<code>${escapeHtml(rawPath)}</code>` : escapeHtml(rawPath);
+  return `<a href="#" class="${cls}" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${label}</a>`;
+}
+
 function renderMarkdown(text) {
   if (!text) return '';
   
@@ -39,9 +46,11 @@ function renderMarkdown(text) {
   const inlineCodes = [];
   text = text.replace(/`([^`\n]+)`/g, (m, c) => {
     const id = inlineCodes.length;
+    const fileRefs = splitMarkdownSpacedFileRefs(c);
     inlineCodes.push({
       code: c,
-      isFilePath: (typeof isLikelyMarkdownFileLinkPath === 'function') && isLikelyMarkdownFileLinkPath(c)
+      fileRefs,
+      isFilePath: !fileRefs.length && (typeof isLikelyMarkdownFileLinkPath === 'function') && isLikelyMarkdownFileLinkPath(c)
     });
     return `\x00ICODE${id}\x00`;
   });
@@ -123,9 +132,11 @@ function renderMarkdown(text) {
   text = text.replace(/\x00ICODE(\d+)\x00/g, (m, i) => {
     const item = inlineCodes[+i];
     const code = item && typeof item === 'object' ? item.code : item;
+    if (item && Array.isArray(item.fileRefs) && item.fileRefs.length) {
+      return item.fileRefs.map((ref, idx) => `${idx ? ' / ' : ''}${renderMarkdownFilePathAnchor(ref, { inlineCode: true })}`).join('');
+    }
     if (item && item.isFilePath) {
-      const normalized = normalizeMarkdownFileLinkPath(code);
-      return `<a href="#" class="file-path-link inline-code-file-link" data-explorer-file="${escapeHtml(normalized)}" title="在资源管理器中打开 ${escapeHtml(normalized)}"><code>${escapeHtml(code)}</code></a>`;
+      return renderMarkdownFilePathAnchor(code, { inlineCode: true });
     }
     return `<code>${escapeHtml(code)}</code>`;
   });
@@ -238,9 +249,23 @@ const MARKDOWN_FILE_LINK_EXTENSIONS = new Set([
 
 function normalizeMarkdownFileLinkPath(path) {
   let p = String(path || '').trim();
+  p = p.replace(/(?::\d+(?:-\d+)?|#L\d+(?:-L?\d+)?)$/i, '');
   p = p.replace(/^\.\//, '');
   p = p.replace(/\\+/g, '/');
   return p;
+}
+
+function isBareMarkdownFileLinkPath(path) {
+  const p = normalizeMarkdownFileLinkPath(path);
+  return !!p && !p.includes('/') && /^[\w@.+\-\u4e00-\u9fa5 ]+\.[A-Za-z0-9]{1,12}$/.test(p);
+}
+
+function splitMarkdownSpacedFileRefs(text) {
+  const raw = String(text || '').trim();
+  if (!/\s\/\s/.test(raw)) return [];
+  const parts = raw.split(/\s+\/\s+/).map(p => p.trim()).filter(Boolean);
+  if (parts.length < 2) return [];
+  return parts.every(part => isLikelyMarkdownFileLinkPath(part)) ? parts : [];
 }
 
 function isLikelyMarkdownFileLinkPath(path) {
@@ -248,19 +273,28 @@ function isLikelyMarkdownFileLinkPath(path) {
   if (!p || p.length > 240) return false;
   if (/^(https?:|data:|mailto:|javascript:)/i.test(p)) return false;
   if (p.includes('..')) return false;
-  if (!p.includes('/')) return false;
+  if (/\/\s|\s\//.test(p)) return false;
   const extMatch = p.match(/\.([a-z0-9]+)$/i);
   if (!extMatch) return false;
   if (!MARKDOWN_FILE_LINK_EXTENSIONS.has(extMatch[1].toLowerCase())) return false;
+  if (!p.includes('/') && !isBareMarkdownFileLinkPath(p)) return false;
   return /^[\w@.+\-/\\\u4e00-\u9fa5 ]+$/.test(p);
 }
 
 function renderFilePathLinks(text) {
-  const pattern = /(^|[\s(（\[【:：,，;；])((?:\.\/)?(?:[\w@.+\-\u4e00-\u9fa5 ]+[\\/])+[\w@.+\-\u4e00-\u9fa5 ]+\.[A-Za-z0-9]{1,12})(?=$|[\s)）\]】,，;；.。!！?？])/g;
-  return String(text || '').replace(pattern, (match, prefix, rawPath) => {
+  const fileRefNamePart = '[\\w@.+\\-\\u4e00-\\u9fa5]+(?: [\\w@.+\\-\\u4e00-\\u9fa5]+)*';
+  const fileRefPattern = new RegExp(
+    '(^|[\\s([{\\uFF0C\\u3002\\uFF1B\\uFF1A\\u3001\\uFF08\\u3010\\u300A])'
+      + '((?:\\.\\/)?(?:(?:' + fileRefNamePart + '[\\\\/])+)?'
+      + fileRefNamePart
+      + '\\.[A-Za-z0-9]{1,12}(?::\\d+(?:-\\d+)?|#L\\d+(?:-L?\\d+)?)?)'
+      + '(?=$|[\\s)\\]}.,!?;:\\uFF0C\\u3002\\uFF1B\\uFF1A\\u3001\\uFF09\\u3011\\u300B])',
+    'g'
+  );
+  return String(text || '').replace(fileRefPattern, (match, prefix, rawPath) => {
     if (!isLikelyMarkdownFileLinkPath(rawPath)) return match;
     const normalized = normalizeMarkdownFileLinkPath(rawPath);
-    return `${prefix}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="在资源管理器中打开 ${escapeHtml(normalized)}">${escapeHtml(rawPath)}</a>`;
+    return `${prefix}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(rawPath)}</a>`;
   });
 }
 
@@ -313,6 +347,7 @@ window.isSafeMarkdownLinkUrl = isSafeMarkdownLinkUrl;
 window.renderUnsafeMarkdownLink = renderUnsafeMarkdownLink;
 window.renderMarkdown = renderMarkdown;
 window.normalizeMarkdownFileLinkPath = normalizeMarkdownFileLinkPath;
+window.isBareMarkdownFileLinkPath = isBareMarkdownFileLinkPath;
 window.isLikelyMarkdownFileLinkPath = isLikelyMarkdownFileLinkPath;
 window.renderFilePathLinks = renderFilePathLinks;
 window.postRender = postRender;
@@ -322,6 +357,7 @@ window.AgentApp.define('markdown', {
   renderUnsafeMarkdownLink,
   renderMarkdown,
   normalizeMarkdownFileLinkPath,
+  isBareMarkdownFileLinkPath,
   isLikelyMarkdownFileLinkPath,
   renderFilePathLinks,
   postRender

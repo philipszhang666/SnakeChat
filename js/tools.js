@@ -400,10 +400,24 @@ function toggleTools() {
   ToolsUiService.updateSendBtn();
 }
 
+function compareToolSchemaOrder(a, b) {
+  const an = String(a && a.name ? a.name : '');
+  const bn = String(b && b.name ? b.name : '');
+  const ai = an.toLowerCase();
+  const bi = bn.toLowerCase();
+  if (ai < bi) return -1;
+  if (ai > bi) return 1;
+  if (an < bn) return -1;
+  if (an > bn) return 1;
+  return 0;
+}
+
 function buildToolsArray(options = {}) {
   const force = !!(options && options.force);
   if ((!force && !toolsState.settings.useTools) || !toolsState.tools.length) return null;
-  const availableTools = toolsState.tools.filter(t => toolVisibleForContext(t, options));
+  const availableTools = toolsState.tools
+    .filter(t => toolVisibleForContext(t, options))
+    .sort(compareToolSchemaOrder);
   if (!availableTools.length) return null;
   
   if (toolsState.settings.apiFormat === 'anthropic') {
@@ -871,6 +885,7 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     openTools,
     closeTools,
     renderToolList,
+    compareToolSchemaOrder,
     buildToolsArray,
     executeTool,
     readToolArtifact,

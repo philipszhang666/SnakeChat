@@ -1388,6 +1388,50 @@ class FilesMixin:
             self.response.json(200, {'ok': False, 'error': str(e)})
 
     # ============ 搜索 ============
+    def handle_find_file(self, body):
+        path, err = check_path_or_error(body.get('path', '') or '.')
+        if err: return self.response.json(200, {'ok': False, 'error': err})
+        raw_name = str(body.get('name') or body.get('filename') or '').strip()
+        name = raw_name.replace('\\', '/').strip('/').strip()
+        max_results = min(max(int(body.get('max_results', 20) or 20), 1), 50)
+        if not name or '/' in name or name in ('.', '..') or '..' in name:
+            return self.response.json(200, {'ok': False, 'error': 'name 必须是单个文件名'})
+        if not os.path.isdir(path):
+            return self.response.json(200, {'ok': False, 'error': f'不是目录: {path}'})
+        print(f'馃攳 [鏌ユ壘鏂囦欢] "{name}" in {path}')
+
+        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache'}
+        case_insensitive = sys.platform == 'win32'
+        target_name = name.lower() if case_insensitive else name
+        base = os.path.realpath(path)
+        cwd = os.path.realpath(config.get_current_cwd())
+        results = []
+        truncated = False
+        try:
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                for fname in files:
+                    cmp_name = fname.lower() if case_insensitive else fname
+                    if cmp_name != target_name:
+                        continue
+                    full = os.path.realpath(os.path.join(root, fname))
+                    try:
+                        rel = os.path.relpath(full, cwd).replace('\\', '/')
+                    except Exception:
+                        rel = full.replace('\\', '/')
+                    results.append({
+                        'name': fname,
+                        'path': rel
+                    })
+                    if len(results) >= max_results:
+                        truncated = True
+                        break
+                if truncated:
+                    break
+            self.response.json(200, {'ok': True, 'name': name, 'matches': results, 'truncated': truncated})
+        except Exception as e:
+            self.response.json(200, {'ok': False, 'error': str(e)})
+
     def handle_search(self, body):
         path, err = check_path_or_error(body.get('path', '') or '.')
         if err: return self.response.json(200, {'ok': False, 'error': err})

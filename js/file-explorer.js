@@ -148,6 +148,41 @@ function resolveFileExplorerOpenPath(path) {
   return { ok: true, path: normalizeExplorerPath(raw) };
 }
 
+function isBareFileExplorerFileReference(path) {
+  const raw = String(path || '').trim();
+  if (!raw || raw.includes('/') || raw.includes('\\')) return false;
+  if (isAbsoluteExplorerPath(raw) || raw.includes('..')) return false;
+  return /^[\w@.+\-\u4e00-\u9fa5 ]+\.[A-Za-z0-9]{1,12}$/.test(raw);
+}
+
+async function resolveBareFileExplorerFileReference(path) {
+  const name = String(path || '').trim();
+  if (!isBareFileExplorerFileReference(name)) return { ok: true, path: name };
+  if (typeof callAgentBackend !== 'function') return { ok: false, error: 'File explorer backend is not loaded' };
+  const r = await callAgentBackend(
+    'find_file',
+    { path: '.', name, max_results: 20 },
+    undefined,
+    undefined,
+    fileExplorerBackendContext()
+  );
+  if (typeof r === 'string') return { ok: false, error: r };
+  if (!r || !r.ok) return { ok: false, error: (r && r.error) || `Unable to find file: ${name}` };
+  const matches = Array.isArray(r.matches) ? r.matches : [];
+  if (matches.length === 1 && matches[0] && matches[0].path) {
+    return { ok: true, path: normalizeExplorerPath(matches[0].path) };
+  }
+  if (!matches.length) {
+    return { ok: false, error: `File not found: ${name}` };
+  }
+  const shown = matches.slice(0, 5).map(m => m && m.path ? m.path : '').filter(Boolean).join('\n');
+  const more = r.truncated || matches.length > 5 ? '\n...' : '';
+  return {
+    ok: false,
+    error: `Multiple files named ${name}; use a more specific relative path:\n${shown}${more}`
+  };
+}
+
 function joinExplorerPath(base, name) {
   const root = normalizeExplorerPath(base);
   const cleanName = String(name || '').replace(/[\\/]+/g, '/').replace(/^\/+/, '').replace(/\/+$/g, '');
@@ -2155,13 +2190,21 @@ async function openFileWithSystemDefault(path) {
   }
 }
 
-function openFileExplorerPath(path, type = '') {
+async function openFileExplorerPath(path, type = '') {
   const resolved = resolveFileExplorerOpenPath(path);
   if (!resolved.ok) {
     fileExplorerToast(resolved.error || '无法打开路径', 5200);
     return;
   }
-  const normalizedPath = resolved.path;
+  let normalizedPath = resolved.path;
+  if (!type && isBareFileExplorerFileReference(normalizedPath)) {
+    const found = await resolveBareFileExplorerFileReference(normalizedPath);
+    if (!found.ok) {
+      fileExplorerToast(found.error || 'Unable to resolve file reference', 6500);
+      return;
+    }
+    normalizedPath = found.path;
+  }
   if (type === 'dir') {
     loadFileExplorer(normalizedPath);
     return;
@@ -3102,6 +3145,8 @@ window.downloadFileExplorerPath = downloadFileExplorerPath;
 window.renameFileExplorerPath = renameFileExplorerPath;
 window.deleteFileExplorerPath = deleteFileExplorerPath;
 window.openFileExplorerPath = openFileExplorerPath;
+window.isBareFileExplorerFileReference = isBareFileExplorerFileReference;
+window.resolveBareFileExplorerFileReference = resolveBareFileExplorerFileReference;
 window.createFileExplorerFile = createFileExplorerFile;
 window.createFileExplorerFolder = createFileExplorerFolder;
 window.switchFileExplorerWorkspace = switchFileExplorerWorkspace;
@@ -3125,6 +3170,8 @@ window.AgentApp.define('fileExplorer', {
   FILE_EXPLORER_STATE,
   normalizeExplorerPath,
   resolveFileExplorerOpenPath,
+  isBareFileExplorerFileReference,
+  resolveBareFileExplorerFileReference,
   joinExplorerPath,
   parentExplorerPath,
   renderFileExplorer,

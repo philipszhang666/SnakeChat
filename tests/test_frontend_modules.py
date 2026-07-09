@@ -445,6 +445,13 @@ class FrontendModuleTests(unittest.TestCase):
         ):
             self.assertIn(delegated_attr, tools_js)
 
+    def test_tool_schema_output_is_sorted_for_prompt_cache(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        self.assertIn('function compareToolSchemaOrder(a, b)', tools_js)
+        self.assertIn('.sort(compareToolSchemaOrder)', tools_js)
+        self.assertIn('compareToolSchemaOrder,', tools_js[tools_js.index("window.AgentApp.define('tools'"):])
+
     def test_api_modules_consume_state_module(self):
         api_adapters_js = (ROOT / 'js' / 'api-adapters.js').read_text(encoding='utf-8')
         api_profiles_js = (ROOT / 'js' / 'api-profiles.js').read_text(encoding='utf-8')
@@ -709,6 +716,21 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('<div class="msg-content${isUser ? \' user-plain-text\' : \'\'}">${mainContentHtml}</div>', chat_js)
         self.assertIn("if (m.role === 'user') {\n    wrap.innerHTML = renderUserPlainTextContent(m.content || '');", chat_js)
         self.assertIn('.msg-content.user-plain-text{white-space:pre-wrap;overflow-wrap:anywhere}', base_css)
+
+    def test_ai_file_links_resolve_bare_filenames_without_guessing(self):
+        markdown_js = (ROOT / 'js' / 'markdown.js').read_text(encoding='utf-8')
+        file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
+
+        self.assertIn('function isBareMarkdownFileLinkPath(path)', markdown_js)
+        self.assertIn('function renderMarkdownFilePathAnchor(rawPath, options = {})', markdown_js)
+        self.assertIn('function splitMarkdownSpacedFileRefs(text)', markdown_js)
+        self.assertIn("if (!p.includes('/') && !isBareMarkdownFileLinkPath(p)) return false;", markdown_js)
+        self.assertIn('if (/\\/\\s|\\s\\//.test(p)) return false;', markdown_js)
+        self.assertIn("const fileRefNamePart = '[\\\\w@.+\\\\-\\\\u4e00-\\\\u9fa5]+(?: [\\\\w@.+\\\\-\\\\u4e00-\\\\u9fa5]+)*';", markdown_js)
+        self.assertIn('function isBareFileExplorerFileReference(path)', file_explorer_js)
+        self.assertIn("callAgentBackend(\n    'find_file'", file_explorer_js)
+        self.assertIn('if (!type && isBareFileExplorerFileReference(normalizedPath))', file_explorer_js)
+        self.assertIn('Multiple files named ${name}; use a more specific relative path', file_explorer_js)
 
     def test_beacon_consumes_state_module(self):
         beacon_js = (ROOT / 'js' / 'beacon.js').read_text(encoding='utf-8')

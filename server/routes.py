@@ -57,6 +57,7 @@ ACTION_ROUTES = (
     ActionRoute('copy_file', 'handle_copy_file'),
     ActionRoute('move_file', 'handle_move_file'),
     ActionRoute('list_dir', 'handle_list_dir'),
+    ActionRoute('find_file', 'handle_find_file'),
     ActionRoute('create_file', 'handle_create_file'),
     ActionRoute('create_dir', 'handle_create_dir'),
     ActionRoute('search', 'handle_search'),
