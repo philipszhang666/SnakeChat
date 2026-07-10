@@ -1123,6 +1123,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="copy-item">复制</button>
       <button type="button" data-action="cut-item">剪切</button>
       <button type="button" data-action="paste" data-paste-only="true" data-dir-only="true" hidden>粘贴到此文件夹</button>
+      <button type="button" data-action="clear-clipboard" data-clipboard-only="true" hidden>取消复制/剪切</button>
       <button type="button" data-action="download" data-remote-only="true">下载</button>
       <button type="button" data-action="rename">重命名</button>
       <button type="button" data-action="copy-path">复制相对路径</button>
@@ -1134,6 +1135,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="upload-files" data-remote-only="true">上传文件</button>
       <button type="button" data-action="upload-folder" data-remote-only="true">上传文件夹</button>
       <button type="button" data-action="paste" data-paste-only="true" hidden>粘贴</button>
+      <button type="button" data-action="clear-clipboard" data-clipboard-only="true" hidden>取消复制/剪切</button>
       <button type="button" data-action="add-quick-access" data-add-quick-access-only>添加到快速访问</button>
       <button type="button" data-action="remove-quick-access" data-current-quick-access-only hidden>移出快速访问</button>
       <div class="file-explorer-menu-submenu" data-quick-access-wrapper hidden>
@@ -2561,6 +2563,9 @@ function showFileExplorerContextMenu(event, item) {
     const needsDir = btn.dataset.dirOnly === 'true';
     btn.hidden = !FILE_EXPLORER_STATE.clipboard || (needsDir && type !== 'dir');
   });
+  menu.querySelectorAll('[data-clipboard-only]').forEach(btn => {
+    btn.hidden = !FILE_EXPLORER_STATE.clipboard;
+  });
   menu.querySelectorAll('[data-remote-only]').forEach(btn => {
     btn.hidden = !isFileExplorerRemoteMode();
   });
@@ -2936,6 +2941,12 @@ function cutFileExplorerItem(path = FILE_EXPLORER_STATE.contextPath, type = FILE
   fileExplorerToast(`已剪切 ${FILE_EXPLORER_STATE.clipboard.name || FILE_EXPLORER_STATE.clipboard.path}`);
 }
 
+function clearFileExplorerClipboard() {
+  if (!FILE_EXPLORER_STATE.clipboard) return;
+  FILE_EXPLORER_STATE.clipboard = null;
+  fileExplorerToast('已取消复制/剪切');
+}
+
 function rebaseMovedExplorerPath(current, sourcePath, targetPath) {
   const currentPath = normalizeExplorerPath(current);
   const source = normalizeExplorerPath(sourcePath);
@@ -3076,6 +3087,7 @@ function handleFileExplorerContextMenuAction(event) {
   else if (action === 'compile-tex') compileTexFile(path);
   else if (action === 'copy-item') copyFileExplorerItem(path, type);
   else if (action === 'cut-item') cutFileExplorerItem(path, type);
+  else if (action === 'clear-clipboard') clearFileExplorerClipboard();
   else if (action === 'paste') pasteFileExplorerItem(path);
   else if (action === 'download') downloadFileExplorerPath(path, type);
   else if (action === 'upload-files') openFileExplorerUploadPicker('files', path);
@@ -3140,6 +3152,7 @@ window.copyFileExplorerRelativePath = copyFileExplorerRelativePath;
 window.copyFileExplorerAbsolutePath = copyFileExplorerAbsolutePath;
 window.copyFileExplorerItem = copyFileExplorerItem;
 window.cutFileExplorerItem = cutFileExplorerItem;
+window.clearFileExplorerClipboard = clearFileExplorerClipboard;
 window.pasteFileExplorerItem = pasteFileExplorerItem;
 window.downloadFileExplorerPath = downloadFileExplorerPath;
 window.renameFileExplorerPath = renameFileExplorerPath;
@@ -3198,6 +3211,7 @@ window.AgentApp.define('fileExplorer', {
   copyFileExplorerAbsolutePath,
   copyFileExplorerItem,
   cutFileExplorerItem,
+  clearFileExplorerClipboard,
   pasteFileExplorerItem,
   downloadFileExplorerPath,
   renameFileExplorerPath,

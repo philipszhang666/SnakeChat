@@ -1815,7 +1815,7 @@ class FrontendModuleTests(unittest.TestCase):
             ),
             'file-explorer.js': (
                 'fileExplorer',
-                ['renderFileExplorer', 'loadFileExplorer', 'openFileEditor', 'openPdfViewer', 'openCurrentFileInMainPanel', 'uploadSelectedFilesToExplorer', 'openFileExplorerUploadPicker', 'copyFileExplorerPath', 'copyFileExplorerRelativePath', 'copyFileExplorerAbsolutePath', 'copyFileExplorerItem', 'cutFileExplorerItem', 'pasteFileExplorerItem', 'downloadFileExplorerPath']
+                ['renderFileExplorer', 'loadFileExplorer', 'openFileEditor', 'openPdfViewer', 'openCurrentFileInMainPanel', 'uploadSelectedFilesToExplorer', 'openFileExplorerUploadPicker', 'copyFileExplorerPath', 'copyFileExplorerRelativePath', 'copyFileExplorerAbsolutePath', 'copyFileExplorerItem', 'cutFileExplorerItem', 'clearFileExplorerClipboard', 'pasteFileExplorerItem', 'downloadFileExplorerPath']
             ),
             'git-panel.js': (
                 'gitPanel',
@@ -1952,6 +1952,8 @@ class FrontendModuleTests(unittest.TestCase):
             'data-action="cut-item"',
             'data-action="paste"',
             'data-paste-only="true"',
+            'data-action="clear-clipboard"',
+            'data-clipboard-only="true"',
             'data-action="download" data-remote-only="true"',
             'data-action="copy-path"',
             'data-action="copy-absolute-path"',
@@ -1963,6 +1965,7 @@ class FrontendModuleTests(unittest.TestCase):
             'function joinFileExplorerAbsolutePath',
             'function copyFileExplorerItem',
             'function cutFileExplorerItem',
+            'function clearFileExplorerClipboard',
             'function pasteFileExplorerItem',
             'function downloadFileExplorerPath',
             "action === 'copy-absolute-path'",
@@ -1970,6 +1973,7 @@ class FrontendModuleTests(unittest.TestCase):
             "'copy_file'",
             "'move_file'",
             "clip.mode === 'cut'",
+            "action === 'clear-clipboard'",
             'target_dir: normalizedTargetDir',
             '&download=1',
             "&archive=zip",

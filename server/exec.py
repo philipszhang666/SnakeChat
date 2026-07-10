@@ -86,6 +86,22 @@ def _coerce_execute_timeout(value, default=30, maximum=300):
     return max(1, min(timeout, maximum))
 
 
+_POSIX_COMMAND_SHELLS = {'sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'}
+
+
+def _shell_kwargs_for_subprocess():
+    if os.name == 'nt':
+        return {}
+    shell = os.environ.get('SNAKE_AGENT_LOGIN_SHELL') or os.environ.get('SHELL') or ''
+    shell = shell.strip()
+    if not shell or not os.path.isabs(shell) or not os.path.exists(shell):
+        return {}
+    name = os.path.basename(shell).lower()
+    if name not in _POSIX_COMMAND_SHELLS:
+        return {}
+    return {'executable': shell}
+
+
 def _split_ssh_command(command):
     command = (command or '').strip()
     if not command:
@@ -108,6 +124,18 @@ def _quote_remote_cd_path(path):
     return shlex.quote(raw)
 
 
+def _remote_login_shell_probe_command():
+    return (
+        'snake_shell="${SHELL:-}"; '
+        'if command -v getent >/dev/null 2>&1; then '
+        'snake_user="$(id -un 2>/dev/null || printf %s "${USER:-}")"; '
+        'snake_passwd_shell="$(getent passwd "$snake_user" 2>/dev/null | awk -F: \'{print $7}\' | tail -n 1)"; '
+        'if [ -n "$snake_passwd_shell" ]; then snake_shell="$snake_passwd_shell"; fi; '
+        'fi; '
+        'if [ -z "$snake_shell" ] || [ ! -x "$snake_shell" ]; then snake_shell="/bin/sh"; fi'
+    )
+
+
 def _remote_terminal_ssh_args(ssh_command, remote_workspace, proxy_url=''):
     parts = _split_ssh_command(ssh_command)
     proxy_url = str(proxy_url or '').strip()
@@ -118,7 +146,11 @@ def _remote_terminal_ssh_args(ssh_command, remote_workspace, proxy_url=''):
             f'export HTTP_PROXY={q_proxy} HTTPS_PROXY={q_proxy} ALL_PROXY={q_proxy} '
             f'http_proxy={q_proxy} https_proxy={q_proxy} all_proxy={q_proxy}; '
         )
-    remote_cmd = f'cd {_quote_remote_cd_path(remote_workspace)} && {proxy_exports}exec "${{SHELL:-/bin/sh}}" -l'
+    remote_cmd = (
+        f'{_remote_login_shell_probe_command()}; '
+        f'cd {_quote_remote_cd_path(remote_workspace)} && '
+        f'{proxy_exports}exec "$snake_shell" -l'
+    )
     return list(parts[:-1]) + ['-t', parts[-1], remote_cmd]
 
 
@@ -293,7 +325,7 @@ class ExecMixin:
         try:
             proc = subprocess.run(
                 command, shell=True, capture_output=True,
-                timeout=timeout, cwd=cwd_abs
+                timeout=timeout, cwd=cwd_abs, **_shell_kwargs_for_subprocess()
             )
             stdout = _decode_process_output(proc.stdout)
             stderr = _decode_process_output(proc.stderr)
@@ -592,7 +624,7 @@ class ExecMixin:
                 print(f'🌐 [Git proxy] execute git command with proxy={proxy_url}')
             proc = subprocess.run(
                 command, shell=True, capture_output=True,
-                timeout=timeout, cwd=cwd_abs, env=env
+                timeout=timeout, cwd=cwd_abs, env=env, **_shell_kwargs_for_subprocess()
             )
             stdout = _decode_process_output(proc.stdout)
             stderr = _decode_process_output(proc.stderr)

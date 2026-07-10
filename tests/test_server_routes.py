@@ -14,6 +14,7 @@ from server.exec import (
     _windows_remote_terminal_commands,
 )
 from server.handler import Handler
+from server.remote import _remote_login_shell_command, _remote_python_bin_script
 from server.routes import (
     ACTION_ROUTE_BY_NAME,
     ACTION_ROUTES,
@@ -157,13 +158,28 @@ class ExecGitProxyTests(unittest.TestCase):
         self.assertEqual(120, _coerce_execute_timeout('120', default=60))
         self.assertEqual(60, _coerce_execute_timeout('bad', default=60))
 
+    def test_remote_login_shell_wrapper_uses_passwd_shell(self):
+        command = _remote_login_shell_command('echo ok')
+
+        self.assertIn('getent passwd "$snake_user"', command)
+        self.assertIn('SNAKE_AGENT_LOGIN_SHELL="$snake_shell" exec "$snake_shell" -lc', command)
+        self.assertIn("'echo ok'", command)
+
+    def test_remote_python_probe_accepts_python_or_python3(self):
+        script = _remote_python_bin_script()
+
+        self.assertIn('command -v python3', script)
+        self.assertIn('command -v python', script)
+        self.assertIn('python3/python not found', script)
+
     def test_remote_terminal_builds_ssh_cd_command(self):
         args = _remote_terminal_ssh_args('ssh -p 2222 user@example.com', '~/project dir')
 
         self.assertEqual(['ssh', '-p', '2222', '-t', 'user@example.com'], args[:5])
         self.assertIn('cd "$HOME"/', args[-1])
         self.assertIn('project dir', args[-1])
-        self.assertIn('exec "${SHELL:-/bin/sh}" -l', args[-1])
+        self.assertIn('getent passwd "$snake_user"', args[-1])
+        self.assertIn('exec "$snake_shell" -l', args[-1])
 
     def test_remote_terminal_exports_git_proxy(self):
         args = _remote_terminal_ssh_args(
@@ -174,7 +190,7 @@ class ExecGitProxyTests(unittest.TestCase):
 
         self.assertIn('export HTTP_PROXY=http://127.0.0.1:7890', args[-1])
         self.assertIn('https_proxy=http://127.0.0.1:7890', args[-1])
-        self.assertIn('exec "${SHELL:-/bin/sh}" -l', args[-1])
+        self.assertIn('exec "$snake_shell" -l', args[-1])
 
     def test_windows_remote_terminal_wraps_ssh_in_encoded_powershell(self):
         ssh_args = _remote_terminal_ssh_args('ssh -p 2222 user@example.com', '~/project dir')
@@ -185,13 +201,13 @@ class ExecGitProxyTests(unittest.TestCase):
         self.assertEqual('powershell.exe', commands[0][5])
         self.assertEqual('powershell.exe', commands[1][2])
         self.assertEqual('powershell.exe', commands[2][0])
-        self.assertNotIn('exec "${SHELL:-/bin/sh}" -l', commands[0])
+        self.assertNotIn('exec "$snake_shell" -l', commands[0])
 
         encoded = commands[0][-1]
         script = base64.b64decode(encoded).decode('utf-16le')
         self.assertIn("$psi.FileName = 'ssh'", script)
         self.assertIn("$psi.Arguments = '-p 2222 -t user@example.com", script)
-        self.assertIn('exec \\"${SHELL:-/bin/sh}\\" -l', script)
+        self.assertIn('exec \\"$snake_shell\\" -l', script)
 
 
 if __name__ == '__main__':

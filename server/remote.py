@@ -87,6 +87,30 @@ def _remote_q(s):
     return shlex.quote(str(s or ''))
 
 
+def _remote_login_shell_command(script):
+    inner = textwrap.dedent(str(script or '')).strip()
+    return textwrap.dedent(f'''
+        snake_shell="${{SHELL:-}}"
+        if command -v getent >/dev/null 2>&1; then
+            snake_user="$(id -un 2>/dev/null || printf %s "${{USER:-}}")"
+            snake_passwd_shell="$(getent passwd "$snake_user" 2>/dev/null | awk -F: '{{print $7}}' | tail -n 1)"
+            if [ -n "$snake_passwd_shell" ]; then snake_shell="$snake_passwd_shell"; fi
+        fi
+        if [ -z "$snake_shell" ] || [ ! -x "$snake_shell" ]; then snake_shell="/bin/sh"; fi
+        SNAKE_AGENT_LOGIN_SHELL="$snake_shell" exec "$snake_shell" -lc {_remote_q(inner)}
+    ''').strip()
+
+
+def _remote_python_bin_script():
+    return textwrap.dedent('''
+        PY_BIN="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+        if [ -z "$PY_BIN" ]; then
+            echo "python3/python not found after loading login shell environment. PATH=$PATH" >&2
+            exit 127
+        fi
+    ''').strip()
+
+
 def _local_port_free(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -329,10 +353,10 @@ def _tail_remote_agent_log(ssh_parts, password='', lines=120):
 def _diagnose_remote_workspace(ssh_parts, remote_workspace, password=''):
     """Validate the workspace on the remote host and return human-readable diagnostics."""
     q = _remote_q(remote_workspace)
-    cmd = textwrap.dedent(f'''
+    cmd = _remote_login_shell_command(f'''
         set +e
-        P={q}
-        python3 - <<'PY' "$P"
+        {_remote_python_bin_script()}
+        "$PY_BIN" - {q} <<'PY'
 import os, sys, json
 p = os.path.expanduser(sys.argv[1])
 rp = os.path.realpath(p)
@@ -349,7 +373,7 @@ print(json.dumps(info, ensure_ascii=False))
 if not (info['exists'] and info['isdir'] and info['readable'] and info['executable']):
     sys.exit(2)
 PY
-    ''').strip()
+    ''')
     return _run(ssh_parts + [cmd], password=password, timeout=30).strip()
 
 
@@ -357,8 +381,10 @@ def _pick_remote_port(ssh_parts, preferred_port, password='', span=100):
     """Pick an available port on the remote host by attempting to bind 127.0.0.1."""
     start = int(preferred_port or 8765)
     count = max(1, min(1000, int(span or 100)))
-    cmd = textwrap.dedent(f'''
-        python3 - <<'PY'
+    cmd = _remote_login_shell_command(f'''
+        set -e
+        {_remote_python_bin_script()}
+        "$PY_BIN" - <<'PY'
 import socket, sys
 start = {start}
 count = {count}
@@ -376,7 +402,7 @@ for port in range(start, start + count):
 print('')
 sys.exit(2)
 PY
-    ''').strip()
+    ''')
     out = _run(ssh_parts + [cmd], password=password, timeout=30).strip()
     if not out:
         raise RuntimeError(f'远程没有可用端口：{start}-{start + count - 1}')
@@ -388,8 +414,10 @@ def _list_remote_dirs(ssh_parts, path='~', password='', show_hidden=False, limit
     q_path = _remote_q(path or '~')
     show_hidden_flag = '1' if show_hidden else '0'
     max_items = max(10, min(2000, int(limit or 500)))
-    cmd = textwrap.dedent(f'''
-        python3 - <<'PY' {q_path} {show_hidden_flag} {max_items}
+    cmd = _remote_login_shell_command(f'''
+        set -e
+        {_remote_python_bin_script()}
+        "$PY_BIN" - {q_path} {show_hidden_flag} {max_items} <<'PY'
 import json, os, sys
 
 raw = sys.argv[1] if len(sys.argv) > 1 else '~'
@@ -438,7 +466,7 @@ for name in names:
 entries.sort(key=lambda x: x['name'].lower())
 emit({{'ok': True, 'input': raw, 'path': real, 'parent': os.path.dirname(real) or real, 'entries': entries[:limit], 'truncated': len(entries) > limit}})
 PY
-    ''').strip()
+    ''')
     out = _run(ssh_parts + [cmd], password=password, timeout=45).strip()
     try:
         data = json.loads(out.splitlines()[-1] if out else '{}')
@@ -536,9 +564,12 @@ class RemoteMixin:
             _run(scp_base + [bundle, f'{target}:~/.snake-agent/agent_bundle.tar.gz'], password=password, timeout=180)
 
             logs.append('4/5 解包并启动远程 Agent...')
-            install_cmd = 'python3 -m pip install --user -r ~/.snake-agent/current/requirements.txt >/tmp/snake-agent-pip.log 2>&1 || true' if install_deps else 'true'
-            start_cmd = textwrap.dedent(f'''
+            install_cmd = '"$PY_BIN" -m pip install --user -r ~/.snake-agent/current/requirements.txt >/tmp/snake-agent-pip.log 2>&1 || true' if install_deps else 'true'
+            start_cmd = _remote_login_shell_command(f'''
                 set -e
+                {_remote_python_bin_script()}
+                echo "login_shell=${{SNAKE_AGENT_LOGIN_SHELL:-${{SHELL:-unknown}}}}"
+                echo "python=$PY_BIN"
                 tar -xzf ~/.snake-agent/agent_bundle.tar.gz -C ~/.snake-agent/current
                 {install_cmd}
                 # 先停掉旧 Agent。只 kill pidfile 可能不够：pidfile 可能丢失/过期，或旧进程不是当前 pid。
@@ -566,7 +597,7 @@ class RemoteMixin:
                     fi
                 fi
                 cd ~/.snake-agent/current
-                nohup python3 local_terminal_server.py --workspace {_remote_q(remote_workspace)} --host 127.0.0.1 --port {remote_port} --remote-heartbeat-timeout {heartbeat_timeout} > ~/.snake-agent/logs/remote-agent.log 2>&1 &
+                SNAKE_AGENT_LOGIN_SHELL="${{SNAKE_AGENT_LOGIN_SHELL:-${{SHELL:-/bin/sh}}}}" nohup "$PY_BIN" local_terminal_server.py --workspace {_remote_q(remote_workspace)} --host 127.0.0.1 --port {remote_port} --remote-heartbeat-timeout {heartbeat_timeout} > ~/.snake-agent/logs/remote-agent.log 2>&1 &
                 newpid=$!
                 echo $newpid > ~/.snake-agent/run/agent.pid
                 sleep 1.5
@@ -576,7 +607,7 @@ class RemoteMixin:
                     exit 1
                 fi
                 echo "$newpid"
-            ''').strip()
+            ''')
             remote_out = _run(ssh_parts + [start_cmd], password=password, timeout=180)
             logs.append(remote_out.strip()[-1000:])
 
