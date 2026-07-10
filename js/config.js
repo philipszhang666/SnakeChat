@@ -230,18 +230,43 @@ const BUILTIN_TOOLS = [
   },
   {
     name: 'execute_action',
-    description: '在用户的本地工作区中执行任务指令。可用于运行程序、查询信息、安装依赖、版本管理等日常任务。命令只能在工作区沙箱内运行；cwd 可指定执行目录。单独执行 cd 会切换当前浏览器会话的后续工具目录，其他标签/任务不受影响；更推荐直接传 cwd 保持目录明确。每次执行前会向用户征求确认。默认最多等待 60 秒；如果命令预计更久，可设置 timeout（1-300 秒）。如果用户明确要求在新终端窗口中运行（如想看到实时输出、命令耗时很长不想阻塞），请设置 new_window: true。',
+    description: '在用户的本地工作区中执行任务指令。可用于运行程序、查询信息、安装依赖、版本管理等日常任务。命令只能在工作区沙箱内运行；cwd 可指定执行目录。单独执行 cd 会切换当前浏览器会话的后续工具目录，其他标签/任务不受影响；更推荐直接传 cwd 保持目录明确。每次执行前会向用户征求确认。timeout 表示前台等待秒数（默认 60，上限由主设置控制，默认 300）：如果命令在 timeout 内结束，直接返回结果；如果到 timeout 还没结束，命令会继续在后台运行并返回 task_id，之后调用 command_task_output 查询进度。AI 不需要传 background。用户明确要求看到实时终端窗口时才设置 new_window: true。',
     parameters: {
       type: 'object',
       properties: {
         command: { type: 'string', description: '要执行的任务指令，例如 ls -la 或 python script.py' },
         cwd: { type: 'string', description: '执行目录（可选）' },
-        timeout: { type: 'number', description: '命令最大运行秒数（可选，默认 60，范围 1-300）。只表示总运行时长，不会因为命令有输出而自动续时。' },
-        new_window: { type: 'boolean', description: '是否在新终端窗口中运行（默认 false 即后台静默运行）。适合长时间命令（如安装依赖、训练模型、启动服务），或用户明确要求看到终端实时输出时使用。' }
+        timeout: { type: 'number', description: '可选：前台等待秒数（默认 60，上限由主设置控制，默认 300）。超过该时间不会杀死命令，而是返回后台 task_id。' },
+        new_window: { type: 'boolean', description: '是否在新终端窗口中运行（默认 false，即在后端执行并按 timeout 前台等待）。只有用户明确要求看到实时终端窗口时设置 true。' }
       },
       required: ['command']
     },
     code: 'return await executeTerminalCommand(args.command, args.cwd, args.new_window, args.timeout);'
+  },
+  {
+    name: 'command_task_output',
+    description: '查询 execute_action 因超过 timeout 而转入后台运行的命令任务。execute_action 返回 task_id 后，调用本工具查看任务是否完成、当前 stdout/stderr、退出码。任务仍在运行时可稍后再次调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'execute_action 返回的后台任务 ID，例如 cmd_ab12cd34ef56' },
+        wait: { type: 'number', description: '可选：本次查询最多等待多少秒获取新输出或完成状态，默认 8，上限由主设置控制，默认 300。传 0 表示立即返回当前状态。' }
+      },
+      required: ['task_id']
+    },
+    code: 'return await readCommandTaskOutput(args.task_id, args.wait);'
+  },
+  {
+    name: 'command_task_list',
+    description: '列出当前对话创建的后台命令任务。用于忘记 task_id、需要查看仍在运行或最近完成的 execute_action 后台任务时调用。默认包含已完成任务；如只关心运行中的任务，可传 include_finished=false。',
+    parameters: {
+      type: 'object',
+      properties: {
+        include_finished: { type: 'boolean', description: '是否包含已完成/取消/超时任务，默认 true。false 时只返回 running 任务。' },
+        limit: { type: 'number', description: '最多返回多少条任务，默认 50，范围 1-200。' }
+      }
+    },
+    code: 'return await listCommandTasks(args.include_finished, args.limit);'
   },
   {
     name: 'read_note',

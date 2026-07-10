@@ -73,6 +73,22 @@ function openSettings() {
     if (maxToolRoundsInputEl) maxToolRoundsInputEl.value = v;
     if (maxToolRoundsValEl) maxToolRoundsValEl.textContent = v;
   }
+
+  const executeTimeoutMaxEl = document.getElementById('executeTimeoutMax');
+  if (executeTimeoutMaxEl) {
+    const v = parseInt(s.executeTimeoutMax);
+    executeTimeoutMaxEl.value = isNaN(v) ? 300 : Math.max(1, Math.min(86400, v));
+  }
+  const commandTaskMaxRuntimeEl = document.getElementById('commandTaskMaxRuntime');
+  if (commandTaskMaxRuntimeEl) {
+    const v = parseInt(s.commandTaskMaxRuntime);
+    commandTaskMaxRuntimeEl.value = isNaN(v) ? 3600 : Math.max(1, Math.min(604800, v));
+  }
+  const commandTaskOutputWaitMaxEl = document.getElementById('commandTaskOutputWaitMax');
+  if (commandTaskOutputWaitMaxEl) {
+    const v = parseInt(s.commandTaskOutputWaitMax);
+    commandTaskOutputWaitMaxEl.value = isNaN(v) ? 300 : Math.max(0, Math.min(3600, v));
+  }
   
   // 兼容旧版 Token 设置：新版本地后端不再需要浏览器保存鉴权 Token。
   // 如果旧 UI/旧脚本仍存在该函数，则刷新；否则不要阻断设置页打开。
@@ -394,6 +410,22 @@ function saveAndClose() {
     const raw = maxToolRoundsInputEl ? maxToolRoundsInputEl.value : maxToolRoundsEl.value;
     const v = parseInt(raw);
     s.maxToolRounds = (isNaN(v) || v < 1) ? 15 : v;
+  }
+
+  const executeTimeoutMaxEl = document.getElementById('executeTimeoutMax');
+  if (executeTimeoutMaxEl) {
+    const v = parseInt(executeTimeoutMaxEl.value);
+    s.executeTimeoutMax = isNaN(v) ? 300 : Math.max(1, Math.min(86400, v));
+  }
+  const commandTaskMaxRuntimeEl = document.getElementById('commandTaskMaxRuntime');
+  if (commandTaskMaxRuntimeEl) {
+    const v = parseInt(commandTaskMaxRuntimeEl.value);
+    s.commandTaskMaxRuntime = isNaN(v) ? 3600 : Math.max(1, Math.min(604800, v));
+  }
+  const commandTaskOutputWaitMaxEl = document.getElementById('commandTaskOutputWaitMax');
+  if (commandTaskOutputWaitMaxEl) {
+    const v = parseInt(commandTaskOutputWaitMaxEl.value);
+    s.commandTaskOutputWaitMax = isNaN(v) ? 300 : Math.max(0, Math.min(3600, v));
   }
   
   // 压缩设置

@@ -15,6 +15,7 @@ import tempfile
 import base64
 
 from . import config
+from .command_tasks import COMMAND_TASKS, coerce_command_task_runtime
 from .sandbox import command_workspace_violation, is_dangerous_command, is_inside_workspace, resolve_path
 from .window_focus import focus_window_soon
 
@@ -84,6 +85,40 @@ def _coerce_execute_timeout(value, default=30, maximum=300):
     except (TypeError, ValueError):
         timeout = default
     return max(1, min(timeout, maximum))
+
+
+def _coerce_execute_timeout_max(value, default=300):
+    try:
+        maximum = int(value)
+    except (TypeError, ValueError):
+        maximum = default
+    return max(1, min(maximum, 86400))
+
+
+def _body_flag_enabled(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def _coerce_task_wait(value, default=0, maximum=30):
+    try:
+        wait = float(value)
+    except (TypeError, ValueError):
+        wait = default
+    return max(0.0, min(wait, float(maximum)))
+
+
+def _coerce_task_wait_max(value, default=300):
+    try:
+        maximum = int(value)
+    except (TypeError, ValueError):
+        maximum = default
+    return max(0, min(maximum, 3600))
 
 
 _POSIX_COMMAND_SHELLS = {'sh', 'bash', 'dash', 'zsh', 'ksh', 'mksh'}
@@ -251,8 +286,30 @@ def _decode_process_output(raw):
     return raw.decode('utf-8', errors='replace')
 
 
+def _command_task_payload(snapshot):
+    stdout_raw = snapshot.pop('stdout_raw', b'') if snapshot else b''
+    stderr_raw = snapshot.pop('stderr_raw', b'') if snapshot else b''
+    status = snapshot.get('status') or 'unknown'
+    payload = dict(snapshot)
+    payload.pop('owner_session_id', None)
+    payload.update({
+        'ok': True,
+        'background_task': True,
+        'stdout': _decode_process_output(stdout_raw)[-12000:],
+        'stderr': _decode_process_output(stderr_raw)[-6000:],
+        'retrieval_status': 'completed' if status in ('completed', 'timed_out', 'cancelled') else 'running',
+        'timed_out': status == 'timed_out',
+        'cancelled': status == 'cancelled',
+    })
+    return payload
+
+
 class ExecMixin:
     """Handler mixin：handle_execute"""
+
+    def _command_task_owner_session_id(self):
+        ctx = getattr(self, 'request_context', None)
+        return str(getattr(ctx, 'session_id', '') or '')
 
     def _runtime_git_proxy_url_from_body(self, body):
         cfg = body.get('git_proxy') if isinstance(body, dict) else None
@@ -306,6 +363,122 @@ class ExecMixin:
             _apply_git_proxy_env(env, proxy_url)
         return env, proxy_url, ''
 
+    def _start_background_command(self, command, cwd_abs, env=None, body=None, kind='execute'):
+        body = body or {}
+        max_runtime = coerce_command_task_runtime(
+            body.get('max_runtime') or body.get('background_timeout') or body.get('task_timeout')
+        )
+        snapshot = COMMAND_TASKS.start(
+            command=command,
+            cwd=cwd_abs,
+            env=env,
+            shell=True,
+            shell_kwargs=_shell_kwargs_for_subprocess(),
+            max_runtime=max_runtime,
+            workspace=config.WORKSPACE_ROOT,
+            kind=kind,
+            owner_session_id=self._command_task_owner_session_id(),
+        )
+        payload = _command_task_payload(snapshot)
+        payload.update({
+            'stdout': payload.get('stdout') or f'Command running in background with ID: {payload.get("task_id")}',
+            'stderr': payload.get('stderr') or '',
+            'returncode': None,
+            'cwd': cwd_abs,
+        })
+        return payload
+
+    def _command_task_execute_response(self, snapshot, cwd_abs, timeout=None):
+        payload = _command_task_payload(snapshot)
+        payload['cwd'] = cwd_abs
+        if payload.get('running'):
+            payload.update({
+                'returncode': None,
+                'foreground_timeout': timeout,
+                'message': f'Command is still running in background task {payload.get("task_id")}',
+            })
+            return payload
+        if payload.get('timed_out') or payload.get('cancelled'):
+            return {
+                'ok': False,
+                'error': payload.get('error') or ('Command task cancelled' if payload.get('cancelled') else 'Command task timed out'),
+                'stdout': payload.get('stdout') or '',
+                'stderr': payload.get('stderr') or '',
+                'returncode': payload.get('returncode'),
+                'cwd': cwd_abs,
+                'workspace': config.WORKSPACE_ROOT,
+                'task_id': payload.get('task_id'),
+                'status': payload.get('status'),
+            }
+        return {
+            'ok': True,
+            'stdout': payload.get('stdout') or '',
+            'stderr': payload.get('stderr') or '',
+            'returncode': payload.get('returncode'),
+            'cwd': cwd_abs,
+            'workspace': config.WORKSPACE_ROOT,
+        }
+
+    def _run_command_until_foreground_timeout(self, command, cwd_abs, env=None, body=None, timeout=60, kind='execute'):
+        body = body or {}
+        max_runtime = coerce_command_task_runtime(
+            body.get('max_runtime') or body.get('background_timeout') or body.get('task_timeout')
+        )
+        started = COMMAND_TASKS.start(
+            command=command,
+            cwd=cwd_abs,
+            env=env,
+            shell=True,
+            shell_kwargs=_shell_kwargs_for_subprocess(),
+            max_runtime=max_runtime,
+            workspace=config.WORKSPACE_ROOT,
+            kind=kind,
+            owner_session_id=self._command_task_owner_session_id(),
+        )
+        snapshot = COMMAND_TASKS.get(
+            started.get('task_id'),
+            wait=timeout,
+            wait_for_completion=True,
+            owner_session_id=self._command_task_owner_session_id(),
+        ) or started
+        return self._command_task_execute_response(snapshot, cwd_abs, timeout=timeout)
+
+    def handle_command_task_output(self, body):
+        task_id = str(body.get('task_id') or body.get('id') or '').strip()
+        if not task_id:
+            return self.response.json(400, {'ok': False, 'error': 'task_id is required'})
+        wait_max = _coerce_task_wait_max(body.get('wait_max'))
+        wait = _coerce_task_wait(body.get('wait'), default=0, maximum=wait_max)
+        snapshot = COMMAND_TASKS.get(task_id, wait=wait, owner_session_id=self._command_task_owner_session_id())
+        if not snapshot:
+            return self.response.json(200, {'ok': False, 'error': f'command task not found: {task_id}'})
+        return self.response.json(200, _command_task_payload(snapshot))
+
+    def handle_command_task_list(self, body):
+        include_finished = body.get('include_finished')
+        include_finished = True if include_finished is None else _body_flag_enabled(include_finished)
+        snapshots = COMMAND_TASKS.list(
+            owner_session_id=self._command_task_owner_session_id(),
+            include_finished=include_finished,
+            limit=body.get('limit') or 50,
+        )
+        tasks = []
+        for snapshot in snapshots:
+            payload = _command_task_payload(snapshot)
+            payload.pop('stdout', None)
+            payload.pop('stderr', None)
+            tasks.append(payload)
+        return self.response.json(200, {'ok': True, 'tasks': tasks})
+
+    def handle_command_task_cancel(self, body):
+        task_id = str(body.get('task_id') or body.get('id') or '').strip()
+        if not task_id:
+            return self.response.json(400, {'ok': False, 'error': 'task_id is required'})
+        snapshot = COMMAND_TASKS.cancel(task_id, owner_session_id=self._command_task_owner_session_id())
+        if not snapshot:
+            return self.response.json(200, {'ok': False, 'error': f'command task not found: {task_id}'})
+        return self.response.json(200, _command_task_payload(snapshot))
+
     def handle_remote_execute(self, body):
         """微信遥控 /终端 专用执行入口。
 
@@ -314,7 +487,8 @@ class ExecMixin:
         可以访问沙箱外路径。
         """
         command = body.get('command', '').strip()
-        timeout = _coerce_execute_timeout(body.get('timeout'), default=60)
+        timeout_max = _coerce_execute_timeout_max(body.get('timeout_max'))
+        timeout = _coerce_execute_timeout(body.get('timeout'), default=60, maximum=timeout_max)
         cwd = body.get('cwd') or config.WORKSPACE_ROOT
         cwd_abs = os.path.realpath(os.path.expanduser(str(cwd)))
         if not command:
@@ -322,22 +496,26 @@ class ExecMixin:
         if not os.path.isdir(cwd_abs):
             return self.response.json(200, {'ok': False, 'error': f'工作目录不存在: {cwd_abs}'})
         print(f'💻 [遥控终端] cwd={cwd_abs}\n   $ {command}')
+        if _body_flag_enabled(body.get('background')):
+            try:
+                return self.response.json(200, self._start_background_command(
+                    command,
+                    cwd_abs,
+                    env=os.environ.copy(),
+                    body=body,
+                    kind='remote_execute',
+                ))
+            except Exception as e:
+                return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
         try:
-            proc = subprocess.run(
-                command, shell=True, capture_output=True,
-                timeout=timeout, cwd=cwd_abs, **_shell_kwargs_for_subprocess()
-            )
-            stdout = _decode_process_output(proc.stdout)
-            stderr = _decode_process_output(proc.stderr)
-            return self.response.json(200, {
-                'ok': True,
-                'stdout': stdout[-12000:],
-                'stderr': stderr[-6000:],
-                'returncode': proc.returncode,
-                'cwd': cwd_abs,
-                'workspace': config.WORKSPACE_ROOT
-            })
-        except subprocess.TimeoutExpired:
+            return self.response.json(200, self._run_command_until_foreground_timeout(
+                command,
+                cwd_abs,
+                env=os.environ.copy(),
+                body=body,
+                timeout=timeout,
+                kind='remote_execute',
+            ))
             return self.response.json(200, {'ok': False, 'error': f'命令超时（{timeout}秒）', 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
         except Exception as e:
             return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
@@ -477,7 +655,8 @@ class ExecMixin:
     def handle_execute(self, body):
         command = body.get('command', '').strip()
         cwd = body.get('cwd') or config.get_current_cwd()
-        timeout = _coerce_execute_timeout(body.get('timeout'), default=30)
+        timeout_max = _coerce_execute_timeout_max(body.get('timeout_max'))
+        timeout = _coerce_execute_timeout(body.get('timeout'), default=30, maximum=timeout_max)
         if not command:
             return self.response.json(400, {'ok': False, 'error': '命令为空'})
         print(f'💻 [执行] cwd={cwd}\n   $ {command}')
@@ -620,22 +799,24 @@ class ExecMixin:
             env, proxy_url, proxy_error = self._execute_env_for_command(command, cwd_abs, body)
             if proxy_error:
                 return self.response.json(200, {'ok': False, 'error': proxy_error})
+            if _body_flag_enabled(body.get('background')):
+                return self.response.json(200, self._start_background_command(
+                    command,
+                    cwd_abs,
+                    env=env,
+                    body=body,
+                    kind='execute',
+                ))
             if proxy_url:
                 print(f'🌐 [Git proxy] execute git command with proxy={proxy_url}')
-            proc = subprocess.run(
-                command, shell=True, capture_output=True,
-                timeout=timeout, cwd=cwd_abs, env=env, **_shell_kwargs_for_subprocess()
-            )
-            stdout = _decode_process_output(proc.stdout)
-            stderr = _decode_process_output(proc.stderr)
-            self.response.json(200, {
-                'ok': True,
-                'stdout': stdout[-8000:],
-                'stderr': stderr[-3000:],
-                'returncode': proc.returncode,
-                'cwd': cwd_abs
-            })
-        except subprocess.TimeoutExpired:
+            self.response.json(200, self._run_command_until_foreground_timeout(
+                command,
+                cwd_abs,
+                env=env,
+                body=body,
+                timeout=timeout,
+                kind='execute',
+            ))
             self.response.json(200, {'ok': False, 'error': f'命令超时（{timeout}秒）'})
         except Exception as e:
             self.response.json(200, {'ok': False, 'error': str(e)})

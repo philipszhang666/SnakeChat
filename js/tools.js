@@ -861,7 +861,7 @@ async function executeTool(name, args, context = {}) {
     if (typeof window !== 'undefined') window.__currentToolContext = toolContext;
     const scopedNames = [
       'callAgentBackend',
-      'executeTerminalCommand', 'readFile', 'writeFile', 'appendFile', 'editFile', 'applyPatch', 'deleteFile',
+      'executeTerminalCommand', 'readCommandTaskOutput', 'listCommandTasks', 'readFile', 'writeFile', 'appendFile', 'editFile', 'applyPatch', 'deleteFile',
       'generatePpt',
       'readToolArtifact',
       'listCheckpoints', 'restoreCheckpoint',

@@ -136,6 +136,8 @@ const TERMINAL_CONFIG = {
 const AGENT_BACKEND_DEFAULT_TIMEOUT_MS = 75 * 1000;
 const AGENT_BACKEND_TOKEN_TIMEOUT_MS = 15 * 1000;
 const AGENT_BACKEND_EXECUTE_GRACE_MS = 15 * 1000;
+const COMMAND_TASK_OUTPUT_WAIT_SEC = 8;
+const COMMAND_TASK_OUTPUT_REQUEST_GRACE_MS = 15 * 1000;
 const LOCAL_ONLY_BACKEND_ACTIONS = new Set(['web_search', 'fetch_url']);
 
 function resolveAgentBackendServerUrl(action) {
@@ -153,13 +155,37 @@ function agentBackendRequestTimeoutMs(action, params) {
     return Math.max(1000, explicit);
   }
   if (action === 'execute') {
+    if (params && params.background) return 30 * 1000;
     const commandTimeoutSec = Math.max(1, parseInt(params && params.timeout, 10) || 60);
-    return Math.min(315 * 1000, (commandTimeoutSec * 1000) + AGENT_BACKEND_EXECUTE_GRACE_MS);
+    return (commandTimeoutSec * 1000) + AGENT_BACKEND_EXECUTE_GRACE_MS;
   }
+  if (action === 'command_task_output') {
+    const waitSec = Math.max(0, parseInt(params && params.wait, 10) || 0);
+    return Math.max(15000, (waitSec * 1000) + COMMAND_TASK_OUTPUT_REQUEST_GRACE_MS);
+  }
+  if (action === 'command_task_cancel') return 15 * 1000;
   if (action === 'generate_ppt') return 300 * 1000;
   if (action === 'web_search' || action === 'fetch_url') return 120 * 1000;
   if (action === 'read_file_binary' || action === 'screenshot' || action === 'list_windows') return 90 * 1000;
   return AGENT_BACKEND_DEFAULT_TIMEOUT_MS;
+}
+
+function executeTimeoutMaxSec() {
+  const s = (typeof terminalState !== 'undefined' && terminalState.settings) ? terminalState.settings : {};
+  const n = parseInt(s.executeTimeoutMax, 10);
+  return Number.isFinite(n) ? Math.max(1, Math.min(86400, n)) : 300;
+}
+
+function commandTaskMaxRuntimeSec() {
+  const s = (typeof terminalState !== 'undefined' && terminalState.settings) ? terminalState.settings : {};
+  const n = parseInt(s.commandTaskMaxRuntime, 10);
+  return Number.isFinite(n) ? Math.max(1, Math.min(604800, n)) : 3600;
+}
+
+function commandTaskOutputWaitMaxSec() {
+  const s = (typeof terminalState !== 'undefined' && terminalState.settings) ? terminalState.settings : {};
+  const n = parseInt(s.commandTaskOutputWaitMax, 10);
+  return Number.isFinite(n) ? Math.max(0, Math.min(3600, n)) : 300;
 }
 
 function makeAgentAbortError(message) {
@@ -940,6 +966,196 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
   }
 }
 
+function commandTaskDelay(ms, signal) {
+  const delay = Math.max(0, parseInt(ms, 10) || 0);
+  if (!delay) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let timer = null;
+    const cleanup = () => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (signal && onAbort) {
+        try { signal.removeEventListener('abort', onAbort); } catch (e) {}
+      }
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(makeAgentAbortError('aborted'));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        reject(makeAgentAbortError('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, delay);
+  });
+}
+
+function commandTaskContext(context, includeSignal = true) {
+  const out = { ...(context && typeof context === 'object' ? context : {}), skipConfirm: true };
+  if (!includeSignal) delete out.signal;
+  return out;
+}
+
+async function cancelCommandTaskBestEffort(taskId, context) {
+  if (!taskId) return;
+  try {
+    await callAgentBackend(
+      'command_task_cancel',
+      { task_id: taskId, requestTimeoutMs: 15000 },
+      undefined,
+      undefined,
+      commandTaskContext(context, false)
+    );
+  } catch (e) {}
+}
+
+function commandTaskToExecuteResult(task, fallbackCommand) {
+  const status = task && task.status ? task.status : 'unknown';
+  const timedOut = !!(task && task.timed_out) || status === 'timed_out';
+  const cancelled = !!(task && task.cancelled) || status === 'cancelled';
+  const command = (task && task.command) || fallbackCommand || '';
+  const cwd = (task && task.cwd) || '';
+  const error = (task && task.error) || (timedOut ? '命令达到最大后台运行时长' : (cancelled ? '命令任务已取消' : ''));
+  return {
+    ok: !(timedOut || cancelled),
+    error,
+    command,
+    cwd,
+    returncode: task ? task.returncode : null,
+    stdout: (task && task.stdout) || '',
+    stderr: (task && task.stderr) || '',
+    background_task: true,
+    task_id: task && task.task_id,
+    status,
+    timed_out: timedOut,
+    cancelled
+  };
+}
+
+async function waitForCommandTask(startResult, fallbackCommand, context) {
+  let last = startResult;
+  const taskId = last && last.task_id;
+  if (!taskId) return startResult;
+  while (last && last.running) {
+    const signal = context && context.signal;
+    if (signal && signal.aborted) {
+      await cancelCommandTaskBestEffort(taskId, context);
+      return commandTaskToExecuteResult({ ...last, status: 'cancelled', cancelled: true, error: '工具请求已被中断，后台命令已取消。' }, fallbackCommand);
+    }
+    const waitSec = COMMAND_TASK_OUTPUT_WAIT_SEC;
+    const result = await callAgentBackend(
+      'command_task_output',
+      {
+        task_id: taskId,
+        wait: waitSec,
+        requestTimeoutMs: (waitSec * 1000) + COMMAND_TASK_OUTPUT_REQUEST_GRACE_MS
+      },
+      undefined,
+      undefined,
+      commandTaskContext(context, true)
+    );
+    if (!result || !result.ok) {
+      if (result && result._toolTimeout) {
+        await commandTaskDelay(500, signal);
+        continue;
+      }
+      return result || { ok: false, error: `后台命令任务查询失败：${taskId}` };
+    }
+    last = result;
+  }
+  return commandTaskToExecuteResult(last, fallbackCommand);
+}
+
+async function readCommandTaskOutput(taskId, wait, context) {
+  const normalizedTaskId = String(taskId || '').trim();
+  if (!normalizedTaskId) return '❌ task_id 不能为空';
+  const waitMax = commandTaskOutputWaitMaxSec();
+  const parsedWait = parseInt(wait, 10);
+  const requestedWait = Number.isFinite(parsedWait) ? parsedWait : Math.min(COMMAND_TASK_OUTPUT_WAIT_SEC, waitMax);
+  const waitSec = Math.max(0, Math.min(waitMax, requestedWait));
+  const r = await callAgentBackend(
+    'command_task_output',
+    {
+      task_id: normalizedTaskId,
+      wait: waitSec,
+      wait_max: waitMax,
+      requestTimeoutMs: (waitSec * 1000) + COMMAND_TASK_OUTPUT_REQUEST_GRACE_MS
+    },
+    undefined,
+    undefined,
+    commandTaskContext(context, true)
+  );
+  if (typeof r === 'string') return r;
+  if (!r || !r.ok) return `❌ 查询后台任务失败：${(r && r.error) || '未知错误'}`;
+  const running = !!r.running;
+  let output = `${running ? '⏳' : '✅'} 后台任务：${r.task_id}\n`;
+  output += `状态：${r.status || (running ? 'running' : 'completed')}\n`;
+  if (r.command) output += `指令：${r.command}\n`;
+  if (r.cwd) output += `目录：${r.cwd}\n`;
+  if (!running && typeof r.returncode !== 'undefined') output += `退出码：${r.returncode}\n`;
+  if (running) output += `任务仍在运行，可稍后再次调用 command_task_output 查询。\n`;
+  if (r.stdout) output += `\n[STDOUT]\n${r.stdout}`;
+  if (r.stderr) output += `\n[STDERR]\n${r.stderr}`;
+  if (!r.stdout && !r.stderr) output += '\n(暂无输出)';
+  return {
+    ok: true,
+    task_id: r.task_id,
+    running,
+    status: r.status || '',
+    returncode: r.returncode,
+    stdout: r.stdout || '',
+    stderr: r.stderr || '',
+    text: output
+  };
+}
+
+async function listCommandTasks(includeFinished, limit, context) {
+  const include = includeFinished !== false;
+  const n = parseInt(limit, 10);
+  const finalLimit = Number.isFinite(n) ? Math.max(1, Math.min(200, n)) : 50;
+  const r = await callAgentBackend(
+    'command_task_list',
+    {
+      include_finished: include,
+      limit: finalLimit,
+      requestTimeoutMs: 15000
+    },
+    undefined,
+    undefined,
+    commandTaskContext(context, true)
+  );
+  if (typeof r === 'string') return r;
+  if (!r || !r.ok) return `❌ 列出后台任务失败：${(r && r.error) || '未知错误'}`;
+  const tasks = Array.isArray(r.tasks) ? r.tasks : [];
+  if (!tasks.length) {
+    return {
+      ok: true,
+      tasks: [],
+      text: include ? '当前对话没有后台命令任务。' : '当前对话没有正在运行的后台命令任务。'
+    };
+  }
+  const lines = tasks.map(task => {
+    const status = task.status || (task.running ? 'running' : 'unknown');
+    const rc = typeof task.returncode !== 'undefined' && task.returncode !== null ? ` exit=${task.returncode}` : '';
+    const cmd = String(task.command || '').replace(/\s+/g, ' ').trim();
+    const shown = cmd.length > 160 ? cmd.slice(0, 157) + '...' : cmd;
+    return `- ${task.task_id} [${status}${rc}] ${shown}`;
+  });
+  return {
+    ok: true,
+    tasks,
+    text: `当前对话后台命令任务：\n${lines.join('\n')}`
+  };
+}
+
 function getToolCheckpointId(context) {
   const ctx = context || (typeof window !== 'undefined' ? window.__currentToolContext : null) || {};
   if (ctx.checkpointId) return ctx.checkpointId;
@@ -1300,8 +1516,9 @@ async function routeGitExecuteCommand(command, context) {
 
 function normalizeExecuteTimeoutSec(timeout) {
   const n = parseInt(timeout, 10);
-  if (!Number.isFinite(n)) return 60;
-  return Math.max(1, Math.min(300, n));
+  const max = executeTimeoutMaxSec();
+  if (!Number.isFinite(n)) return Math.min(60, max);
+  return Math.max(1, Math.min(max, n));
 }
 
 async function executeTerminalCommand(command, cwd, newWindow, timeout, context) {
@@ -1315,13 +1532,47 @@ async function executeTerminalCommand(command, cwd, newWindow, timeout, context)
   const permissionCategory = gitRouted && typeof gitRouted === 'object' ? gitRouted.permissionCategory : '';
   if (gitRouted && typeof gitRouted === 'object' && gitRouted.passthrough) gitRouted = null;
   if (gitRouted !== null) return gitRouted;
-  const r = await callAgentBackend('execute', { command, cwd, timeout: timeoutSec, new_window: !!newWindow },
+  const backendParams = {
+    command,
+    cwd,
+    timeout: timeoutSec,
+    timeout_max: executeTimeoutMaxSec(),
+    max_runtime: commandTaskMaxRuntimeSec(),
+    new_window: !!newWindow
+  };
+  let r = await callAgentBackend('execute', backendParams,
     permissionCategory === 'git_execute' ? 'AI 想执行 Git 命令' : 'AI 想执行任务指令',
     command,
     { ...(context && typeof context === 'object' ? context : {}), forceConfirm, permissionCategory });
+  if (r && r.ok && r.background_task && r.running) {
+    let output = `⏳ 命令超过前台等待时间（${timeoutSec} 秒），已转入后台继续运行。\n`;
+    output += `任务 ID：${r.task_id}\n`;
+    output += `查询进度：调用 command_task_output，传入 task_id="${r.task_id}"。\n`;
+    output += `📂 目录：${r.cwd}\n💻 指令：${command}\n`;
+    if (r.stdout) output += `\n[STDOUT]\n${r.stdout}`;
+    if (r.stderr) output += `\n[STDERR]\n${r.stderr}`;
+    return {
+      ok: true,
+      command,
+      cwd: r.cwd,
+      returncode: null,
+      stdout: r.stdout || '',
+      stderr: r.stderr || '',
+      timeout: timeoutSec,
+      background_task: true,
+      task_id: r.task_id || '',
+      status: r.status || 'running',
+      text: output
+    };
+  }
   if (typeof r === 'string') return r;
   if (!r.ok && (r._stopAll || r._userRejected)) return r;
-  if (!r.ok) return `❌ ${r.error}`;
+  if (!r.ok) {
+    let failedOutput = `❌ ${r.error}`;
+    if (r.stdout) failedOutput += `\n\n[STDOUT]\n${r.stdout}`;
+    if (r.stderr) failedOutput += `\n\n[STDERR]\n${r.stderr}`;
+    return failedOutput;
+  }
   let output = `📂 目录：${r.cwd}\n💻 指令：${command}\n📤 退出码：${r.returncode}\n`;
   if (r.stdout) output += `\n[STDOUT]\n${r.stdout}`;
   if (r.stderr) output += `\n[STDERR]\n${r.stderr}`;
@@ -1335,6 +1586,9 @@ async function executeTerminalCommand(command, cwd, newWindow, timeout, context)
     stderr: r.stderr || '',
     timeout: timeoutSec,
     new_window: !!r.new_window,
+    background_task: !!r.background_task,
+    task_id: r.task_id || '',
+    status: r.status || '',
     text: output
   };
 }
@@ -2332,6 +2586,9 @@ window.AgentApp.define('terminal', {
   termConfirmReject,
   termConfirmRejectAll,
   callAgentBackend,
+  cancelCommandTaskBestEffort,
+  commandTaskToExecuteResult,
+  waitForCommandTask,
   getToolCheckpointId,
   withCheckpointParam,
   checkpointMetaFromResponse,
@@ -2345,6 +2602,8 @@ window.AgentApp.define('terminal', {
   aiGitToolsAvailable,
   routeGitExecuteCommand,
   executeTerminalCommand,
+  readCommandTaskOutput,
+  listCommandTasks,
   readFile,
   writeFile,
   appendFile,

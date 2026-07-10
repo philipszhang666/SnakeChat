@@ -980,7 +980,11 @@ function remoteControlFormatTerminalResult(result, command) {
   const chunks = [];
   chunks.push(`目录：${result.cwd || ''}`);
   chunks.push(`指令：${command}`);
-  if (typeof result.returncode !== 'undefined') chunks.push(`退出码：${result.returncode}`);
+  if (result.background_task && result.running) {
+    chunks.push(`后台任务：${result.task_id || ''}`);
+    chunks.push('状态：仍在运行，可用 command_task_output 查询进度');
+  }
+  if (typeof result.returncode !== 'undefined' && result.returncode !== null) chunks.push(`退出码：${result.returncode}`);
   if (stdout) chunks.push(`[STDOUT]\n${stdout}`);
   if (stderr) chunks.push(`[STDERR]\n${stderr}`);
   if (!stdout && !stderr) chunks.push('NULL');
@@ -991,11 +995,14 @@ async function remoteControlRunTerminalCommand(command) {
   if (typeof callAgentBackend !== 'function') {
     throw new Error('local backend is not available');
   }
-  const result = await callAgentBackend('remote_execute', {
+  const params = {
     command,
     timeout: 60,
+    timeout_max: typeof executeTimeoutMaxSec === 'function' ? executeTimeoutMaxSec() : 300,
+    max_runtime: typeof commandTaskMaxRuntimeSec === 'function' ? commandTaskMaxRuntimeSec() : 3600,
     requestTimeoutMs: 75000
-  }, undefined, undefined, { skipConfirm: true });
+  };
+  const result = await callAgentBackend('remote_execute', params, undefined, undefined, { skipConfirm: true });
   await remoteControlSendWechat(remoteControlFormatSystem(remoteControlFormatTerminalResult(result, command)));
 }
 

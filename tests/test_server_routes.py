@@ -1,13 +1,20 @@
 import base64
+import subprocess
+import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from server.command_tasks import COMMAND_TASKS, coerce_command_task_runtime
 from server.exec import (
     ExecMixin,
     _apply_git_proxy_env,
     _command_invokes_git,
     _coerce_execute_timeout,
+    _coerce_execute_timeout_max,
+    _coerce_task_wait,
+    _coerce_task_wait_max,
     _git_proxy_bat_lines,
     _normalize_local_git_proxy_url,
     _remote_terminal_ssh_args,
@@ -48,6 +55,69 @@ class ServerRouteTests(unittest.TestCase):
         indexed_actions = set(ACTION_ROUTE_BY_NAME)
         declared_actions = {route.action for route in ACTION_ROUTES}
         self.assertEqual(declared_actions, indexed_actions)
+
+    def test_command_task_routes_are_registered(self):
+        self.assertEqual('handle_command_task_output', ACTION_ROUTE_BY_NAME['command_task_output'].handler)
+        self.assertEqual('handle_command_task_list', ACTION_ROUTE_BY_NAME['command_task_list'].handler)
+        self.assertEqual('handle_command_task_cancel', ACTION_ROUTE_BY_NAME['command_task_cancel'].handler)
+
+
+class CommandTaskTests(unittest.TestCase):
+    def test_runtime_is_clamped(self):
+        self.assertEqual(3600, coerce_command_task_runtime(None))
+        self.assertEqual(1, coerce_command_task_runtime(-1))
+        self.assertEqual(24 * 60 * 60, coerce_command_task_runtime(999999))
+
+    def test_background_task_captures_output(self):
+        command = subprocess.list2cmdline([sys.executable, '-c', 'print("task-ok")'])
+        started = COMMAND_TASKS.start(command=command, cwd=str(ROOT), max_runtime=10)
+
+        self.assertTrue(started['task_id'].startswith('cmd_'))
+        deadline = time.time() + 5
+        finished = COMMAND_TASKS.get(started['task_id'], wait=1)
+        while finished and finished['status'] == 'running' and time.time() < deadline:
+            finished = COMMAND_TASKS.get(started['task_id'], wait=0.2)
+
+        self.assertEqual('completed', finished['status'])
+        self.assertEqual(0, finished['returncode'])
+        self.assertIn(b'task-ok', finished['stdout_raw'])
+
+    def test_foreground_timeout_returns_running_task(self):
+        command = subprocess.list2cmdline([
+            sys.executable,
+            '-c',
+            'import time; print("started", flush=True); time.sleep(2); print("done")',
+        ])
+        mixin = ExecMixin()
+        result = mixin._run_command_until_foreground_timeout(
+            command,
+            str(ROOT),
+            timeout=0.2,
+            body={'max_runtime': 10},
+        )
+        try:
+            self.assertTrue(result['ok'])
+            self.assertTrue(result['background_task'])
+            self.assertTrue(result['running'])
+            self.assertTrue(result['task_id'].startswith('cmd_'))
+            self.assertIsNone(result['returncode'])
+        finally:
+            COMMAND_TASKS.cancel(result.get('task_id'))
+
+    def test_background_tasks_are_filtered_by_owner_session(self):
+        command = subprocess.list2cmdline([sys.executable, '-c', 'print("owned-task")'])
+        started = COMMAND_TASKS.start(
+            command=command,
+            cwd=str(ROOT),
+            max_runtime=10,
+            owner_session_id='session-a',
+        )
+        task_id = started['task_id']
+
+        self.assertIsNotNone(COMMAND_TASKS.get(task_id, owner_session_id='session-a'))
+        self.assertIsNone(COMMAND_TASKS.get(task_id, owner_session_id='session-b'))
+        self.assertTrue(any(task['task_id'] == task_id for task in COMMAND_TASKS.list(owner_session_id='session-a')))
+        self.assertFalse(any(task['task_id'] == task_id for task in COMMAND_TASKS.list(owner_session_id='session-b')))
 
 
 class WebProxyTests(unittest.TestCase):
@@ -157,6 +227,20 @@ class ExecGitProxyTests(unittest.TestCase):
         self.assertEqual(300, _coerce_execute_timeout(999, default=60))
         self.assertEqual(120, _coerce_execute_timeout('120', default=60))
         self.assertEqual(60, _coerce_execute_timeout('bad', default=60))
+
+    def test_execute_timeout_max_is_configurable(self):
+        self.assertEqual(300, _coerce_execute_timeout_max(None))
+        self.assertEqual(1, _coerce_execute_timeout_max(-5))
+        self.assertEqual(1200, _coerce_execute_timeout_max('1200'))
+        self.assertEqual(86400, _coerce_execute_timeout_max(999999))
+        self.assertEqual(1200, _coerce_execute_timeout(9999, default=60, maximum=_coerce_execute_timeout_max(1200)))
+
+    def test_command_task_wait_max_is_configurable(self):
+        self.assertEqual(300, _coerce_task_wait_max(None))
+        self.assertEqual(0, _coerce_task_wait_max(-5))
+        self.assertEqual(900, _coerce_task_wait_max('900'))
+        self.assertEqual(3600, _coerce_task_wait_max(999999))
+        self.assertEqual(900, _coerce_task_wait(9999, maximum=_coerce_task_wait_max(900)))
 
     def test_remote_login_shell_wrapper_uses_passwd_shell(self):
         command = _remote_login_shell_command('echo ok')

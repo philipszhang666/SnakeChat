@@ -40,6 +40,9 @@ POST_PREFIX_ROUTES = (
 ACTION_ROUTES = (
     ActionRoute('execute', 'handle_execute'),
     ActionRoute('remote_execute', 'handle_remote_execute'),
+    ActionRoute('command_task_output', 'handle_command_task_output'),
+    ActionRoute('command_task_list', 'handle_command_task_list'),
+    ActionRoute('command_task_cancel', 'handle_command_task_cancel'),
     ActionRoute('workspace_info', 'handle_workspace_info', pass_body=False),
     ActionRoute('open_terminal', 'handle_open_terminal'),
     ActionRoute('open_remote_terminal', 'handle_open_remote_terminal'),

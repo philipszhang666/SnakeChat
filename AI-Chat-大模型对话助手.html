@@ -487,7 +487,25 @@
         <span class="slider-val" id="maxToolRoundsVal">15</span>
       </div>
       <input type="number" id="maxToolRoundsInput" min="1" step="1" style="margin-top:8px;" data-input-action="syncMaxToolRoundsInput">
-      <div class="form-hint">单次对话中模型连续调用工具的最大轮次。一轮可包含多个并行工具。滑块最高 100，也可以直接输入更大的整数。</div>
+      <div class="form-hint">timeout 和后台任务时长可在下方调整。</div>
+    </div>
+
+    <div class="form-group">
+      <label>execute_action timeout 上限（秒）</label>
+      <input type="number" id="executeTimeoutMax" min="1" max="86400" step="1">
+      <div class="form-hint">AI 传入 timeout 时允许的最大前台等待秒数。超过前台等待时间后命令不会被杀死，会转为后台任务并返回 task_id。</div>
+    </div>
+
+    <div class="form-group">
+      <label>后台任务最大运行时间（秒）</label>
+      <input type="number" id="commandTaskMaxRuntime" min="1" max="604800" step="1">
+      <div class="form-hint">后台命令任务允许继续运行的最长时间。达到该时间后后端会先 terminate，再 kill。</div>
+    </div>
+
+    <div class="form-group">
+      <label>后台任务查询 wait 上限（秒）</label>
+      <input type="number" id="commandTaskOutputWaitMax" min="0" max="3600" step="1">
+      <div class="form-hint">AI 调用 command_task_output 时，单次查询允许等待任务输出或完成的最大秒数。默认 300 秒。</div>
     </div>
     
     <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;">

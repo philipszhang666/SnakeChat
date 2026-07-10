@@ -2932,12 +2932,50 @@ class FrontendModuleTests(unittest.TestCase):
         config_js = (ROOT / 'js' / 'config.js').read_text(encoding='utf-8')
         terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
         state_js = (ROOT / 'js' / 'state.js').read_text(encoding='utf-8')
+        settings_js = (ROOT / 'js' / 'settings.js').read_text(encoding='utf-8')
+        html = (ROOT / 'AI-Chat-大模型对话助手.html').read_text(encoding='utf-8')
 
         self.assertRegex(config_js, r"name: 'execute_action'[\s\S]+timeout: \{ type: 'number'")
         self.assertIn("code: 'return await executeTerminalCommand(args.command, args.cwd, args.new_window, args.timeout);'", config_js)
         self.assertIn('function normalizeExecuteTimeoutSec(timeout)', terminal_js)
         self.assertIn("timeout: timeoutSec", terminal_js)
+        self.assertIn('executeTimeoutMax: 300', state_js)
+        self.assertIn('commandTaskMaxRuntime: 3600', state_js)
+        self.assertIn('commandTaskOutputWaitMax: 300', state_js)
+        self.assertIn('id="executeTimeoutMax"', html)
+        self.assertIn('id="commandTaskMaxRuntime"', html)
+        self.assertIn('id="commandTaskOutputWaitMax"', html)
+        self.assertIn("document.getElementById('executeTimeoutMax')", settings_js)
+        self.assertIn("document.getElementById('commandTaskMaxRuntime')", settings_js)
+        self.assertIn("document.getElementById('commandTaskOutputWaitMax')", settings_js)
+        self.assertIn('timeout_max: executeTimeoutMaxSec()', terminal_js)
+        self.assertIn('max_runtime: commandTaskMaxRuntimeSec()', terminal_js)
+        self.assertIn('超过前台等待时间', terminal_js)
+        self.assertNotIn('function commandLooksLongRunning(command)', terminal_js)
+        self.assertNotIn('function shouldUseBackgroundCommand(command, timeoutSec, timeoutSpecified, newWindow)', terminal_js)
+        self.assertIn("'command_task_output'", terminal_js)
+        self.assertIn("'command_task_cancel'", terminal_js)
         self.assertIn("const BUILTIN_TOOL_REFRESH_NAMES = new Set(['execute_action']);", state_js)
+
+    def test_command_task_output_tool_is_exposed(self):
+        config_js = (ROOT / 'js' / 'config.js').read_text(encoding='utf-8')
+        terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        self.assertRegex(config_js, r"name: 'command_task_output'[\s\S]+task_id[\s\S]+readCommandTaskOutput")
+        self.assertRegex(config_js, r"name: 'command_task_list'[\s\S]+include_finished[\s\S]+listCommandTasks")
+        self.assertIn('async function readCommandTaskOutput(taskId, wait, context)', terminal_js)
+        self.assertIn('async function listCommandTasks(includeFinished, limit, context)', terminal_js)
+        self.assertIn('function commandTaskOutputWaitMaxSec()', terminal_js)
+        self.assertIn('wait_max: waitMax', terminal_js)
+        self.assertIn("'executeTerminalCommand', 'readCommandTaskOutput', 'listCommandTasks'", tools_js)
+
+    def test_remote_control_reports_background_command_tasks(self):
+        remote_control_js = (ROOT / 'js' / 'remote-control.js').read_text(encoding='utf-8')
+
+        self.assertIn('result.background_task && result.running', remote_control_js)
+        self.assertIn('后台任务：', remote_control_js)
+        self.assertIn('requestTimeoutMs: 75000', remote_control_js)
 
     def test_file_explorer_delete_uses_recursive_directory_delete(self):
         file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
