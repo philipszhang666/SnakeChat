@@ -39,6 +39,7 @@ class CommandTask:
         workspace='',
         kind='execute',
         owner_session_id='',
+        visible_to_ai=False,
     ):
         self.id = 'cmd_' + uuid.uuid4().hex[:12]
         self.command = command
@@ -46,6 +47,7 @@ class CommandTask:
         self.workspace = workspace
         self.kind = kind
         self.owner_session_id = str(owner_session_id or '')
+        self.visible_to_ai = bool(visible_to_ai)
         self.max_runtime = coerce_command_task_runtime(max_runtime)
         self.output_limit = max(4096, int(output_limit or DEFAULT_OUTPUT_LIMIT))
         self.started_at = time.time()
@@ -126,6 +128,11 @@ class CommandTask:
                 self._append_output(stream_name, chunk)
         except Exception as exc:
             self._mark_error(f'{stream_name} read failed: {exc}')
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
 
     def _watch(self):
         timed_out = False
@@ -197,7 +204,7 @@ class CommandTask:
         return True
 
     def snapshot(self, wait=0, wait_for_completion=False):
-        wait = max(0.0, min(float(wait or 0), 30.0))
+        wait = max(0.0, min(float(wait or 0), float(MAX_RUNTIME_LIMIT)))
         with self._changed:
             self.last_access = time.time()
             if wait and self.status == 'running':
@@ -218,6 +225,7 @@ class CommandTask:
                 'workspace': self.workspace,
                 'pid': self.pid,
                 'owner_session_id': self.owner_session_id,
+                'visible_to_ai': self.visible_to_ai,
                 'status': self.status,
                 'running': self.status == 'running',
                 'returncode': self.returncode,
@@ -269,7 +277,30 @@ class CommandTaskRegistry:
         task.cancel()
         return task.snapshot(wait=0)
 
-    def list(self, owner_session_id='', include_finished=True, limit=50):
+    def mark_visible(self, task_id, owner_session_id=''):
+        with self._lock:
+            task = self._tasks.get(str(task_id or ''))
+        if not task or not self._session_can_access(task, owner_session_id):
+            return None
+        with task._changed:
+            task.visible_to_ai = True
+            task.last_access = time.time()
+            task._changed.notify_all()
+        return task.snapshot(wait=0)
+
+    def discard_unexposed_if_finished(self, task_id, owner_session_id=''):
+        task_id = str(task_id or '')
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or not self._session_can_access(task, owner_session_id):
+                return False
+            with task._changed:
+                if task.status == 'running' or task.visible_to_ai:
+                    return False
+                self._tasks.pop(task_id, None)
+                return True
+
+    def list(self, owner_session_id='', include_finished=True, limit=50, visible_only=True):
         self.cleanup()
         try:
             limit = int(limit)
@@ -280,6 +311,7 @@ class CommandTaskRegistry:
             tasks = [
                 task for task in self._tasks.values()
                 if self._session_can_access(task, owner_session_id)
+                and (not visible_only or getattr(task, 'visible_to_ai', False))
                 and (include_finished or task.status == 'running')
             ]
         tasks.sort(key=lambda task: task.started_at, reverse=True)

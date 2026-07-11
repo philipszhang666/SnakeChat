@@ -54,17 +54,23 @@ async function openExplorer(page) {
 }
 
 async function openFileFromExplorer(page, name) {
-  await page.locator('.file-explorer-item').filter({ hasText: name }).click();
+  await page.locator('#fileExplorerList .file-explorer-item').filter({ hasText: name }).click();
 }
 
 async function openFileContextMenu(page, name) {
   const nameLocator = page
-    .locator('.file-explorer-item')
+    .locator('#fileExplorerList .file-explorer-item')
     .filter({ hasText: name })
     .locator('.file-explorer-name');
-  const box = await nameLocator.boundingBox();
-  expect(box).not.toBeNull();
-  await page.mouse.click(box.x + 4, box.y + box.height / 2, { button: 'right' });
+  await nameLocator.evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + 4,
+      clientY: rect.top + rect.height / 2
+    }));
+  });
   await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
 }
 
@@ -82,6 +88,63 @@ async function openBlankExplorerContextMenu(page) {
 
 async function clickContextMenuAction(page, action) {
   await page.locator(`#fileExplorerContextMenu [data-action="${action}"]:visible`).click();
+}
+
+function graphicalExplorerItem(page, name) {
+  return page.locator('#fileExplorerGraphList .file-explorer-item').filter({ hasText: name });
+}
+
+async function openGraphicalFileContextMenu(page, name) {
+  const nameLocator = graphicalExplorerItem(page, name).locator('.file-explorer-name');
+  await nameLocator.evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + 4,
+      clientY: rect.top + rect.height / 2
+    }));
+  });
+  await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
+}
+
+async function openBlankGraphicalContextMenu(page) {
+  await page.locator('#fileExplorerGraphList').evaluate(el => {
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 420,
+      clientY: 260
+    }));
+  });
+  await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
+}
+
+async function clickBlankGraphicalExplorerSpace(page) {
+  await page.locator('#fileExplorerGraphList').evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.right - 8,
+      clientY: rect.bottom - 8
+    }));
+  });
+}
+
+async function graphicalExplorerTopRowCount(page) {
+  return page.locator('#fileExplorerGraphList .file-explorer-item').evaluateAll(items => {
+    const boxes = items
+      .map(item => item.getBoundingClientRect())
+      .filter(rect => rect.width > 0 && rect.height > 0);
+    if (!boxes.length) return 0;
+    const top = Math.min(...boxes.map(rect => rect.top));
+    return boxes.filter(rect => Math.abs(rect.top - top) < 2).length;
+  });
+}
+
+function expectGraphicalCardRatio(box) {
+  expect(Math.abs((box.width / box.height) - (16 / 9))).toBeLessThan(0.04);
 }
 
 async function expectElementCanScroll(locator) {
@@ -298,6 +361,181 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     const listCallsBeforeRefresh = backend.backendCalls.filter(call => call.action === 'list_dir').length;
     await page.locator('[data-action="refreshFileExplorer"]').click();
     await expect.poll(() => backend.backendCalls.filter(call => call.action === 'list_dir').length).toBeGreaterThan(listCallsBeforeRefresh);
+
+    clientErrors.expectNoErrors();
+  });
+
+  test('file explorer supports ctrl multi-select batch copy, cut, and delete', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBrowserStubs(page);
+    const { backend, clientErrors } = await gotoApp(page);
+
+    const item = name => page.locator('#fileExplorerList .file-explorer-item').filter({ hasText: name });
+    const expectBackendPaths = async (action, paths, targetDir) => {
+      await expect.poll(() => {
+        const matched = backend.backendCalls.filter(call =>
+          call.action === action
+          && paths.includes(call.body.path)
+          && (targetDir === undefined || call.body.target_dir === targetDir)
+        );
+        return new Set(matched.map(call => call.body.path)).size;
+      }).toBe(paths.length);
+    };
+
+    await openExplorer(page);
+    await item('sample.txt').click({ modifiers: ['Control'] });
+    await item('sample.md').click({ modifiers: ['Control'] });
+    await expect(item('sample.txt')).toHaveClass(/is-selected/);
+    await expect(item('sample.md')).toHaveClass(/is-selected/);
+    await expect(page.locator('#fileEditorModal')).not.toHaveClass(/show/);
+
+    await openFileContextMenu(page, 'sample.txt');
+    await clickContextMenuAction(page, 'copy-item');
+    await openBlankExplorerContextMenu(page);
+    await clickContextMenuAction(page, 'paste');
+    await expectBackendPaths('copy_file', ['sample.txt', 'sample.md'], '.');
+
+    await item('sample.txt').click({ modifiers: ['Control'] });
+    await item('sample.md').click({ modifiers: ['Control'] });
+    await item('sample.py').click({ modifiers: ['Control'] });
+    await item('sample.tex').click({ modifiers: ['Control'] });
+    await expect(item('sample.py')).toHaveClass(/is-selected/);
+    await expect(item('sample.tex')).toHaveClass(/is-selected/);
+    await openFileContextMenu(page, 'sample.py');
+    await clickContextMenuAction(page, 'cut-item');
+    await openFileContextMenu(page, 'src');
+    await clickContextMenuAction(page, 'paste');
+    await expectBackendPaths('move_file', ['sample.py', 'sample.tex'], 'src');
+
+    await item('sample.pdf').click({ modifiers: ['Control'] });
+    await item('sample.png').click({ modifiers: ['Control'] });
+    await expect(item('sample.pdf')).toHaveClass(/is-selected/);
+    await expect(item('sample.png')).toHaveClass(/is-selected/);
+    await openFileContextMenu(page, 'sample.pdf');
+    await clickContextMenuAction(page, 'delete');
+    await expectBackendPaths('delete_file', ['sample.pdf', 'sample.png']);
+
+    clientErrors.expectNoErrors();
+  });
+
+  test('file explorer graphical window opens from the blank context menu and reuses existing actions', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBrowserStubs(page);
+    const { backend, clientErrors } = await gotoApp(page);
+    await page.evaluate(() => localStorage.removeItem('aichat_file_explorer_graph_view_v1'));
+
+    await openExplorer(page);
+    await openBlankExplorerContextMenu(page);
+    await expect(page.locator('#fileExplorerContextMenu [data-action="open-graphical"]:visible')).toHaveText('图形化界面');
+    await clickContextMenuAction(page, 'open-graphical');
+
+    await expect(page.locator('#fileExplorerGraphModal')).toHaveClass(/show/);
+    const modalBox = await page.locator('#fileExplorerGraphModal .file-explorer-graph-modal').boundingBox();
+    const titleBox = await page.locator('#fileExplorerGraphTitle').boundingBox();
+    expect(modalBox).not.toBeNull();
+    expect(titleBox).not.toBeNull();
+    expect(Math.abs((modalBox.width / modalBox.height) - (16 / 9))).toBeLessThan(0.05);
+    expect(titleBox.y - modalBox.y).toBeGreaterThanOrEqual(14);
+    await expect(page.locator('#fileExplorerGraphAddress')).toContainText('e2e-workspace');
+    await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText(/沙箱目录|当前目录/);
+    await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
+    await expect(graphicalExplorerItem(page, 'sample.txt')).toBeVisible();
+    const graphItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    const graphIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
+    expect(graphItemBox).not.toBeNull();
+    expect(graphIconBox).not.toBeNull();
+    expectGraphicalCardRatio(graphItemBox);
+    expect(graphIconBox.width / graphItemBox.width).toBeGreaterThan(0.7);
+    const largeTopRowCount = await graphicalExplorerTopRowCount(page);
+    expect(largeTopRowCount).toBeGreaterThanOrEqual(4);
+
+    await page.locator('#fileExplorerGraphViewTrigger').click();
+    await expect(page.locator('#fileExplorerGraphViewMenu')).toBeVisible();
+    await expect(page.locator('#fileExplorerGraphViewTrigger')).not.toContainText('☰');
+    await expect(page.locator('#fileExplorerGraphViewMenu .file-explorer-graph-view-option-icon')).toHaveCount(0);
+    await expect(page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="large"]')).toHaveClass(/is-active/);
+
+    await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="small"]').click();
+    await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-small/);
+    await expect(page.locator('#fileExplorerGraphViewLabel')).toHaveText('小图标');
+    const smallItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    expect(smallItemBox).not.toBeNull();
+    expectGraphicalCardRatio(smallItemBox);
+    expect(smallItemBox.width).toBeLessThan(graphItemBox.width);
+    expect(await graphicalExplorerTopRowCount(page)).toBeGreaterThan(largeTopRowCount);
+
+    await page.locator('#fileExplorerGraphViewTrigger').click();
+    await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="list"]').click();
+    await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-list/);
+    await expect(page.locator('#fileExplorerGraphViewLabel')).toHaveText('列表');
+    const listItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    const listIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
+    expect(listItemBox).not.toBeNull();
+    expect(listIconBox).not.toBeNull();
+    await expect(graphicalExplorerItem(page, 'sample.txt')).toHaveCSS('flex-shrink', '0');
+    expect(listItemBox.height).toBeGreaterThanOrEqual(37);
+    expect(listItemBox.height).toBeLessThanOrEqual(39);
+    expect(listIconBox.width).toBeGreaterThanOrEqual(23);
+    expect(listIconBox.width).toBeLessThanOrEqual(25);
+    expect(listItemBox.width / listItemBox.height).toBeGreaterThan(5);
+
+    await page.locator('#fileExplorerGraphViewTrigger').click();
+    await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="details"]').click();
+    await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-details/);
+    const detailsItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    expect(detailsItemBox).not.toBeNull();
+    await expect(graphicalExplorerItem(page, 'sample.txt')).toHaveCSS('flex-shrink', '0');
+    expect(detailsItemBox.height).toBeGreaterThanOrEqual(37);
+    expect(detailsItemBox.height).toBeLessThanOrEqual(39);
+
+    await page.locator('#fileExplorerGraphViewTrigger').click();
+    await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="xlarge"]').click();
+    await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-xlarge/);
+    await expect(page.locator('#fileExplorerGraphViewLabel')).toHaveText('超大图标');
+    const xlargeItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    const xlargeIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
+    expect(xlargeItemBox).not.toBeNull();
+    expect(xlargeIconBox).not.toBeNull();
+    expectGraphicalCardRatio(xlargeItemBox);
+    expect(xlargeItemBox.width).toBeGreaterThan(graphItemBox.width);
+    expect(await graphicalExplorerTopRowCount(page)).toBeLessThan(largeTopRowCount);
+    expect(xlargeIconBox.width / xlargeItemBox.width).toBeGreaterThan(0.7);
+
+    await openGraphicalFileContextMenu(page, 'sample.txt');
+    await clickContextMenuAction(page, 'copy-path');
+    await expect.poll(() => page.evaluate(() => window.__e2eClipboard)).toBe('sample.txt');
+
+    await graphicalExplorerItem(page, 'sample.txt').click();
+    await expect(page.locator('#fileEditorModal')).toHaveClass(/show/);
+    const modalLayers = await page.evaluate(() => ({
+      graph: Number(getComputedStyle(document.getElementById('fileExplorerGraphModal')).zIndex),
+      editor: Number(getComputedStyle(document.getElementById('fileEditorModal')).zIndex)
+    }));
+    expect(modalLayers.editor).toBeGreaterThan(modalLayers.graph);
+    await page.locator('[data-action="closeFileEditor"]').first().click();
+    await expect(page.locator('#fileEditorModal')).not.toHaveClass(/show/);
+
+    await graphicalExplorerItem(page, 'sample.md').click({ modifiers: ['Control'] });
+    await expect(graphicalExplorerItem(page, 'sample.md')).toHaveClass(/is-selected/);
+    await clickBlankGraphicalExplorerSpace(page);
+    await expect(graphicalExplorerItem(page, 'sample.md')).not.toHaveClass(/is-selected/);
+    await graphicalExplorerItem(page, 'sample.md').click({ modifiers: ['Control'] });
+    await expect(graphicalExplorerItem(page, 'sample.md')).toHaveClass(/is-selected/);
+    await page.locator('#fileExplorerGraphModal [data-graph-command="copy"]').click();
+    await page.locator('#fileExplorerGraphModal [data-graph-command="paste"]').click();
+    await expect.poll(() => backend.backendCalls.some(call =>
+      call.action === 'copy_file' && call.body.path === 'sample.md' && call.body.target_dir === '.'
+    )).toBe(true);
+
+    await graphicalExplorerItem(page, 'src').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await page.locator('#fileExplorerGraphUpBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+
+    await openBlankGraphicalContextMenu(page);
+    await expect(page.locator('#fileExplorerContextMenu [data-action="open-graphical"]:visible')).toHaveText('图形化界面');
+    await page.locator('[data-file-explorer-graph-close]').click();
+    await expect(page.locator('#fileExplorerGraphModal')).not.toHaveClass(/show/);
 
     clientErrors.expectNoErrors();
   });

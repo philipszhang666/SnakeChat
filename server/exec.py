@@ -292,6 +292,7 @@ def _command_task_payload(snapshot):
     status = snapshot.get('status') or 'unknown'
     payload = dict(snapshot)
     payload.pop('owner_session_id', None)
+    payload.pop('visible_to_ai', None)
     payload.update({
         'ok': True,
         'background_task': True,
@@ -379,6 +380,12 @@ class ExecMixin:
             kind=kind,
             owner_session_id=self._command_task_owner_session_id(),
         )
+        marked = COMMAND_TASKS.mark_visible(
+            snapshot.get('task_id'),
+            owner_session_id=self._command_task_owner_session_id(),
+        )
+        if marked:
+            snapshot = marked
         payload = _command_task_payload(snapshot)
         payload.update({
             'stdout': payload.get('stdout') or f'Command running in background with ID: {payload.get("task_id")}',
@@ -389,6 +396,15 @@ class ExecMixin:
         return payload
 
     def _command_task_execute_response(self, snapshot, cwd_abs, timeout=None):
+        if snapshot and snapshot.get('running'):
+            marked = COMMAND_TASKS.mark_visible(
+                snapshot.get('task_id'),
+                owner_session_id=self._command_task_owner_session_id(),
+            )
+            if marked:
+                snapshot = marked
+        task_id = snapshot.get('task_id') if snapshot else ''
+        visible_to_ai = bool(snapshot.get('visible_to_ai')) if snapshot else False
         payload = _command_task_payload(snapshot)
         payload['cwd'] = cwd_abs
         if payload.get('running'):
@@ -399,7 +415,7 @@ class ExecMixin:
             })
             return payload
         if payload.get('timed_out') or payload.get('cancelled'):
-            return {
+            response = {
                 'ok': False,
                 'error': payload.get('error') or ('Command task cancelled' if payload.get('cancelled') else 'Command task timed out'),
                 'stdout': payload.get('stdout') or '',
@@ -407,9 +423,21 @@ class ExecMixin:
                 'returncode': payload.get('returncode'),
                 'cwd': cwd_abs,
                 'workspace': config.WORKSPACE_ROOT,
-                'task_id': payload.get('task_id'),
                 'status': payload.get('status'),
             }
+            if visible_to_ai:
+                response['task_id'] = payload.get('task_id')
+            else:
+                COMMAND_TASKS.discard_unexposed_if_finished(
+                    task_id,
+                    owner_session_id=self._command_task_owner_session_id(),
+                )
+            return response
+        if not visible_to_ai:
+            COMMAND_TASKS.discard_unexposed_if_finished(
+                task_id,
+                owner_session_id=self._command_task_owner_session_id(),
+            )
         return {
             'ok': True,
             'stdout': payload.get('stdout') or '',

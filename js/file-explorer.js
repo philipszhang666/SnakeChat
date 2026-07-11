@@ -8,6 +8,7 @@ function fileExplorerToast(message, ms) {
 
 const FILE_EXPLORER_STATE = {
   visible: false,
+  graphicalVisible: false,
   path: '.',
   loading: false,
   autoRefreshTimer: null,
@@ -16,6 +17,8 @@ const FILE_EXPLORER_STATE = {
   autoRefreshPath: '.',
   uploading: false,
   clipboard: null,
+  selectedItems: new Map(),
+  graphicalViewMode: 'large',
   entries: [],
   editorPath: '',
   editorOriginal: '',
@@ -54,6 +57,16 @@ const FILE_EXPLORER_QUICK_ACCESS_LEGACY_KEY = 'aichat_file_explorer_quick_access
 const FILE_EXPLORER_QUICK_ACCESS_KEY_PREFIX = 'aichat_file_explorer_quick_access_v2';
 const FILE_EXPLORER_QUICK_ACCESS_MAX = 10;
 const FILE_EXPLORER_QUICK_ACCESS_LABEL_MAX = 40;
+const FILE_EXPLORER_GRAPH_VIEW_STORAGE_KEY = 'aichat_file_explorer_graph_view_v1';
+const FILE_EXPLORER_GRAPH_VIEW_MODES = [
+  { id: 'xlarge', label: '超大图标' },
+  { id: 'large', label: '大图标' },
+  { id: 'medium', label: '中图标' },
+  { id: 'small', label: '小图标' },
+  { id: 'list', label: '列表' },
+  { id: 'details', label: '详细信息' }
+];
+const FILE_EXPLORER_GRAPH_VIEW_MODE_IDS = new Set(FILE_EXPLORER_GRAPH_VIEW_MODES.map(mode => mode.id));
 
 function fileExplorerBackendContext(options = {}) {
   return {
@@ -77,6 +90,35 @@ function fileExplorerStorageSet(key, value) {
     }
   } catch (_) {}
   try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+function normalizeGraphicalFileExplorerViewMode(mode) {
+  const normalized = String(mode || '').trim();
+  return FILE_EXPLORER_GRAPH_VIEW_MODE_IDS.has(normalized) ? normalized : 'large';
+}
+
+function graphicalFileExplorerViewMode() {
+  FILE_EXPLORER_STATE.graphicalViewMode = normalizeGraphicalFileExplorerViewMode(FILE_EXPLORER_STATE.graphicalViewMode);
+  return FILE_EXPLORER_STATE.graphicalViewMode;
+}
+
+function graphicalFileExplorerViewModeInfo(mode = FILE_EXPLORER_STATE.graphicalViewMode) {
+  const normalized = normalizeGraphicalFileExplorerViewMode(mode);
+  return FILE_EXPLORER_GRAPH_VIEW_MODES.find(item => item.id === normalized) || FILE_EXPLORER_GRAPH_VIEW_MODES[1];
+}
+
+function loadGraphicalFileExplorerViewMode() {
+  FILE_EXPLORER_STATE.graphicalViewMode = normalizeGraphicalFileExplorerViewMode(
+    fileExplorerStorageGet(FILE_EXPLORER_GRAPH_VIEW_STORAGE_KEY) || FILE_EXPLORER_STATE.graphicalViewMode
+  );
+  return FILE_EXPLORER_STATE.graphicalViewMode;
+}
+
+function setGraphicalFileExplorerViewMode(mode) {
+  const next = normalizeGraphicalFileExplorerViewMode(mode);
+  FILE_EXPLORER_STATE.graphicalViewMode = next;
+  fileExplorerStorageSet(FILE_EXPLORER_GRAPH_VIEW_STORAGE_KEY, next);
+  renderGraphicalFileExplorer();
 }
 
 const FILE_EXPLORER_TEXT_EXTENSIONS = new Set([
@@ -1107,6 +1149,78 @@ function renderFileExplorerLoading() {
   if (list) {
     list.innerHTML = '<div class="file-explorer-empty">正在读取沙箱目录...</div>';
   }
+  const graphList = document.getElementById('fileExplorerGraphList');
+  if (graphList) {
+    graphList.innerHTML = '<div class="file-explorer-empty">正在读取沙箱目录...</div>';
+  }
+  updateGraphicalFileExplorerToolbar();
+}
+
+function normalizeFileExplorerSelectionItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const path = normalizeExplorerPath(item.path);
+  if (!path) return null;
+  const type = item.type === 'dir' ? 'dir' : 'file';
+  return {
+    path,
+    type,
+    name: item.name || fileExplorerBasename(path) || path
+  };
+}
+
+function selectedFileExplorerItems() {
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.values !== 'function') {
+    FILE_EXPLORER_STATE.selectedItems = new Map();
+  }
+  return Array.from(FILE_EXPLORER_STATE.selectedItems.values())
+    .map(normalizeFileExplorerSelectionItem)
+    .filter(Boolean);
+}
+
+function fileExplorerSelectionCount() {
+  return selectedFileExplorerItems().length;
+}
+
+function isFileExplorerPathSelected(path) {
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.has !== 'function') return false;
+  return FILE_EXPLORER_STATE.selectedItems.has(normalizeExplorerPath(path));
+}
+
+function clearFileExplorerSelection(options = {}) {
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.clear !== 'function') {
+    FILE_EXPLORER_STATE.selectedItems = new Map();
+  }
+  if (!FILE_EXPLORER_STATE.selectedItems.size) return;
+  FILE_EXPLORER_STATE.selectedItems.clear();
+  if (options.render !== false) renderFileExplorer();
+}
+
+function toggleFileExplorerSelection(path, type) {
+  const normalizedPath = normalizeExplorerPath(path);
+  if (!normalizedPath) return;
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.set !== 'function') {
+    FILE_EXPLORER_STATE.selectedItems = new Map();
+  }
+  if (FILE_EXPLORER_STATE.selectedItems.has(normalizedPath)) {
+    FILE_EXPLORER_STATE.selectedItems.delete(normalizedPath);
+  } else {
+    FILE_EXPLORER_STATE.selectedItems.set(normalizedPath, {
+      path: normalizedPath,
+      type: type === 'dir' ? 'dir' : 'file',
+      name: fileExplorerBasename(normalizedPath) || normalizedPath
+    });
+  }
+  renderFileExplorer();
+}
+
+function fileExplorerOperationItemsFor(path, type) {
+  const normalizedPath = normalizeExplorerPath(path || FILE_EXPLORER_STATE.contextPath);
+  const selected = selectedFileExplorerItems();
+  if (normalizedPath && selected.length > 1 && selected.some(item => item.path === normalizedPath)) {
+    return selected;
+  }
+  if (!normalizedPath) return [];
+  return [normalizeFileExplorerSelectionItem({ path: normalizedPath, type })].filter(Boolean);
 }
 
 function ensureFileExplorerContextMenu() {
@@ -1132,6 +1246,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="delete">删除</button>
     </div>
     <div data-menu-section="blank">
+      <button type="button" data-action="open-graphical">图形化界面</button>
       <button type="button" data-action="upload-files" data-remote-only="true">上传文件</button>
       <button type="button" data-action="upload-folder" data-remote-only="true">上传文件夹</button>
       <button type="button" data-action="paste" data-paste-only="true" hidden>粘贴</button>
@@ -1203,38 +1318,322 @@ function hideFileExplorerContextMenu() {
   FILE_EXPLORER_STATE.contextScope = '';
 }
 
-function renderFileExplorer() {
-  const list = document.getElementById('fileExplorerList');
-  const upBtn = document.getElementById('fileExplorerUpBtn');
-  setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
-  if (upBtn) upBtn.disabled = currentFileExplorerParentPath() === FILE_EXPLORER_STATE.path;
-  if (!list) return;
+function fileExplorerItemHtml(entry, options = {}) {
+  const name = entry.name || '';
+  const isDir = entry.type === 'dir';
+  const path = joinExplorerPath(FILE_EXPLORER_STATE.path, name);
+  const selected = isFileExplorerPathSelected(path);
+  const meta = isDir ? '文件夹' : formatSize(Number(entry.size || 0));
+  const viewClass = options.graphical ? ' file-explorer-graph-item' : '';
+  return `
+    <button class="file-explorer-item${viewClass} ${isDir ? 'is-dir' : 'is-file'} ${selected ? 'is-selected' : ''}" type="button" data-path="${escapeHtml(path)}" data-type="${escapeHtml(entry.type || '')}" aria-selected="${selected ? 'true' : 'false'}" title="${escapeHtml(path)}">
+      <span class="file-explorer-icon">${fileExplorerIcon(entry)}</span>
+      <span class="file-explorer-name">${escapeHtml(name)}</span>
+      <span class="file-explorer-meta">${escapeHtml(meta)}</span>
+    </button>
+  `;
+}
 
-  const entries = fileExplorerSort(FILE_EXPLORER_STATE.entries);
+function renderFileExplorerListTarget(list, entries, options = {}) {
+  if (!list) return;
   if (!entries.length) {
     list.innerHTML = '<div class="file-explorer-empty">这个目录是空的。</div>';
     return;
   }
+  list.innerHTML = entries.map(entry => fileExplorerItemHtml(entry, options)).join('');
+}
 
-  list.innerHTML = entries.map(entry => {
-    const name = entry.name || '';
-    const isDir = entry.type === 'dir';
-    const path = joinExplorerPath(FILE_EXPLORER_STATE.path, name);
-    const meta = isDir ? '文件夹' : formatSize(Number(entry.size || 0));
+function fileExplorerGraphAddressText() {
+  return fileExplorerAbsolutePathFor(FILE_EXPLORER_STATE.path) || normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+}
+
+function fileExplorerGraphToolbarSelection() {
+  const selected = selectedFileExplorerItems();
+  return {
+    selected,
+    first: selected[0] || null,
+    count: selected.length
+  };
+}
+
+function graphicalFileExplorerViewMenuHtml() {
+  const activeMode = graphicalFileExplorerViewMode();
+  return FILE_EXPLORER_GRAPH_VIEW_MODES.map(mode => {
+    const active = mode.id === activeMode;
     return `
-      <button class="file-explorer-item ${isDir ? 'is-dir' : 'is-file'}" type="button" data-path="${escapeHtml(path)}" data-type="${escapeHtml(entry.type || '')}" title="${escapeHtml(path)}">
-        <span class="file-explorer-icon">${fileExplorerIcon(entry)}</span>
-        <span class="file-explorer-name">${escapeHtml(name)}</span>
-        <span class="file-explorer-meta">${escapeHtml(meta)}</span>
+      <button class="file-explorer-graph-view-option ${active ? 'is-active' : ''}" type="button" role="menuitemradio" aria-checked="${active ? 'true' : 'false'}" data-graph-view-mode="${escapeHtml(mode.id)}">
+        <span class="file-explorer-graph-view-option-check" data-graph-view-check>${active ? '•' : ''}</span>
+        <span class="file-explorer-graph-view-option-label">${escapeHtml(mode.label)}</span>
       </button>
     `;
   }).join('');
 }
 
+function hideGraphicalFileExplorerViewMenu() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  const trigger = modal.querySelector('#fileExplorerGraphViewTrigger');
+  const menu = modal.querySelector('#fileExplorerGraphViewMenu');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  if (menu) menu.hidden = true;
+}
+
+function toggleGraphicalFileExplorerViewMenu() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  const trigger = modal.querySelector('#fileExplorerGraphViewTrigger');
+  const menu = modal.querySelector('#fileExplorerGraphViewMenu');
+  if (!menu) return;
+  const open = menu.hidden;
+  menu.hidden = !open;
+  if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function updateGraphicalFileExplorerViewControls(modal = document.getElementById('fileExplorerGraphModal')) {
+  if (!modal) return;
+  const activeMode = graphicalFileExplorerViewMode();
+  const activeInfo = graphicalFileExplorerViewModeInfo(activeMode);
+  const label = modal.querySelector('#fileExplorerGraphViewLabel');
+  if (label) label.textContent = activeInfo.label;
+  modal.querySelectorAll('[data-graph-view-mode]').forEach(btn => {
+    const active = btn.dataset.graphViewMode === activeMode;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-checked', active ? 'true' : 'false');
+    const check = btn.querySelector('[data-graph-view-check]');
+    if (check) check.textContent = active ? '•' : '';
+  });
+}
+
+function renderGraphicalFileExplorerQuickAccess() {
+  const list = document.getElementById('fileExplorerGraphQuickAccessList');
+  if (!list) return;
+  const rows = loadFileExplorerQuickAccess();
+  const root = fileExplorerWorkspaceRoot();
+  const items = [
+    { path: '.', label: root ? '沙箱目录' : '当前目录', title: root || '.' },
+    ...rows.map(item => ({
+      path: normalizeExplorerPath(item.path),
+      label: fileExplorerBasename(item.path) || shortenFileExplorerQuickAccessPath(item.path),
+      title: normalizeExplorerPath(item.path)
+    }))
+  ];
+  list.innerHTML = items.map(item => {
+    const active = fileExplorerQuickAccessKey(item.path) === fileExplorerQuickAccessKey(currentFileExplorerAbsoluteDir())
+      || (item.path === '.' && normalizeExplorerPath(FILE_EXPLORER_STATE.path) === '.');
+    return `
+      <button class="file-explorer-graph-quick-item ${active ? 'is-active' : ''}" type="button" data-graph-path="${escapeHtml(item.path)}" title="${escapeHtml(item.title)}">
+        <span class="file-explorer-graph-quick-icon">${item.path === '.' ? '⌂' : '★'}</span>
+        <span>${escapeHtml(item.label)}</span>
+      </button>
+    `;
+  }).join('');
+}
+
+function updateGraphicalFileExplorerToolbar() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  const parent = currentFileExplorerParentPath();
+  const upBtn = modal.querySelector('#fileExplorerGraphUpBtn');
+  if (upBtn) upBtn.disabled = parent === FILE_EXPLORER_STATE.path;
+  const pathEl = modal.querySelector('#fileExplorerGraphAddress');
+  const address = fileExplorerGraphAddressText();
+  if (pathEl) {
+    pathEl.textContent = address;
+    pathEl.title = address;
+  }
+  const status = modal.querySelector('#fileExplorerGraphStatus');
+  if (status) {
+    const count = Array.isArray(FILE_EXPLORER_STATE.entries) ? FILE_EXPLORER_STATE.entries.length : 0;
+    const selectedCount = fileExplorerSelectionCount();
+    status.textContent = selectedCount ? `${count} 个项目，已选择 ${selectedCount} 项` : `${count} 个项目`;
+  }
+  const selection = fileExplorerGraphToolbarSelection();
+  modal.querySelectorAll('[data-graph-needs-selection]').forEach(btn => {
+    btn.disabled = !selection.count;
+  });
+  modal.querySelectorAll('[data-graph-needs-single-selection]').forEach(btn => {
+    btn.disabled = selection.count !== 1;
+  });
+  modal.querySelectorAll('[data-graph-needs-clipboard]').forEach(btn => {
+    btn.disabled = !FILE_EXPLORER_STATE.clipboard;
+  });
+  updateGraphicalFileExplorerViewControls(modal);
+}
+
+function renderGraphicalFileExplorer(entries = fileExplorerSort(FILE_EXPLORER_STATE.entries)) {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  const list = modal.querySelector('#fileExplorerGraphList');
+  const viewMode = graphicalFileExplorerViewMode();
+  if (list) {
+    list.className = `file-explorer-graph-list is-${viewMode}`;
+    list.dataset.viewMode = viewMode;
+    list.setAttribute('aria-label', `文件和文件夹，${graphicalFileExplorerViewModeInfo(viewMode).label}视图`);
+  }
+  renderFileExplorerListTarget(list, entries, { graphical: true });
+  renderGraphicalFileExplorerQuickAccess();
+  updateGraphicalFileExplorerToolbar();
+}
+
+function renderFileExplorer() {
+  const list = document.getElementById('fileExplorerList');
+  const upBtn = document.getElementById('fileExplorerUpBtn');
+  setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
+  if (upBtn) upBtn.disabled = currentFileExplorerParentPath() === FILE_EXPLORER_STATE.path;
+
+  const entries = fileExplorerSort(FILE_EXPLORER_STATE.entries);
+  renderFileExplorerListTarget(list, entries);
+  renderGraphicalFileExplorer(entries);
+}
+
+function ensureGraphicalFileExplorerModal() {
+  let modal = document.getElementById('fileExplorerGraphModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'fileExplorerGraphModal';
+  modal.className = 'modal-mask file-explorer-graph-mask';
+  modal.innerHTML = `
+    <div class="modal file-explorer-graph-modal" role="dialog" aria-modal="true" aria-labelledby="fileExplorerGraphTitle">
+      <div class="file-explorer-graph-titlebar">
+        <h2 id="fileExplorerGraphTitle">图形化资源管理器</h2>
+        <button class="modal-close" type="button" data-file-explorer-graph-close aria-label="关闭">×</button>
+      </div>
+      <div class="file-explorer-graph-addressbar">
+        <button id="fileExplorerGraphUpBtn" class="file-explorer-graph-nav" type="button" title="返回上一级" aria-label="返回上一级">↑</button>
+        <button id="fileExplorerGraphRefreshBtn" class="file-explorer-graph-nav" type="button" title="刷新" aria-label="刷新">↻</button>
+        <div id="fileExplorerGraphAddress" class="file-explorer-graph-address" title=".">.</div>
+      </div>
+      <div class="file-explorer-graph-commandbar" aria-label="文件操作">
+        <button type="button" data-graph-command="new-file">新建文件</button>
+        <button type="button" data-graph-command="new-folder">新建文件夹</button>
+        <span class="file-explorer-graph-separator"></span>
+        <div class="file-explorer-graph-view-wrap">
+          <button id="fileExplorerGraphViewTrigger" class="file-explorer-graph-view-trigger" type="button" data-graph-view-trigger aria-haspopup="true" aria-expanded="false">
+            <span id="fileExplorerGraphViewLabel">大图标</span>
+            <span class="file-explorer-graph-view-caret" aria-hidden="true"></span>
+          </button>
+          <div id="fileExplorerGraphViewMenu" class="file-explorer-graph-view-menu" role="menu" hidden>
+            ${graphicalFileExplorerViewMenuHtml()}
+          </div>
+        </div>
+        <span class="file-explorer-graph-separator"></span>
+        <button type="button" data-graph-command="copy" data-graph-needs-selection>复制</button>
+        <button type="button" data-graph-command="cut" data-graph-needs-selection>剪切</button>
+        <button type="button" data-graph-command="paste" data-graph-needs-clipboard>粘贴</button>
+        <button type="button" data-graph-command="delete" data-graph-needs-selection>删除</button>
+        <button type="button" data-graph-command="details" data-graph-needs-single-selection>详情</button>
+      </div>
+      <div class="file-explorer-graph-body">
+        <aside class="file-explorer-graph-sidebar" aria-label="快速访问">
+          <div class="file-explorer-graph-sidebar-title">快速访问</div>
+          <div id="fileExplorerGraphQuickAccessList" class="file-explorer-graph-quick-list"></div>
+        </aside>
+        <main id="fileExplorerGraphList" class="file-explorer-graph-list" aria-label="文件和文件夹"></main>
+      </div>
+      <div id="fileExplorerGraphStatus" class="file-explorer-graph-status">0 个项目</div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.addEventListener('click', event => {
+    if (event.target === modal || event.target.closest('[data-file-explorer-graph-close]')) {
+      closeGraphicalFileExplorer();
+      return;
+    }
+    const viewMode = event.target.closest('[data-graph-view-mode]');
+    if (viewMode) {
+      setGraphicalFileExplorerViewMode(viewMode.dataset.graphViewMode);
+      hideGraphicalFileExplorerViewMenu();
+      return;
+    }
+    if (event.target.closest('[data-graph-view-trigger]')) {
+      toggleGraphicalFileExplorerViewMenu();
+      return;
+    }
+    if (!event.target.closest('#fileExplorerGraphViewMenu')) hideGraphicalFileExplorerViewMenu();
+    const command = event.target.closest('[data-graph-command]');
+    if (command && !command.disabled) handleGraphicalFileExplorerCommand(command.dataset.graphCommand);
+  });
+
+  const list = modal.querySelector('#fileExplorerGraphList');
+  if (list) {
+    list.addEventListener('click', handleFileExplorerClick);
+    list.addEventListener('contextmenu', handleFileExplorerContextMenu);
+  }
+  const quickList = modal.querySelector('#fileExplorerGraphQuickAccessList');
+  if (quickList) {
+    quickList.addEventListener('click', event => {
+      const btn = event.target.closest('[data-graph-path]');
+      if (!btn) return;
+      loadFileExplorer(btn.dataset.graphPath || '.');
+    });
+  }
+  const upBtn = modal.querySelector('#fileExplorerGraphUpBtn');
+  if (upBtn) upBtn.addEventListener('click', fileExplorerGoUp);
+  const refreshBtn = modal.querySelector('#fileExplorerGraphRefreshBtn');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshFileExplorer);
+  return modal;
+}
+
+function selectedGraphicalFileExplorerItemOrToast() {
+  const selection = fileExplorerGraphToolbarSelection();
+  if (!selection.first) {
+    fileExplorerToast('请先选择文件或文件夹');
+    return null;
+  }
+  return selection.first;
+}
+
+function handleGraphicalFileExplorerCommand(action) {
+  const selected = selectedGraphicalFileExplorerItemOrToast;
+  if (action === 'new-file') createFileExplorerFile(FILE_EXPLORER_STATE.path);
+  else if (action === 'new-folder') createFileExplorerFolder(FILE_EXPLORER_STATE.path);
+  else if (action === 'paste') pasteFileExplorerItem(FILE_EXPLORER_STATE.path);
+  else if (action === 'copy') {
+    const item = selected();
+    if (item) copyFileExplorerItem(item.path, item.type);
+  } else if (action === 'cut') {
+    const item = selected();
+    if (item) cutFileExplorerItem(item.path, item.type);
+  } else if (action === 'delete') {
+    const item = selected();
+    if (item) deleteFileExplorerPath(item.path, item.type);
+  } else if (action === 'details') {
+    const selection = fileExplorerGraphToolbarSelection();
+    if (selection.count !== 1) {
+      fileExplorerToast('请选择一个项目查看详情');
+      return;
+    }
+    showFileExplorerDetails(selection.first.path);
+  }
+  updateGraphicalFileExplorerToolbar();
+}
+
+async function openGraphicalFileExplorer(path = FILE_EXPLORER_STATE.contextPath || FILE_EXPLORER_STATE.path) {
+  loadGraphicalFileExplorerViewMode();
+  const modal = ensureGraphicalFileExplorerModal();
+  FILE_EXPLORER_STATE.graphicalVisible = true;
+  modal.classList.add('show');
+  renderFileExplorer();
+  startFileExplorerAutoRefresh();
+  await loadFileExplorer(path || FILE_EXPLORER_STATE.path, { silent: !!FILE_EXPLORER_STATE.entries.length });
+}
+
+function closeGraphicalFileExplorer() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (modal) modal.classList.remove('show');
+  FILE_EXPLORER_STATE.graphicalVisible = false;
+  hideFileExplorerContextMenu();
+  if (!FILE_EXPLORER_STATE.visible) stopFileExplorerAutoRefresh();
+}
+
 async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
   if (FILE_EXPLORER_STATE.loading) return false;
   FILE_EXPLORER_STATE.loading = true;
-  FILE_EXPLORER_STATE.path = normalizeExplorerPath(path);
+  const nextPath = normalizeExplorerPath(path);
+  const pathChanged = nextPath !== FILE_EXPLORER_STATE.path;
+  FILE_EXPLORER_STATE.path = nextPath;
+  if (pathChanged) clearFileExplorerSelection({ render: false });
   if (!options.silent) renderFileExplorerLoading();
   setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
   try {
@@ -1253,6 +1652,11 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
     if (list) {
       list.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(e.message || String(e))}</div>`;
     }
+    const graphList = document.getElementById('fileExplorerGraphList');
+    if (graphList) {
+      graphList.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(e.message || String(e))}</div>`;
+    }
+    updateGraphicalFileExplorerToolbar();
     return false;
   } finally {
     FILE_EXPLORER_STATE.loading = false;
@@ -1272,15 +1676,19 @@ function stopFileExplorerAutoRefresh() {
   FILE_EXPLORER_STATE.autoRefreshInFlight = false;
 }
 
+function isFileExplorerViewActive() {
+  return !!(FILE_EXPLORER_STATE.visible || FILE_EXPLORER_STATE.graphicalVisible);
+}
+
 async function pollFileExplorerChanges() {
-  if (!FILE_EXPLORER_STATE.visible || FILE_EXPLORER_STATE.loading || FILE_EXPLORER_STATE.autoRefreshInFlight) return;
+  if (!isFileExplorerViewActive() || FILE_EXPLORER_STATE.loading || FILE_EXPLORER_STATE.autoRefreshInFlight) return;
   FILE_EXPLORER_STATE.autoRefreshInFlight = true;
   const path = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
   try {
     if (typeof callAgentBackend !== 'function') return;
     const r = await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string' || !r || !r.ok) return;
-    if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !FILE_EXPLORER_STATE.visible) return;
+    if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !isFileExplorerViewActive()) return;
     noteFileExplorerAbsolutePath(r.path, path);
     const entries = Array.isArray(r.entries) ? r.entries : [];
     const signature = fileExplorerEntriesSignature(entries);
@@ -1314,7 +1722,7 @@ function setSidebarExplorerMode(visible) {
     loadFileExplorer(FILE_EXPLORER_STATE.path);
     startFileExplorerAutoRefresh();
   } else {
-    stopFileExplorerAutoRefresh();
+    if (!FILE_EXPLORER_STATE.graphicalVisible) stopFileExplorerAutoRefresh();
   }
 }
 
@@ -1329,7 +1737,7 @@ function refreshFileExplorer() {
 function resetFileExplorerToRoot() {
   FILE_EXPLORER_STATE.path = '.';
   FILE_EXPLORER_STATE.entries = [];
-  if (FILE_EXPLORER_STATE.visible) loadFileExplorer('.');
+  if (isFileExplorerViewActive()) loadFileExplorer('.');
   else renderFileExplorer();
 }
 
@@ -2547,6 +2955,10 @@ function showFileExplorerContextMenu(event, item) {
   const isItem = !!item;
   const path = isItem ? (item.dataset.path || '.') : FILE_EXPLORER_STATE.path;
   const type = isItem ? (item.dataset.type || '') : 'dir';
+  if (isItem && fileExplorerSelectionCount() && !isFileExplorerPathSelected(path)) {
+    clearFileExplorerSelection({ render: false });
+    renderFileExplorer();
+  }
   FILE_EXPLORER_STATE.contextPath = path;
   FILE_EXPLORER_STATE.contextType = type;
   FILE_EXPLORER_STATE.contextScope = isItem ? 'item' : 'blank';
@@ -2590,9 +3002,18 @@ function showFileExplorerContextMenu(event, item) {
 
 function handleFileExplorerClick(event) {
   const item = fileExplorerItemButtonFromEvent(event);
-  if (!item) return;
+  if (!item) {
+    if (fileExplorerSelectionCount()) clearFileExplorerSelection();
+    return;
+  }
   const path = item.dataset.path || '.';
   const type = item.dataset.type || '';
+  if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+    toggleFileExplorerSelection(path, type);
+    return;
+  }
+  clearFileExplorerSelection();
   openFileExplorerPath(path, type);
 }
 
@@ -2918,32 +3339,60 @@ async function showFileExplorerDetails(path = FILE_EXPLORER_STATE.contextPath) {
   }
 }
 
-function setFileExplorerClipboard(path, type, mode = 'copy') {
-  const normalizedPath = normalizeExplorerPath(path);
-  if (!normalizedPath) return false;
+function fileExplorerClipboardItems(clip = FILE_EXPLORER_STATE.clipboard) {
+  if (!clip) return [];
+  if (Array.isArray(clip.items)) {
+    return clip.items.map(normalizeFileExplorerSelectionItem).filter(Boolean);
+  }
+  return [normalizeFileExplorerSelectionItem(clip)].filter(Boolean);
+}
+
+function setFileExplorerClipboardItems(items, mode = 'copy') {
+  const normalizedItems = (Array.isArray(items) ? items : [])
+    .map(normalizeFileExplorerSelectionItem)
+    .filter(Boolean);
+  if (!normalizedItems.length) return false;
+  const first = normalizedItems[0];
   FILE_EXPLORER_STATE.clipboard = {
-    path: normalizedPath,
-    type: type === 'dir' ? 'dir' : 'file',
+    path: first.path,
+    type: first.type,
     mode: mode === 'cut' ? 'cut' : 'copy',
-    name: fileExplorerBasename(normalizedPath),
+    name: first.name,
+    items: normalizedItems,
     copiedAt: Date.now()
   };
+  updateGraphicalFileExplorerToolbar();
   return true;
 }
 
+function setFileExplorerClipboard(path, type, mode = 'copy') {
+  return setFileExplorerClipboardItems([{ path, type }], mode);
+}
+
 function copyFileExplorerItem(path = FILE_EXPLORER_STATE.contextPath, type = FILE_EXPLORER_STATE.contextType) {
-  if (!setFileExplorerClipboard(path, type, 'copy')) return;
+  const items = fileExplorerOperationItemsFor(path, type);
+  if (!setFileExplorerClipboardItems(items, 'copy')) return;
+  if (items.length > 1) {
+    fileExplorerToast(`已复制 ${items.length} 项`);
+    return;
+  }
   fileExplorerToast(`已复制 ${FILE_EXPLORER_STATE.clipboard.name || FILE_EXPLORER_STATE.clipboard.path}`);
 }
 
 function cutFileExplorerItem(path = FILE_EXPLORER_STATE.contextPath, type = FILE_EXPLORER_STATE.contextType) {
-  if (!setFileExplorerClipboard(path, type, 'cut')) return;
+  const items = fileExplorerOperationItemsFor(path, type);
+  if (!setFileExplorerClipboardItems(items, 'cut')) return;
+  if (items.length > 1) {
+    fileExplorerToast(`已剪切 ${items.length} 项`);
+    return;
+  }
   fileExplorerToast(`已剪切 ${FILE_EXPLORER_STATE.clipboard.name || FILE_EXPLORER_STATE.clipboard.path}`);
 }
 
 function clearFileExplorerClipboard() {
   if (!FILE_EXPLORER_STATE.clipboard) return;
   FILE_EXPLORER_STATE.clipboard = null;
+  updateGraphicalFileExplorerToolbar();
   fileExplorerToast('已取消复制/剪切');
 }
 
@@ -2966,13 +3415,17 @@ function updateMovedExplorerReferences(sourcePath, targetPath) {
 
 async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath) {
   const clip = FILE_EXPLORER_STATE.clipboard;
-  if (!clip || !clip.path) {
+  const items = fileExplorerClipboardItems(clip);
+  if (!clip || !items.length) {
     fileExplorerToast('没有可粘贴的文件');
     return;
   }
   const normalizedTargetDir = normalizeExplorerPath(targetDir || FILE_EXPLORER_STATE.path);
   const isCut = clip.mode === 'cut';
-  if (isCut && normalizeExplorerPath(parentExplorerPath(clip.path)) === normalizedTargetDir) {
+  const pasteItems = isCut
+    ? items.filter(item => normalizeExplorerPath(parentExplorerPath(item.path)) !== normalizedTargetDir)
+    : items;
+  if (isCut && !pasteItems.length) {
     FILE_EXPLORER_STATE.clipboard = null;
     fileExplorerToast('文件已在当前目录');
     return;
@@ -2980,21 +3433,31 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
     const action = isCut ? 'move_file' : 'copy_file';
-    const r = await callAgentBackend(
-      action,
-      { path: clip.path, target_dir: normalizedTargetDir, dedupe: true },
-      undefined,
-      undefined,
-      fileExplorerBackendContext({ skipConfirm: true })
-    );
-    if (typeof r === 'string') throw new Error(r);
-    if (!r || !r.ok) throw new Error((r && r.error) || '粘贴失败');
-    const pastedName = fileExplorerBasename(r.new_path || r.path || clip.name);
-    if (isCut) {
-      updateMovedExplorerReferences(clip.path, r.new_path || clip.path);
-      FILE_EXPLORER_STATE.clipboard = null;
+    let lastResult = null;
+    for (const item of pasteItems) {
+      const r = await callAgentBackend(
+        action,
+        { path: item.path, target_dir: normalizedTargetDir, dedupe: true },
+        undefined,
+        undefined,
+        fileExplorerBackendContext({ skipConfirm: true })
+      );
+      if (typeof r === 'string') throw new Error(r);
+      if (!r || !r.ok) throw new Error((r && r.error) || '粘贴失败');
+      lastResult = r;
+      if (isCut) {
+        updateMovedExplorerReferences(item.path, r.new_path || r.path || item.path);
+      }
     }
-    fileExplorerToast(isCut ? `已移动 ${pastedName || clip.name}` : `已粘贴 ${pastedName || clip.name}`);
+    if (isCut) {
+      FILE_EXPLORER_STATE.clipboard = null;
+      clearFileExplorerSelection({ render: false });
+    }
+    const lastItem = pasteItems[pasteItems.length - 1] || items[0];
+    const pastedName = fileExplorerBasename((lastResult && (lastResult.new_path || lastResult.path)) || lastItem.name);
+    fileExplorerToast(pasteItems.length > 1
+      ? (isCut ? `已移动 ${pasteItems.length} 项` : `已粘贴 ${pasteItems.length} 项`)
+      : (isCut ? `已移动 ${pastedName || lastItem.name}` : `已粘贴 ${pastedName || lastItem.name}`));
     await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
   } catch (e) {
     fileExplorerToast(e.message || String(e));
@@ -3051,17 +3514,33 @@ async function renameFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
   }
 }
 
-async function deleteFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
-  const normalizedPath = normalizeExplorerPath(path);
+function isExplorerPathInside(targetPath, basePath) {
+  const target = normalizeExplorerPath(targetPath);
+  const base = normalizeExplorerPath(basePath);
+  return !!target && !!base && (target === base || target.startsWith(base + '/'));
+}
+
+function closeDeletedExplorerReferences(deletedPath) {
+  if (isExplorerPathInside(FILE_EXPLORER_STATE.editorPath, deletedPath)) closeFileEditor(true);
+  if (isExplorerPathInside(FILE_EXPLORER_STATE.pdfPath, deletedPath)) closePdfViewer();
+  if (isExplorerPathInside(FILE_EXPLORER_STATE.imagePath, deletedPath)) closeImageViewer();
+  if (isExplorerPathInside(FILE_EXPLORER_STATE.mediaPath, deletedPath)) closeMediaViewer();
+  if (isExplorerPathInside(FILE_EXPLORER_STATE.inlineFilePath, deletedPath)) closeInlineFilePanel();
+}
+
+async function deleteFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, type = FILE_EXPLORER_STATE.contextType) {
+  const items = fileExplorerOperationItemsFor(path, type);
+  if (!items.length) return;
   try {
-    const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
-    if (typeof r === 'string') throw new Error(r);
-    if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
-    if (FILE_EXPLORER_STATE.editorPath === normalizedPath) closeFileEditor(true);
-    if (FILE_EXPLORER_STATE.pdfPath === normalizedPath) closePdfViewer();
-    if (FILE_EXPLORER_STATE.imagePath === normalizedPath) closeImageViewer();
-    if (FILE_EXPLORER_STATE.mediaPath === normalizedPath) closeMediaViewer();
-    fileExplorerToast('已删除');
+    for (const item of items) {
+      const normalizedPath = normalizeExplorerPath(item.path);
+      const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+      if (typeof r === 'string') throw new Error(r);
+      if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
+      closeDeletedExplorerReferences(normalizedPath);
+    }
+    clearFileExplorerSelection({ render: false });
+    fileExplorerToast(items.length > 1 ? `已删除 ${items.length} 项` : '已删除');
     refreshFileExplorer();
   } catch (e) {
     fileExplorerToast(e.message || String(e));
@@ -3076,6 +3555,7 @@ function handleFileExplorerContextMenuAction(event) {
   const action = btn.dataset.action;
   hideFileExplorerContextMenu();
   if (action === 'add-quick-access') addCurrentFolderToQuickAccess();
+  else if (action === 'open-graphical') openGraphicalFileExplorer(path || FILE_EXPLORER_STATE.path);
   else if (action === 'remove-quick-access') removeCurrentFolderFromQuickAccess();
   else if (action === 'open-quick-access') {
     const quickPath = btn.dataset.path || '';
@@ -3096,7 +3576,7 @@ function handleFileExplorerContextMenuAction(event) {
   else if (action === 'copy-path') copyFileExplorerRelativePath(path);
   else if (action === 'copy-absolute-path') copyFileExplorerAbsolutePath(path);
   else if (action === 'details') showFileExplorerDetails(path);
-  else if (action === 'delete') deleteFileExplorerPath(path);
+  else if (action === 'delete') deleteFileExplorerPath(path, type);
   else if (action === 'new-file') createFileExplorerFile(path);
   else if (action === 'new-folder') createFileExplorerFolder(path);
   else if (action === 'switch-workspace') switchFileExplorerWorkspace(path);
@@ -3118,6 +3598,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (event.key === 'Escape') {
       hideFileExplorerContextMenu();
       closeFileExplorerDetails();
+      closeGraphicalFileExplorer();
     }
   });
   window.addEventListener('resize', enforceInlineFileResponsive);
@@ -3130,6 +3611,8 @@ window.setSidebarExplorerMode = setSidebarExplorerMode;
 window.refreshFileExplorer = refreshFileExplorer;
 window.fileExplorerGoUp = fileExplorerGoUp;
 window.resetFileExplorerToRoot = resetFileExplorerToRoot;
+window.openGraphicalFileExplorer = openGraphicalFileExplorer;
+window.closeGraphicalFileExplorer = closeGraphicalFileExplorer;
 window.openFileEditor = openFileEditor;
 window.closeFileEditor = closeFileEditor;
 window.reloadFileEditor = reloadFileEditor;
@@ -3153,6 +3636,9 @@ window.copyFileExplorerAbsolutePath = copyFileExplorerAbsolutePath;
 window.copyFileExplorerItem = copyFileExplorerItem;
 window.cutFileExplorerItem = cutFileExplorerItem;
 window.clearFileExplorerClipboard = clearFileExplorerClipboard;
+window.clearFileExplorerSelection = clearFileExplorerSelection;
+window.toggleFileExplorerSelection = toggleFileExplorerSelection;
+window.selectedFileExplorerItems = selectedFileExplorerItems;
 window.pasteFileExplorerItem = pasteFileExplorerItem;
 window.downloadFileExplorerPath = downloadFileExplorerPath;
 window.renameFileExplorerPath = renameFileExplorerPath;
@@ -3191,6 +3677,8 @@ window.AgentApp.define('fileExplorer', {
   loadFileExplorer,
   refreshFileExplorer,
   resetFileExplorerToRoot,
+  openGraphicalFileExplorer,
+  closeGraphicalFileExplorer,
   toggleSidebarExplorer,
   setSidebarExplorerMode,
   openFileExplorerPath,
@@ -3212,6 +3700,9 @@ window.AgentApp.define('fileExplorer', {
   copyFileExplorerItem,
   cutFileExplorerItem,
   clearFileExplorerClipboard,
+  clearFileExplorerSelection,
+  toggleFileExplorerSelection,
+  selectedFileExplorerItems,
   pasteFileExplorerItem,
   downloadFileExplorerPath,
   renameFileExplorerPath,

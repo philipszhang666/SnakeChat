@@ -190,6 +190,95 @@ function makeWebToolsScenarioResponse(body, callNumber) {
   };
 }
 
+function makeCommandTaskScenarioResponse(body, callNumber) {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const toolMessages = messages.filter(msg => msg && msg.role === 'tool');
+  const hasShortExecute = toolMessages.some(msg => msg.name === 'execute_action' || msg.tool_call_id === 'call_e2e_short_execute');
+  const hasEmptyList = toolMessages.some(msg => msg.tool_call_id === 'call_e2e_task_list_empty');
+  const hasLongExecute = toolMessages.some(msg => msg.tool_call_id === 'call_e2e_long_execute');
+  const hasVisibleList = toolMessages.some(msg => msg.tool_call_id === 'call_e2e_task_list_visible');
+  const hasOutput = toolMessages.some(msg => msg.tool_call_id === 'call_e2e_task_output');
+
+  if (!hasShortExecute) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_short_execute',
+      name: 'execute_action',
+      arguments: {
+        command: 'echo short-e2e',
+        cwd: 'C:\\e2e-workspace',
+        timeout: 5
+      }
+    });
+  }
+
+  if (!hasEmptyList) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_task_list_empty',
+      name: 'command_task_list',
+      arguments: {
+        include_finished: true,
+        limit: 10
+      }
+    });
+  }
+
+  if (!hasLongExecute) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_long_execute',
+      name: 'execute_action',
+      arguments: {
+        command: 'node -e "setTimeout(() => console.log(\'long-e2e-done\'), 2000)"',
+        cwd: 'C:\\e2e-workspace',
+        timeout: 1
+      }
+    });
+  }
+
+  if (!hasVisibleList) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_task_list_visible',
+      name: 'command_task_list',
+      arguments: {
+        include_finished: true,
+        limit: 10
+      }
+    });
+  }
+
+  if (!hasOutput) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_task_output',
+      name: 'command_task_output',
+      arguments: {
+        task_id: 'cmd_e2e_visible_long',
+        wait: 0
+      }
+    });
+  }
+
+  return {
+    id: `chatcmpl-e2e-command-task-final-${callNumber}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: body.model || 'mock-model',
+    choices: [
+      {
+        index: 0,
+        finish_reason: 'stop',
+        message: {
+          role: 'assistant',
+          content: 'Command task final: short command was not listed, timed-out task was listed and queried.'
+        }
+      }
+    ],
+    usage: {
+      prompt_tokens: 24,
+      completion_tokens: 12,
+      total_tokens: 36
+    }
+  };
+}
+
 function bodyHasTool(body, toolName) {
   return (Array.isArray(body.tools) ? body.tools : []).some(tool => {
     if (!tool) return false;
@@ -902,6 +991,11 @@ async function mockLlm(route, options, state) {
     return;
   }
 
+  if (options.commandTaskScenario && bodyHasTool(body, 'execute_action')) {
+    await fulfillSafely(route, jsonResponse(makeCommandTaskScenarioResponse(body, callNumber)));
+    return;
+  }
+
   if (options.goalScenario && bodyHasTool(body, 'get_goal')) {
     await fulfillSafely(route, jsonResponse(makeGoalScenarioResponse(body, callNumber)));
     return;
@@ -1064,7 +1158,74 @@ function agentBackendPayload(action, body, state = {}) {
   if (action === 'wechat_bridge') {
     return { ok: true, enabled: false, commands: [], message: 'mock remote control idle' };
   }
+  if (action === 'command_task_output') {
+    const taskId = body.task_id || body.id || '';
+    const task = state.commandTasks && state.commandTasks[taskId];
+    if (!task) return { ok: false, error: `command task not found: ${taskId}` };
+    task.running = false;
+    task.status = 'completed';
+    task.returncode = 0;
+    task.ended_at = Date.now() / 1000;
+    task.stdout = `${task.stdout || ''}long-e2e-done\n`;
+    return { ok: true, background_task: true, ...task };
+  }
+  if (action === 'command_task_list') {
+    const includeFinished = body.include_finished !== false;
+    const tasks = Object.values(state.commandTasks || {})
+      .filter(task => includeFinished || task.running)
+      .map(task => ({
+        task_id: task.task_id,
+        kind: task.kind,
+        command: task.command,
+        cwd: task.cwd,
+        workspace: task.workspace,
+        pid: task.pid,
+        status: task.status,
+        running: task.running,
+        returncode: task.returncode,
+        started_at: task.started_at,
+        ended_at: task.ended_at,
+        max_runtime: task.max_runtime
+      }));
+    state.commandTaskListSnapshots.push({ body: { ...body }, tasks });
+    return { ok: true, tasks };
+  }
   if (action === 'remote_execute' || action === 'execute') {
+    const command = String(body.command || '');
+    if (command.includes('short-e2e')) {
+      return {
+        ok: true,
+        stdout: 'short-e2e\n',
+        stderr: '',
+        returncode: 0,
+        cwd: body.cwd || MOCK_WORKSPACE,
+        workspace: MOCK_WORKSPACE
+      };
+    }
+    if (command.includes('long-e2e-done')) {
+      const taskId = 'cmd_e2e_visible_long';
+      state.commandTasks[taskId] = {
+        ok: true,
+        background_task: true,
+        task_id: taskId,
+        kind: action,
+        command,
+        cwd: body.cwd || MOCK_WORKSPACE,
+        workspace: MOCK_WORKSPACE,
+        pid: 42420,
+        status: 'running',
+        running: true,
+        returncode: null,
+        error: '',
+        started_at: Date.now() / 1000,
+        ended_at: null,
+        max_runtime: body.max_runtime || 3600,
+        stdout: 'long-e2e-started\n',
+        stderr: '',
+        foreground_timeout: body.timeout || 1
+      };
+      return { ...state.commandTasks[taskId] };
+    }
     return { ok: true, stdout: 'mock command output', stderr: '', returncode: 0 };
   }
   if (action === 'compile_tex') {
@@ -1091,7 +1252,9 @@ async function installMockBackend(page, options = {}) {
     lmsServiceCalls: [],
     failedOnce: false,
     gitInitialized: options.gitInRepo !== false,
-    lmsHasSavedCredential: !!options.lmsHasSavedCredential
+    lmsHasSavedCredential: !!options.lmsHasSavedCredential,
+    commandTasks: {},
+    commandTaskListSnapshots: []
   };
 
   await page.route('**/*', async route => {

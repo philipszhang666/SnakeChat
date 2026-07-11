@@ -1942,12 +1942,14 @@ class FrontendModuleTests(unittest.TestCase):
 
     def test_file_explorer_context_menu_supports_copy_cut_paste_and_download(self):
         file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
         terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
         concurrent_js = (ROOT / 'js' / 'concurrent-requests.js').read_text(encoding='utf-8')
         routes_py = (ROOT / 'server' / 'routes.py').read_text(encoding='utf-8')
         preview_py = (ROOT / 'server' / 'preview.py').read_text(encoding='utf-8')
 
         for snippet in (
+            'selectedItems: new Map()',
             'data-action="copy-item"',
             'data-action="cut-item"',
             'data-action="paste"',
@@ -1957,19 +1959,51 @@ class FrontendModuleTests(unittest.TestCase):
             'data-action="download" data-remote-only="true"',
             'data-action="copy-path"',
             'data-action="copy-absolute-path"',
+            'data-action="open-graphical"',
             "action === 'download' || action === 'upload-files' || action === 'upload-folder'",
             '复制相对路径',
             '复制绝对路径',
+            '图形化界面',
             'function copyFileExplorerRelativePath',
             'function copyFileExplorerAbsolutePath',
             'function joinFileExplorerAbsolutePath',
+            'function ensureGraphicalFileExplorerModal',
+            'function openGraphicalFileExplorer',
+            'function closeGraphicalFileExplorer',
+            'function renderGraphicalFileExplorer',
+            'function renderGraphicalFileExplorerQuickAccess',
+            'function setGraphicalFileExplorerViewMode',
+            'function updateGraphicalFileExplorerViewControls',
+            'function graphicalFileExplorerViewMenuHtml',
             'function copyFileExplorerItem',
             'function cutFileExplorerItem',
             'function clearFileExplorerClipboard',
+            'function clearFileExplorerSelection',
+            'function toggleFileExplorerSelection',
+            'function selectedFileExplorerItems',
+            'function fileExplorerOperationItemsFor',
+            'function setFileExplorerClipboardItems',
+            'function fileExplorerClipboardItems',
             'function pasteFileExplorerItem',
             'function downloadFileExplorerPath',
+            'if (fileExplorerSelectionCount()) clearFileExplorerSelection();',
+            'event.ctrlKey || event.metaKey',
+            'toggleFileExplorerSelection(path, type)',
+            'aria-selected="${selected ?',
+            "'is-selected'",
+            'items: normalizedItems',
+            'for (const item of pasteItems)',
+            'for (const item of items)',
             "action === 'copy-absolute-path'",
+            "action === 'open-graphical'",
             'FILE_EXPLORER_STATE.workspaceRoot',
+            'FILE_EXPLORER_STATE.graphicalVisible',
+            'FILE_EXPLORER_STATE.graphicalViewMode',
+            'id="fileExplorerGraphList"',
+            'id="fileExplorerGraphAddress"',
+            'id="fileExplorerGraphQuickAccessList"',
+            'id="fileExplorerGraphViewTrigger"',
+            'data-graph-view-mode',
             "'copy_file'",
             "'move_file'",
             "clip.mode === 'cut'",
@@ -1981,6 +2015,34 @@ class FrontendModuleTests(unittest.TestCase):
         ):
             self.assertIn(snippet, file_explorer_js)
         self.assertNotIn('data-file-only="true"', file_explorer_js)
+        self.assertIn('.file-explorer-item.is-selected', base_css)
+        self.assertIn('.modal.file-explorer-graph-modal', base_css)
+        self.assertIn('.modal-mask.file-explorer-graph-mask{z-index:2050', base_css)
+        self.assertIn('.modal-mask.file-editor-mask{z-index:2200', base_css)
+        self.assertIn('.modal-mask.pdf-viewer-mask{z-index:2200', base_css)
+        self.assertIn('.modal-mask.image-viewer-mask{z-index:2200', base_css)
+        self.assertIn('.modal-mask.media-viewer-mask{z-index:2200', base_css)
+        self.assertIn('.modal-mask.file-details-mask{z-index:2250', base_css)
+        self.assertIn('.modal.file-explorer-graph-modal{width:min(1180px,calc(100vw - 48px),calc((100vh - 48px) * 1.7778));max-width:calc(100vw - 48px);height:auto;max-height:calc(100vh - 48px);aspect-ratio:16 / 9', base_css)
+        self.assertIn('aspect-ratio:16 / 9', base_css)
+        self.assertIn('.modal.file-explorer-graph-modal .file-explorer-graph-titlebar h2', base_css)
+        self.assertIn('.file-explorer-graph-list', base_css)
+        self.assertIn('--graph-card-width:188px', base_css)
+        self.assertIn('--graph-card-height:106px', base_css)
+        self.assertIn('.file-explorer-graph-list.is-xlarge{--graph-card-width:252px;--graph-card-height:142px', base_css)
+        self.assertIn('.file-explorer-graph-list.is-small{--graph-card-width:132px;--graph-card-height:74px', base_css)
+        self.assertIn('grid-template-columns:repeat(auto-fill,var(--graph-card-width))', base_css)
+        self.assertIn('grid-auto-rows:var(--graph-card-height)', base_css)
+        self.assertIn('height:var(--graph-card-height);min-height:var(--graph-card-height)', base_css)
+        self.assertIn('.file-explorer-graph-list.is-list', base_css)
+        self.assertIn('.file-explorer-graph-list.is-details', base_css)
+        self.assertIn('.file-explorer-graph-view-menu', base_css)
+        self.assertIn('grid-template-columns:20px minmax(0,1fr)', base_css)
+        self.assertIn('height:30px;min-height:38px;flex-shrink:0;aspect-ratio:auto', base_css)
+        self.assertIn('grid-template-columns:24px minmax(0,1fr)', base_css)
+        self.assertIn('.file-explorer-graph-sidebar', base_css)
+        self.assertNotIn('file-explorer-graph-view-option-icon', file_explorer_js)
+        self.assertNotIn('file-explorer-graph-view-trigger-icon', file_explorer_js)
 
         self.assertIn("copy_file: 'write'", terminal_js)
         self.assertIn("move_file: 'edit'", terminal_js)

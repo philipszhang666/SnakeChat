@@ -155,6 +155,16 @@ body{
   border-radius:999px;
 }
 
+.file-explorer-item.is-selected{
+  background:rgba(26,115,232,.10);
+  color:var(--primary);
+}
+
+.file-explorer-item.is-selected:hover,
+.file-explorer-item.is-selected:focus-visible{
+  background:rgba(26,115,232,.14);
+}
+
 .file-editor-modal{
   border-radius:18px;
 }
@@ -1718,6 +1728,20 @@ input::placeholder{
 .modal h2{
   font-weight:500;
   letter-spacing:-.01em;
+}
+
+.modal.file-explorer-graph-modal{
+  border-radius:10px;
+  padding:0;
+  background:var(--gemini-surface);
+}
+
+.modal.file-explorer-graph-modal .file-explorer-graph-titlebar h2{
+  margin:0;
+  font-size:18px;
+  line-height:1.25;
+  font-weight:700;
+  letter-spacing:0;
 }
 
 .file-details-modal{

@@ -104,6 +104,28 @@ class CommandTaskTests(unittest.TestCase):
         finally:
             COMMAND_TASKS.cancel(result.get('task_id'))
 
+    def test_short_foreground_task_is_discarded_after_response(self):
+        command = subprocess.list2cmdline([
+            sys.executable,
+            '-c',
+            'print("short-task-reclaimed")',
+        ])
+        mixin = ExecMixin()
+
+        result = mixin._run_command_until_foreground_timeout(
+            command,
+            str(ROOT),
+            timeout=5,
+            body={'max_runtime': 10},
+        )
+
+        self.assertTrue(result['ok'])
+        self.assertNotIn('task_id', result)
+        self.assertFalse(any(
+            task['command'] == command
+            for task in COMMAND_TASKS.list(visible_only=False)
+        ))
+
     def test_background_tasks_are_filtered_by_owner_session(self):
         command = subprocess.list2cmdline([sys.executable, '-c', 'print("owned-task")'])
         started = COMMAND_TASKS.start(
@@ -116,6 +138,10 @@ class CommandTaskTests(unittest.TestCase):
 
         self.assertIsNotNone(COMMAND_TASKS.get(task_id, owner_session_id='session-a'))
         self.assertIsNone(COMMAND_TASKS.get(task_id, owner_session_id='session-b'))
+        self.assertFalse(any(task['task_id'] == task_id for task in COMMAND_TASKS.list(owner_session_id='session-a')))
+
+        COMMAND_TASKS.mark_visible(task_id, owner_session_id='session-a')
+
         self.assertTrue(any(task['task_id'] == task_id for task in COMMAND_TASKS.list(owner_session_id='session-a')))
         self.assertFalse(any(task['task_id'] == task_id for task in COMMAND_TASKS.list(owner_session_id='session-b')))
 
