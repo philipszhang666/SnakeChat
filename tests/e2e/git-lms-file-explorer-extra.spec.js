@@ -132,6 +132,55 @@ async function clickBlankGraphicalExplorerSpace(page) {
   });
 }
 
+async function beginGraphicalExplorerDrag(page, sourceName, targetName) {
+  await page.evaluate(({ sourceName, targetName }) => {
+    const itemByName = name => Array.from(document.querySelectorAll('#fileExplorerGraphList .file-explorer-item'))
+      .find(item => item.querySelector('.file-explorer-name')?.textContent.trim() === name);
+    const source = itemByName(sourceName);
+    const target = itemByName(targetName);
+    if (!source || !target) throw new Error(`Missing drag item ${sourceName} -> ${targetName}`);
+    const dataTransfer = new DataTransfer();
+    window.__e2eFileExplorerDragData = dataTransfer;
+    source.dispatchEvent(new DragEvent('dragstart', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+    target.dispatchEvent(new DragEvent('dragenter', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+    target.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+  }, { sourceName, targetName });
+}
+
+async function finishGraphicalExplorerDrag(page, sourceName, targetName) {
+  await page.evaluate(({ sourceName, targetName }) => {
+    const itemByName = name => Array.from(document.querySelectorAll('#fileExplorerGraphList .file-explorer-item'))
+      .find(item => item.querySelector('.file-explorer-name')?.textContent.trim() === name);
+    const source = itemByName(sourceName);
+    const target = itemByName(targetName);
+    const dataTransfer = window.__e2eFileExplorerDragData || new DataTransfer();
+    if (!source || !target) throw new Error(`Missing drop item ${sourceName} -> ${targetName}`);
+    target.dispatchEvent(new DragEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+    source.dispatchEvent(new DragEvent('dragend', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer
+    }));
+    delete window.__e2eFileExplorerDragData;
+  }, { sourceName, targetName });
+}
+
 async function graphicalExplorerTopRowCount(page) {
   return page.locator('#fileExplorerGraphList .file-explorer-item').evaluateAll(items => {
     const boxes = items
@@ -437,6 +486,8 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     expect(Math.abs((modalBox.width / modalBox.height) - (16 / 9))).toBeLessThan(0.05);
     expect(titleBox.y - modalBox.y).toBeGreaterThanOrEqual(14);
     await expect(page.locator('#fileExplorerGraphAddress')).toContainText('e2e-workspace');
+    expect(await page.locator('#fileExplorerGraphAddress [data-graph-address-path]').count()).toBeGreaterThan(1);
+    await expect(page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]')).toContainText('e2e-workspace');
     await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText(/沙箱目录|当前目录/);
     await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
     await expect(graphicalExplorerItem(page, 'sample.txt')).toBeVisible();
@@ -501,6 +552,14 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     expect(await graphicalExplorerTopRowCount(page)).toBeLessThan(largeTopRowCount);
     expect(xlargeIconBox.width / xlargeItemBox.width).toBeGreaterThan(0.7);
 
+    await beginGraphicalExplorerDrag(page, 'sample.txt', 'src');
+    await expect(graphicalExplorerItem(page, 'src')).toHaveClass(/is-drop-target/);
+    await finishGraphicalExplorerDrag(page, 'sample.txt', 'src');
+    await expect.poll(() => backend.backendCalls.some(call =>
+      call.action === 'move_file' && call.body.path === 'sample.txt' && call.body.target_dir === 'src'
+    )).toBe(true);
+    await expect(graphicalExplorerItem(page, 'src')).not.toHaveClass(/is-drop-target/);
+
     await openGraphicalFileContextMenu(page, 'sample.txt');
     await clickContextMenuAction(page, 'copy-path');
     await expect.poll(() => page.evaluate(() => window.__e2eClipboard)).toBe('sample.txt');
@@ -527,6 +586,11 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
       call.action === 'copy_file' && call.body.path === 'sample.md' && call.body.target_dir === '.'
     )).toBe(true);
 
+    await graphicalExplorerItem(page, 'src').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await expect(page.locator('#fileExplorerGraphAddress [data-graph-address-path="src"]')).toHaveText('src');
+    await page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]').filter({ hasText: 'e2e-workspace' }).click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     await graphicalExplorerItem(page, 'src').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src');
     await page.locator('#fileExplorerGraphUpBtn').click();

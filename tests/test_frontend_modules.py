@@ -1972,6 +1972,8 @@ class FrontendModuleTests(unittest.TestCase):
             'function closeGraphicalFileExplorer',
             'function renderGraphicalFileExplorer',
             'function renderGraphicalFileExplorerQuickAccess',
+            'function fileExplorerGraphAddressCrumbs',
+            'function renderGraphicalFileExplorerAddress',
             'function setGraphicalFileExplorerViewMode',
             'function updateGraphicalFileExplorerViewControls',
             'function graphicalFileExplorerViewMenuHtml',
@@ -1982,10 +1984,17 @@ class FrontendModuleTests(unittest.TestCase):
             'function toggleFileExplorerSelection',
             'function selectedFileExplorerItems',
             'function fileExplorerOperationItemsFor',
+            'function moveFileExplorerItemsToDirectory',
+            'function handleFileExplorerItemDragStart',
+            'function handleFileExplorerItemDrop',
+            'function bindFileExplorerDragAndDrop',
             'function setFileExplorerClipboardItems',
             'function fileExplorerClipboardItems',
             'function pasteFileExplorerItem',
             'function downloadFileExplorerPath',
+            'dragItems: []',
+            'draggable="true"',
+            "application/x-agent-file-explorer-items",
             'if (fileExplorerSelectionCount()) clearFileExplorerSelection();',
             'event.ctrlKey || event.metaKey',
             'toggleFileExplorerSelection(path, type)',
@@ -2001,6 +2010,7 @@ class FrontendModuleTests(unittest.TestCase):
             'FILE_EXPLORER_STATE.graphicalViewMode',
             'id="fileExplorerGraphList"',
             'id="fileExplorerGraphAddress"',
+            'data-graph-address-path',
             'id="fileExplorerGraphQuickAccessList"',
             'id="fileExplorerGraphViewTrigger"',
             'data-graph-view-mode',
@@ -2016,6 +2026,8 @@ class FrontendModuleTests(unittest.TestCase):
             self.assertIn(snippet, file_explorer_js)
         self.assertNotIn('data-file-only="true"', file_explorer_js)
         self.assertIn('.file-explorer-item.is-selected', base_css)
+        self.assertIn('.file-explorer-item.is-dragging', base_css)
+        self.assertIn('.file-explorer-item.is-dir.is-drop-target', base_css)
         self.assertIn('.modal.file-explorer-graph-modal', base_css)
         self.assertIn('.modal-mask.file-explorer-graph-mask{z-index:2050', base_css)
         self.assertIn('.modal-mask.file-editor-mask{z-index:2200', base_css)
@@ -2027,6 +2039,12 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('aspect-ratio:16 / 9', base_css)
         self.assertIn('.modal.file-explorer-graph-modal .file-explorer-graph-titlebar h2', base_css)
         self.assertIn('.file-explorer-graph-list', base_css)
+        self.assertIn('overflow-x:auto;overflow-y:hidden;scrollbar-width:none', base_css)
+        self.assertIn('.file-explorer-graph-address::-webkit-scrollbar{display:none}', base_css)
+        self.assertIn('.file-explorer-graph-address-segment{height:26px', base_css)
+        self.assertIn('border:0;border-radius:6px;background:transparent', base_css)
+        self.assertIn('.file-explorer-graph-address-segment:hover,.file-explorer-graph-address-segment:focus-visible{background:var(--bg-hover)', base_css)
+        self.assertIn('.file-explorer-graph-list .file-explorer-item.is-dir.is-drop-target', base_css)
         self.assertIn('--graph-card-width:188px', base_css)
         self.assertIn('--graph-card-height:106px', base_css)
         self.assertIn('.file-explorer-graph-list.is-xlarge{--graph-card-width:252px;--graph-card-height:142px', base_css)
