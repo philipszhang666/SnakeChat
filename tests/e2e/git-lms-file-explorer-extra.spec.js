@@ -536,6 +536,36 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     expect(await page.locator('#fileExplorerGraphAddress [data-graph-address-path]').count()).toBeGreaterThan(1);
     await expect(page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]')).toContainText('e2e-workspace');
     await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText(/沙箱目录|当前目录/);
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-drive="true"][data-graph-path="C:/"]')).toHaveText(/C:/);
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-drive="true"][data-graph-path="D:/"]')).toHaveText(/D:/);
+    const fixedQuickAccessPaths = await page.locator('#fileExplorerGraphQuickAccessList .file-explorer-graph-quick-item').evaluateAll(items =>
+      items.slice(0, 3).map(item => ({
+        path: item.getAttribute('data-graph-path'),
+        user: item.getAttribute('data-quick-access-user'),
+        drive: item.getAttribute('data-quick-access-drive')
+      }))
+    );
+    expect(fixedQuickAccessPaths).toEqual([
+      { path: '.', user: null, drive: null },
+      { path: 'C:/', user: null, drive: 'true' },
+      { path: 'D:/', user: null, drive: 'true' }
+    ]);
+    await page.locator('#fileExplorerGraphQuickAccessList [data-graph-path="C:/"]').evaluate(el => {
+      const rect = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        clientX: rect.left + 8,
+        clientY: rect.top + rect.height / 2
+      }));
+    });
+    await expect(page.locator('#fileExplorerContextMenu')).toHaveAttribute('hidden', '');
+    await page.locator('#fileExplorerGraphQuickAccessList [data-graph-path="D:/"]').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('D:/');
+    await page.evaluate(async () => {
+      await window.loadFileExplorer('.');
+    });
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
     await expect(graphicalExplorerItem(page, 'sample.txt')).toBeVisible();
     await expect(page.locator('#fileExplorerGraphSearchInput')).toBeVisible();
@@ -550,6 +580,17 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await page.locator('#fileExplorerGraphSearchInput').fill('src');
     await expect(page.locator('#fileExplorerGraphList .file-explorer-item[data-path="src"][data-type="dir"]')).toBeVisible();
     await page.locator('#fileExplorerGraphSearchClear').click();
+    await page.locator('#fileExplorerGraphUpBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('C:/');
+    await page.locator('#fileExplorerGraphUpBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('此电脑');
+    await expect(page.locator('#fileExplorerGraphList .file-explorer-item[data-path="C:/"]')).toBeVisible();
+    await page.locator('#fileExplorerGraphList .file-explorer-item[data-path="D:/"]').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('D:/');
+    await page.evaluate(async () => {
+      await window.loadFileExplorer('.');
+    });
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     const graphItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
     const graphIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
     expect(graphItemBox).not.toBeNull();
@@ -669,15 +710,15 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await graphicalExplorerItem(page, 'src').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src');
     await expect(page.locator('#fileExplorerGraphAddress [data-graph-address-path="src"]')).toHaveText('src');
+    await graphicalExplorerItem(page, 'src').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src/src');
     await page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]').filter({ hasText: 'e2e-workspace' }).click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
-    await graphicalExplorerItem(page, 'src').click();
-    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
     await expect(page.locator('#fileExplorerGraphUpBtn')).toHaveText('←');
     await expect(page.locator('#fileExplorerGraphForwardBtn')).toHaveText('→');
     await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
     await page.locator('#fileExplorerGraphForwardBtn').click();
-    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src/src');
     await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
     await page.locator('#fileExplorerGraphForwardBtn').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src');

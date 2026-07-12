@@ -1076,6 +1076,16 @@ function agentBackendPayload(action, body, state = {}) {
       ]
     };
   }
+  if (action === 'list_drives') {
+    return {
+      ok: true,
+      path: '此电脑',
+      entries: [
+        { name: 'D:', path: 'D:/', type: 'dir', size: 0, drive: true, meta: '本地磁盘' },
+        { name: 'C:', path: 'C:/', type: 'dir', size: 0, drive: true, meta: '本地磁盘' }
+      ]
+    };
+  }
   if (action === 'find_path') {
     const query = String(body.query || body.name || '').toLowerCase();
     const candidates = [

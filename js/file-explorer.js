@@ -53,6 +53,10 @@ const FILE_EXPLORER_STATE = {
   graphSearchTimer: null,
   graphSearchRequestId: 0,
   graphForwardStack: [],
+  localDriveEntries: [],
+  localDriveLoading: false,
+  localDriveLoaded: false,
+  localDrivePromise: null,
   inlineFilePath: '',
   inlineFileKind: '',
   inlineFileSide: 'right',
@@ -64,6 +68,8 @@ const INLINE_FILE_MIN_MAIN_WIDTH = 920;
 const INLINE_FILE_MIN_CHAT_WIDTH = 460;
 const INLINE_FILE_MIN_FILE_WIDTH = 360;
 const GRAPHICAL_FILE_EXPLORER_RECENT_LIMIT = 10;
+const FILE_EXPLORER_THIS_PC_PATH = '__agent_this_pc__';
+const FILE_EXPLORER_THIS_PC_LABEL = '此电脑';
 const FILE_EXPLORER_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
 const FILE_EXPLORER_QUICK_ACCESS_LEGACY_KEY = 'aichat_file_explorer_quick_access_v1';
 const FILE_EXPLORER_QUICK_ACCESS_KEY_PREFIX = 'aichat_file_explorer_quick_access_v2';
@@ -172,6 +178,18 @@ function isAbsoluteExplorerPath(path) {
   return isWindowsAbsoluteExplorerPath(path) || isPosixAbsoluteExplorerPath(path);
 }
 
+function isFileExplorerThisPcPath(path) {
+  return String(path || '').trim() === FILE_EXPLORER_THIS_PC_PATH;
+}
+
+function canUseFileExplorerThisPcRoot() {
+  return !isFileExplorerRemoteMode() && (
+    fileExplorerClientLooksWindows()
+    || isWindowsAbsoluteExplorerPath(fileExplorerWorkspaceRoot())
+    || isWindowsAbsoluteExplorerPath(FILE_EXPLORER_STATE.absolutePath)
+  );
+}
+
 function fileExplorerRelativeToWorkspace(path) {
   const root = fileExplorerComparablePath(fileExplorerWorkspaceRoot());
   const target = fileExplorerComparablePath(path);
@@ -271,6 +289,8 @@ function parentExplorerPath(path) {
 
 function currentFileExplorerParentPath() {
   const current = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+  if (isFileExplorerThisPcPath(current)) return current;
+  if (canUseFileExplorerThisPcRoot() && /^[A-Za-z]:\/?$/.test(current)) return FILE_EXPLORER_THIS_PC_PATH;
   if (current === '.') {
     const absolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath || fileExplorerWorkspaceRoot());
     if (absolute) {
@@ -336,6 +356,7 @@ function fileExplorerPathRelativeToCurrent(path) {
 
 function fileExplorerAbsolutePathFor(path) {
   const normalizedPath = normalizeExplorerPath(path);
+  if (isFileExplorerThisPcPath(normalizedPath)) return '';
   if (isAbsoluteExplorerPath(normalizedPath)) return trimFileExplorerAbsolutePath(normalizedPath);
   const currentAbsolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath);
   const currentRelative = fileExplorerPathRelativeToCurrent(normalizedPath);
@@ -516,6 +537,78 @@ function fileExplorerQuickAccessDisplayLabel(item) {
   return fileExplorerBasename(path) || shortenFileExplorerQuickAccessPath(path);
 }
 
+function normalizeFileExplorerLocalDriveEntry(entry) {
+  const source = entry && typeof entry === 'object' ? entry : {};
+  const normalizedPath = normalizeExplorerPath(source.path || source.name || entry);
+  if (!/^[A-Za-z]:\/?$/.test(normalizedPath)) return null;
+  const name = `${normalizedPath.charAt(0).toUpperCase()}:`;
+  return {
+    ...source,
+    name,
+    path: normalizedPath,
+    type: 'dir',
+    drive: true,
+    meta: source.meta || '本地磁盘'
+  };
+}
+
+function sortedFileExplorerLocalDrives(entries = FILE_EXPLORER_STATE.localDriveEntries) {
+  const seen = new Set();
+  const drives = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const drive = normalizeFileExplorerLocalDriveEntry(entry);
+    if (!drive) continue;
+    const key = fileExplorerQuickAccessKey(drive.path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    drives.push(drive);
+  }
+  return drives.sort((a, b) => String(a.name || a.path).localeCompare(String(b.name || b.path), 'en', {
+    numeric: true,
+    sensitivity: 'base'
+  }));
+}
+
+function syncFileExplorerLocalDrives(entries) {
+  const drives = sortedFileExplorerLocalDrives(entries);
+  FILE_EXPLORER_STATE.localDriveEntries = drives;
+  FILE_EXPLORER_STATE.localDriveLoaded = true;
+  return drives;
+}
+
+async function ensureFileExplorerLocalDrives(options = {}) {
+  if (!canUseFileExplorerThisPcRoot()) {
+    FILE_EXPLORER_STATE.localDriveEntries = [];
+    FILE_EXPLORER_STATE.localDriveLoaded = false;
+    FILE_EXPLORER_STATE.localDriveLoading = false;
+    FILE_EXPLORER_STATE.localDrivePromise = null;
+    return [];
+  }
+  if (FILE_EXPLORER_STATE.localDriveLoaded && options.force !== true) {
+    return FILE_EXPLORER_STATE.localDriveEntries;
+  }
+  if (FILE_EXPLORER_STATE.localDrivePromise) return FILE_EXPLORER_STATE.localDrivePromise;
+  FILE_EXPLORER_STATE.localDriveLoading = true;
+  FILE_EXPLORER_STATE.localDrivePromise = (async () => {
+    try {
+      if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
+      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext());
+      if (typeof r === 'string') throw new Error(r);
+      if (!r || !r.ok) throw new Error((r && r.error) || '读取本机磁盘失败');
+      const drives = syncFileExplorerLocalDrives(Array.isArray(r.entries) ? r.entries : []);
+      renderGraphicalFileExplorerQuickAccess();
+      updateGraphicalFileExplorerToolbar();
+      return drives;
+    } catch (_) {
+      return FILE_EXPLORER_STATE.localDriveEntries;
+    } finally {
+      FILE_EXPLORER_STATE.localDriveLoading = false;
+      FILE_EXPLORER_STATE.localDrivePromise = null;
+    }
+  })();
+  return FILE_EXPLORER_STATE.localDrivePromise;
+}
+
 function removeCurrentFolderFromQuickAccess() {
   const rows = loadFileExplorerQuickAccess();
   const index = currentFileExplorerQuickAccessIndex(rows);
@@ -587,12 +680,15 @@ function setFileExplorerPathDisplay(path) {
   const pathEl = document.getElementById('fileExplorerPath');
   if (!pathEl) return;
   const normalized = normalizeExplorerPath(path);
-  pathEl.textContent = normalized;
-  pathEl.title = normalized;
-  pathEl.setAttribute('aria-label', normalized);
+  const label = isFileExplorerThisPcPath(normalized) ? FILE_EXPLORER_THIS_PC_LABEL : normalized;
+  pathEl.textContent = label;
+  pathEl.title = label;
+  pathEl.setAttribute('aria-label', label);
 }
 
 function fileExplorerIcon(entry) {
+  if (entry && entry.drive) return '💽';
+  if (entry && entry.meta === '本地磁盘') return '💽';
   if (!entry || entry.type === 'dir') return '📁';
   const name = String(entry.name || '').toLowerCase();
   if (/\.(html?|css|js|ts|tsx|jsx|py|json|md|txt|bat|cmd|sh|yml|yaml)$/.test(name)) return '📄';
@@ -1624,6 +1720,7 @@ function renderFileExplorerListTarget(list, entries, options = {}) {
 }
 
 function fileExplorerGraphAddressText() {
+  if (isFileExplorerThisPcPath(FILE_EXPLORER_STATE.path)) return FILE_EXPLORER_THIS_PC_LABEL;
   return fileExplorerAbsolutePathFor(FILE_EXPLORER_STATE.path) || normalizeExplorerPath(FILE_EXPLORER_STATE.path);
 }
 
@@ -1671,6 +1768,14 @@ function fileExplorerAbsoluteAddressCrumbs(path) {
 }
 
 function fileExplorerGraphAddressCrumbs() {
+  if (isFileExplorerThisPcPath(FILE_EXPLORER_STATE.path)) {
+    return [{
+      label: FILE_EXPLORER_THIS_PC_LABEL,
+      path: FILE_EXPLORER_THIS_PC_PATH,
+      title: FILE_EXPLORER_THIS_PC_LABEL,
+      current: true
+    }];
+  }
   return fileExplorerAbsoluteAddressCrumbs(fileExplorerGraphAddressText()).map(crumb => {
     const relativePath = fileExplorerRelativeToWorkspace(crumb.path);
     return {
@@ -1805,8 +1910,17 @@ function renderGraphicalFileExplorerQuickAccess() {
   if (!list) return;
   const rows = loadFileExplorerQuickAccess();
   const root = fileExplorerWorkspaceRoot();
+  const driveItems = canUseFileExplorerThisPcRoot()
+    ? sortedFileExplorerLocalDrives().map(drive => ({
+      path: normalizeExplorerPath(drive.path),
+      label: drive.name || normalizeExplorerPath(drive.path),
+      title: normalizeExplorerPath(drive.path),
+      driveItem: true
+    }))
+    : [];
   const items = [
     { path: '.', label: root ? '沙箱目录' : '当前目录', title: root || '.' },
+    ...driveItems,
     ...rows.map(item => ({
       path: normalizeExplorerPath(item.path),
       label: fileExplorerQuickAccessDisplayLabel(item),
@@ -1818,8 +1932,8 @@ function renderGraphicalFileExplorerQuickAccess() {
     const active = fileExplorerQuickAccessKey(item.path) === fileExplorerQuickAccessKey(currentFileExplorerAbsoluteDir())
       || (item.path === '.' && normalizeExplorerPath(FILE_EXPLORER_STATE.path) === '.');
     return `
-      <button class="file-explorer-graph-quick-item ${active ? 'is-active' : ''}" type="button" data-graph-path="${escapeHtml(item.path)}" ${item.userItem ? 'data-quick-access-user="true"' : ''} title="${escapeHtml(item.title)}">
-        <span class="file-explorer-graph-quick-icon">${item.path === '.' ? '⌂' : '★'}</span>
+      <button class="file-explorer-graph-quick-item ${active ? 'is-active' : ''}" type="button" data-graph-path="${escapeHtml(item.path)}" ${item.userItem ? 'data-quick-access-user="true"' : ''} ${item.driveItem ? 'data-quick-access-drive="true"' : ''} title="${escapeHtml(item.title)}">
+        <span class="file-explorer-graph-quick-icon">${item.path === '.' ? '⌂' : (item.driveItem ? '💽' : '★')}</span>
         <span>${escapeHtml(item.label)}</span>
       </button>
     `;
@@ -1919,7 +2033,7 @@ function ensureGraphicalFileExplorerModal() {
   modal.innerHTML = `
     <div class="modal file-explorer-graph-modal" role="dialog" aria-modal="true" aria-labelledby="fileExplorerGraphTitle">
       <div class="file-explorer-graph-titlebar">
-        <h2 id="fileExplorerGraphTitle">图形化资源管理器</h2>
+        <h2 id="fileExplorerGraphTitle">Snake资源管理器</h2>
         <button class="modal-close" type="button" data-file-explorer-graph-close aria-label="关闭">×</button>
       </div>
       <div class="file-explorer-graph-addressbar">
@@ -2070,12 +2184,14 @@ function handleGraphicalFileExplorerCommand(action) {
 async function openGraphicalFileExplorer(path = FILE_EXPLORER_STATE.contextPath || FILE_EXPLORER_STATE.path) {
   loadGraphicalFileExplorerViewMode();
   const modal = ensureGraphicalFileExplorerModal();
+  const localDrivePromise = ensureFileExplorerLocalDrives();
   FILE_EXPLORER_STATE.graphicalVisible = true;
   FILE_EXPLORER_STATE.graphForwardStack = [];
   modal.classList.add('show');
   renderFileExplorer();
   startFileExplorerAutoRefresh();
   await loadFileExplorer(path || FILE_EXPLORER_STATE.path, { silent: !!FILE_EXPLORER_STATE.entries.length });
+  await localDrivePromise;
 }
 
 function closeGraphicalFileExplorer() {
@@ -2102,6 +2218,18 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
   setFileExplorerPathDisplay(FILE_EXPLORER_STATE.path);
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
+    if (isFileExplorerThisPcPath(FILE_EXPLORER_STATE.path)) {
+      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext());
+      if (typeof r === 'string') throw new Error(r);
+      if (!r || !r.ok) throw new Error((r && r.error) || '读取本机磁盘失败');
+      const entries = syncFileExplorerLocalDrives(Array.isArray(r.entries) ? r.entries : []);
+      FILE_EXPLORER_STATE.absolutePath = '';
+      FILE_EXPLORER_STATE.entries = entries;
+      FILE_EXPLORER_STATE.autoRefreshSignature = fileExplorerEntriesSignature(FILE_EXPLORER_STATE.entries);
+      FILE_EXPLORER_STATE.autoRefreshPath = FILE_EXPLORER_STATE.path;
+      renderFileExplorer();
+      return true;
+    }
     const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取目录失败');
@@ -2150,11 +2278,14 @@ async function pollFileExplorerChanges() {
   const path = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
   try {
     if (typeof callAgentBackend !== 'function') return;
-    const r = await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerBackendContext());
+    const r = isFileExplorerThisPcPath(path)
+      ? await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext())
+      : await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string' || !r || !r.ok) return;
     if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !isFileExplorerViewActive()) return;
-    noteFileExplorerAbsolutePath(r.path, path);
-    const entries = Array.isArray(r.entries) ? r.entries : [];
+    if (!isFileExplorerThisPcPath(path)) noteFileExplorerAbsolutePath(r.path, path);
+    let entries = Array.isArray(r.entries) ? r.entries : [];
+    if (isFileExplorerThisPcPath(path)) entries = syncFileExplorerLocalDrives(entries);
     const signature = fileExplorerEntriesSignature(entries);
     if (FILE_EXPLORER_STATE.autoRefreshPath !== path || FILE_EXPLORER_STATE.autoRefreshSignature !== signature) {
       FILE_EXPLORER_STATE.entries = entries;
@@ -3405,10 +3536,8 @@ async function graphicalFileExplorerGoParent() {
 }
 
 async function graphicalFileExplorerGoForward() {
-  const current = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
   const target = popGraphicalFileExplorerRecentTarget();
   if (!target || target === normalizeExplorerPath(FILE_EXPLORER_STATE.path)) return;
-  pushGraphicalFileExplorerRecentPath(current);
   await loadFileExplorer(target, { preserveGraphForward: true });
 }
 

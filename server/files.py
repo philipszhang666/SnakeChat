@@ -1387,6 +1387,25 @@ class FilesMixin:
         except Exception as e:
             self.response.json(200, {'ok': False, 'error': str(e)})
 
+    def handle_list_drives(self, body):
+        entries = []
+        if sys.platform == 'win32':
+            for code in range(ord('A'), ord('Z') + 1):
+                name = f'{chr(code)}:'
+                root = f'{name}\\'
+                if not os.path.exists(root):
+                    continue
+                entries.append({
+                    'name': name,
+                    'path': root.replace('\\', '/'),
+                    'type': 'dir',
+                    'size': 0,
+                    'mtime': 0,
+                    'drive': True,
+                    'meta': '本地磁盘'
+                })
+        self.response.json(200, {'ok': True, 'path': '此电脑', 'entries': entries})
+
     # ============ 搜索 ============
     def handle_find_file(self, body):
         path, err = check_path_or_error(body.get('path', '') or '.')
