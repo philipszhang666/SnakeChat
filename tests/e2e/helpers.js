@@ -1065,14 +1065,14 @@ function agentBackendPayload(action, body, state = {}) {
       workspace: MOCK_WORKSPACE,
       cwd: MOCK_WORKSPACE,
       entries: [
-        { name: 'src', type: 'dir', size: 0, modified: Date.now() / 1000 },
-        { name: 'sample.txt', type: 'file', size: 42, modified: Date.now() / 1000 },
-        { name: 'sample.md', type: 'file', size: 64, modified: Date.now() / 1000 },
-        { name: 'sample.py', type: 'file', size: 96, modified: Date.now() / 1000 },
-        { name: 'sample.tex', type: 'file', size: 128, modified: Date.now() / 1000 },
-        { name: 'sample.pdf', type: 'file', size: 1024, modified: Date.now() / 1000 },
-        { name: 'sample.png', type: 'file', size: 256, modified: Date.now() / 1000 },
-        { name: 'sample.mp3', type: 'file', size: 512, modified: Date.now() / 1000 }
+        { name: 'src', type: 'dir', size: 0, modified: 1000 },
+        { name: 'sample.txt', type: 'file', size: 42, modified: 100 },
+        { name: 'sample.md', type: 'file', size: 64, modified: 200 },
+        { name: 'sample.py', type: 'file', size: 96, modified: 300 },
+        { name: 'sample.tex', type: 'file', size: 128, modified: 400 },
+        { name: 'sample.pdf', type: 'file', size: 1024, modified: 500 },
+        { name: 'sample.png', type: 'file', size: 256, modified: 600 },
+        { name: 'sample.mp3', type: 'file', size: 512, modified: 700 }
       ]
     };
   }

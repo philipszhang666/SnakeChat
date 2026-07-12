@@ -50,16 +50,23 @@ test.describe('application shell and settings', () => {
     await page.locator('#statsToggleBtn').click();
     await page.locator('#statsToggleBtn').click();
 
+    await page.locator('#topbarGraphicalExplorerBtn').click();
+    await expect(page.locator('#fileExplorerGraphModal')).toHaveClass(/show/);
+    await expect(page.locator('#fileExplorerGraphTitle')).toHaveText('Snake资源管理器');
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await expect(page.locator('#fileExplorerGraphAddress')).not.toContainText('[object');
+    await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
+    await page.locator('[data-file-explorer-graph-close]').click();
+    await expect(page.locator('#fileExplorerGraphModal')).not.toHaveClass(/show/);
+
     await page.locator('#scheduleBtn').click();
     await expect(page.locator('#schedulePicker')).not.toHaveAttribute('hidden', '');
     await page.locator('.schedule-clear').click();
     await expect(page.locator('#schedulePicker')).toHaveAttribute('hidden', '');
 
-    await page.locator('#planBtn').click();
-    await expect(page.locator('#planBtn')).toHaveClass(/plan-active/);
+    await expect(page.locator('#planBtn')).toHaveCount(0);
     await page.locator('#outlineBtn').click();
     await expect(page.locator('#outlineBtn')).toHaveClass(/outline-active/);
-    await expect(page.locator('#planBtn')).not.toHaveClass(/plan-active/);
 
     await page.locator('[data-action="openLmsPanel"]').click();
     await expect(page.locator('#lmsPanel')).toHaveClass(/show/);

@@ -377,8 +377,10 @@ function savePlanSettings() {
   }
   planUiPersistSettings();
   const btn = document.getElementById('planBtn');
-  if (s.usePlan) btn.classList.add('plan-active');
-  else btn.classList.remove('plan-active');
+  if (btn) {
+    if (s.usePlan) btn.classList.add('plan-active');
+    else btn.classList.remove('plan-active');
+  }
   PlanUiUiService.updateSendBtn();
   closePlanSettings();
   PlanUiUiService.toast('✓ 已保存');
@@ -402,8 +404,10 @@ function togglePlan() {
     if (typeof syncPptComposerHint === 'function') syncPptComposerHint();
   }
   const btn = document.getElementById('planBtn');
-  if (s.usePlan) btn.classList.add('plan-active');
-  else btn.classList.remove('plan-active');
+  if (btn) {
+    if (s.usePlan) btn.classList.add('plan-active');
+    else btn.classList.remove('plan-active');
+  }
   planUiPersistSettings();
   PlanUiUiService.updateSendBtn();
   PlanUiUiService.toast(s.usePlan ? '✓ 已启用计划模式' : '✓ 已关闭计划模式');

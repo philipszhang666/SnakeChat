@@ -30,11 +30,14 @@ test.describe('extra settings prompts and safety controls without real services'
     const { clientErrors } = await gotoApp(page);
     await configureMockProvider(page);
 
-    await page.locator('[data-action="togglePlan"]').click();
-    await expect(page.locator('#planBtn')).toHaveClass(/plan-active/);
+    await expect(page.locator('#planBtn')).toHaveCount(0);
+    await openSettingsSection(page, 'plan');
+    await setCheckbox(page, '#plan_enabled', true);
+    await page.locator('[data-action="savePlanSettings"]').click();
+    await expect.poll(() => page.evaluate(() => window.AgentApp.require('state').state.settings.usePlan)).toBe(true);
     await page.locator('[data-action="toggleOutline"]').click();
     await expect(page.locator('#outlineBtn')).toHaveClass(/outline-active/);
-    await expect(page.locator('#planBtn')).not.toHaveClass(/plan-active/);
+    await expect.poll(() => page.evaluate(() => window.AgentApp.require('state').state.settings.usePlan)).toBe(false);
 
     await openSettingsSection(page, 'plan');
     await page.locator('[data-action="applyPlanPreset"][data-value="code"]').click();

@@ -53,6 +53,16 @@ async function openExplorer(page) {
   await expect(page.locator('#fileExplorerList')).toContainText('sample.txt');
 }
 
+async function loadFileExplorerPathFromPage(page, path) {
+  await page.evaluate(async target => {
+    for (let i = 0; i < 50; i += 1) {
+      if (await window.loadFileExplorer(target)) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw new Error(`Timed out loading file explorer path: ${target}`);
+  }, path);
+}
+
 async function openFileFromExplorer(page, name) {
   await page.locator('#fileExplorerList .file-explorer-item').filter({ hasText: name }).click();
 }
@@ -124,15 +134,7 @@ async function openBlankGraphicalContextMenu(page) {
 async function openGraphicalQuickAccessContextMenu(page, label) {
   const item = page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: label });
   await expect(item).toBeVisible();
-  await item.evaluate(el => {
-    const rect = el.getBoundingClientRect();
-    el.dispatchEvent(new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + 8,
-      clientY: rect.top + rect.height / 2
-    }));
-  });
+  await item.click({ button: 'right' });
   await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
 }
 
@@ -519,6 +521,7 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await installBrowserStubs(page);
     const { backend, clientErrors } = await gotoApp(page);
     await page.evaluate(() => localStorage.removeItem('aichat_file_explorer_graph_view_v1'));
+    await page.evaluate(() => localStorage.removeItem('aichat_file_explorer_graph_sort_v1'));
 
     await openExplorer(page);
     await openBlankExplorerContextMenu(page);
@@ -562,12 +565,35 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerContextMenu')).toHaveAttribute('hidden', '');
     await page.locator('#fileExplorerGraphQuickAccessList [data-graph-path="D:/"]').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('D:/');
-    await page.evaluate(async () => {
-      await window.loadFileExplorer('.');
-    });
+    await loadFileExplorerPathFromPage(page, '.');
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
     await expect(graphicalExplorerItem(page, 'sample.txt')).toBeVisible();
+    await expect(page.locator('#fileExplorerGraphSortTrigger')).toHaveText(/名称\s*·\s*递增/);
+    await page.locator('#fileExplorerGraphSortTrigger').click();
+    await expect(page.locator('#fileExplorerGraphSortMenu')).toBeVisible();
+    await expect(page.locator('#fileExplorerGraphSortMenu [data-graph-sort-field="name"]')).toHaveClass(/is-active/);
+    await expect(page.locator('#fileExplorerGraphSortMenu [data-graph-sort-direction="asc"]')).toHaveClass(/is-active/);
+    await page.locator('#fileExplorerGraphSortMenu [data-graph-sort-field="modified"]').click();
+    await expect(page.locator('#fileExplorerGraphSortLabel')).toHaveText('修改时间 · 递增');
+    await page.locator('#fileExplorerGraphSortTrigger').click();
+    await page.locator('#fileExplorerGraphSortMenu [data-graph-sort-direction="desc"]').click();
+    await expect(page.locator('#fileExplorerGraphSortLabel')).toHaveText('修改时间 · 递减');
+    const modifiedDescOrder = await page.locator('#fileExplorerGraphList .file-explorer-item').evaluateAll(items =>
+      items.map(item => item.getAttribute('data-path'))
+    );
+    expect(modifiedDescOrder.slice(0, 4)).toEqual(['src', 'sample.mp3', 'sample.png', 'sample.pdf']);
+    await page.locator('#fileExplorerGraphSortTrigger').click();
+    await page.locator('#fileExplorerGraphSortMenu [data-graph-sort-field="type"]').click();
+    await page.locator('#fileExplorerGraphSortTrigger').click();
+    await page.locator('#fileExplorerGraphSortMenu [data-graph-sort-direction="asc"]').click();
+    await expect(page.locator('#fileExplorerGraphSortLabel')).toHaveText('类型 · 递增');
+    const typeAscOrder = await page.locator('#fileExplorerGraphList .file-explorer-item').evaluateAll(items =>
+      items.map(item => item.getAttribute('data-path'))
+    );
+    expect(typeAscOrder.slice(0, 4)).toEqual(['src', 'sample.md', 'sample.mp3', 'sample.pdf']);
+    await page.locator('#fileExplorerGraphSortTrigger').click();
+    await page.locator('#fileExplorerGraphSortMenu [data-graph-sort-field="name"]').click();
     await expect(page.locator('#fileExplorerGraphSearchInput')).toBeVisible();
     await page.locator('#fileExplorerGraphSearchInput').fill('nested');
     await expect.poll(() => backend.backendCalls.some(call =>
@@ -587,9 +613,7 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerGraphList .file-explorer-item[data-path="C:/"]')).toBeVisible();
     await page.locator('#fileExplorerGraphList .file-explorer-item[data-path="D:/"]').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('D:/');
-    await page.evaluate(async () => {
-      await window.loadFileExplorer('.');
-    });
+    await loadFileExplorerPathFromPage(page, '.');
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     const graphItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
     const graphIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
@@ -645,8 +669,8 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     expect(listItemBox).not.toBeNull();
     expect(listIconBox).not.toBeNull();
     await expect(graphicalExplorerItem(page, 'sample.txt')).toHaveCSS('flex-shrink', '0');
-    expect(listItemBox.height).toBeGreaterThanOrEqual(37);
-    expect(listItemBox.height).toBeLessThanOrEqual(39);
+    expect(listItemBox.height).toBeGreaterThanOrEqual(33);
+    expect(listItemBox.height).toBeLessThanOrEqual(35);
     expect(listIconBox.width).toBeGreaterThanOrEqual(23);
     expect(listIconBox.width).toBeLessThanOrEqual(25);
     expect(listItemBox.width / listItemBox.height).toBeGreaterThan(5);
@@ -657,8 +681,8 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     const detailsItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
     expect(detailsItemBox).not.toBeNull();
     await expect(graphicalExplorerItem(page, 'sample.txt')).toHaveCSS('flex-shrink', '0');
-    expect(detailsItemBox.height).toBeGreaterThanOrEqual(37);
-    expect(detailsItemBox.height).toBeLessThanOrEqual(39);
+    expect(detailsItemBox.height).toBeGreaterThanOrEqual(33);
+    expect(detailsItemBox.height).toBeLessThanOrEqual(35);
 
     await page.locator('#fileExplorerGraphViewTrigger').click();
     await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="xlarge"]').click();
@@ -801,15 +825,24 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await graphicalExplorerItem(page, 'sample.py').click();
     await expect(page.locator('#fileEditorModal')).toHaveClass(/show/);
     await page.waitForFunction(() => !!document.querySelector('#fileEditorModal .CodeMirror')?.CodeMirror);
+    await expect(page.locator('#fileEditorStatus')).toContainText('已读取');
 
     const longPythonLine = `def e2e_horizontal_scroll_regression():\n    value = "${'x'.repeat(1200)}"\n    return value\n`;
     await page.evaluate(content => {
-      document.querySelector('#fileEditorModal .CodeMirror').CodeMirror.setValue(content);
+      const cm = document.querySelector('#fileEditorModal .CodeMirror').CodeMirror;
+      cm.setValue(content);
+      cm.save();
     }, longPythonLine);
+    await page.waitForFunction(content =>
+      document.querySelector('#fileEditorModal .CodeMirror')?.CodeMirror?.getValue() === content
+    , longPythonLine);
 
     await page.locator('[data-action="openCurrentFileInMainPanel"][data-kind="text"]').click();
     await expect(page.locator('#fileEditorModal')).not.toHaveClass(/show/);
     await expect(page.locator('#inlineFilePanel')).not.toHaveAttribute('hidden', '');
+    await page.waitForFunction(content =>
+      document.querySelector('#inlineFileCodeShell .CodeMirror')?.CodeMirror?.getValue() === content
+    , longPythonLine);
     await page.locator('[data-file-explorer-graph-close]').click();
     await expect(page.locator('#fileExplorerGraphModal')).not.toHaveClass(/show/);
 

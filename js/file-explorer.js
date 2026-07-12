@@ -21,6 +21,8 @@ const FILE_EXPLORER_STATE = {
   dragItems: [],
   dragTargetPath: '',
   graphicalViewMode: 'large',
+  graphicalSortField: 'name',
+  graphicalSortDirection: 'asc',
   entries: [],
   editorPath: '',
   editorOriginal: '',
@@ -85,6 +87,18 @@ const FILE_EXPLORER_GRAPH_VIEW_MODES = [
   { id: 'details', label: '详细信息' }
 ];
 const FILE_EXPLORER_GRAPH_VIEW_MODE_IDS = new Set(FILE_EXPLORER_GRAPH_VIEW_MODES.map(mode => mode.id));
+const FILE_EXPLORER_GRAPH_SORT_STORAGE_KEY = 'aichat_file_explorer_graph_sort_v1';
+const FILE_EXPLORER_GRAPH_SORT_FIELDS = [
+  { id: 'name', label: '名称' },
+  { id: 'modified', label: '修改时间' },
+  { id: 'type', label: '类型' }
+];
+const FILE_EXPLORER_GRAPH_SORT_DIRECTIONS = [
+  { id: 'asc', label: '递增' },
+  { id: 'desc', label: '递减' }
+];
+const FILE_EXPLORER_GRAPH_SORT_FIELD_IDS = new Set(FILE_EXPLORER_GRAPH_SORT_FIELDS.map(item => item.id));
+const FILE_EXPLORER_GRAPH_SORT_DIRECTION_IDS = new Set(FILE_EXPLORER_GRAPH_SORT_DIRECTIONS.map(item => item.id));
 
 function fileExplorerBackendContext(options = {}) {
   return {
@@ -136,6 +150,63 @@ function setGraphicalFileExplorerViewMode(mode) {
   const next = normalizeGraphicalFileExplorerViewMode(mode);
   FILE_EXPLORER_STATE.graphicalViewMode = next;
   fileExplorerStorageSet(FILE_EXPLORER_GRAPH_VIEW_STORAGE_KEY, next);
+  renderGraphicalFileExplorer();
+}
+
+function normalizeGraphicalFileExplorerSortField(field) {
+  const normalized = String(field || '').trim();
+  return FILE_EXPLORER_GRAPH_SORT_FIELD_IDS.has(normalized) ? normalized : 'name';
+}
+
+function normalizeGraphicalFileExplorerSortDirection(direction) {
+  const normalized = String(direction || '').trim();
+  return FILE_EXPLORER_GRAPH_SORT_DIRECTION_IDS.has(normalized) ? normalized : 'asc';
+}
+
+function graphicalFileExplorerSortField() {
+  FILE_EXPLORER_STATE.graphicalSortField = normalizeGraphicalFileExplorerSortField(FILE_EXPLORER_STATE.graphicalSortField);
+  return FILE_EXPLORER_STATE.graphicalSortField;
+}
+
+function graphicalFileExplorerSortDirection() {
+  FILE_EXPLORER_STATE.graphicalSortDirection = normalizeGraphicalFileExplorerSortDirection(FILE_EXPLORER_STATE.graphicalSortDirection);
+  return FILE_EXPLORER_STATE.graphicalSortDirection;
+}
+
+function graphicalFileExplorerSortFieldInfo(field = FILE_EXPLORER_STATE.graphicalSortField) {
+  const normalized = normalizeGraphicalFileExplorerSortField(field);
+  return FILE_EXPLORER_GRAPH_SORT_FIELDS.find(item => item.id === normalized) || FILE_EXPLORER_GRAPH_SORT_FIELDS[0];
+}
+
+function graphicalFileExplorerSortDirectionInfo(direction = FILE_EXPLORER_STATE.graphicalSortDirection) {
+  const normalized = normalizeGraphicalFileExplorerSortDirection(direction);
+  return FILE_EXPLORER_GRAPH_SORT_DIRECTIONS.find(item => item.id === normalized) || FILE_EXPLORER_GRAPH_SORT_DIRECTIONS[0];
+}
+
+function loadGraphicalFileExplorerSort() {
+  try {
+    const parsed = JSON.parse(fileExplorerStorageGet(FILE_EXPLORER_GRAPH_SORT_STORAGE_KEY) || '{}');
+    FILE_EXPLORER_STATE.graphicalSortField = normalizeGraphicalFileExplorerSortField(parsed.field);
+    FILE_EXPLORER_STATE.graphicalSortDirection = normalizeGraphicalFileExplorerSortDirection(parsed.direction);
+  } catch (_) {
+    FILE_EXPLORER_STATE.graphicalSortField = 'name';
+    FILE_EXPLORER_STATE.graphicalSortDirection = 'asc';
+  }
+  return {
+    field: FILE_EXPLORER_STATE.graphicalSortField,
+    direction: FILE_EXPLORER_STATE.graphicalSortDirection
+  };
+}
+
+function setGraphicalFileExplorerSort(field = FILE_EXPLORER_STATE.graphicalSortField, direction = FILE_EXPLORER_STATE.graphicalSortDirection) {
+  const nextField = normalizeGraphicalFileExplorerSortField(field);
+  const nextDirection = normalizeGraphicalFileExplorerSortDirection(direction);
+  FILE_EXPLORER_STATE.graphicalSortField = nextField;
+  FILE_EXPLORER_STATE.graphicalSortDirection = nextDirection;
+  fileExplorerStorageSet(FILE_EXPLORER_GRAPH_SORT_STORAGE_KEY, JSON.stringify({
+    field: nextField,
+    direction: nextDirection
+  }));
   renderGraphicalFileExplorer();
 }
 
@@ -1285,15 +1356,56 @@ function bindPythonFileEditor() {
   }
 }
 
-function fileExplorerSort(entries) {
+function fileExplorerCompareText(a, b) {
+  return String(a || '').localeCompare(String(b || ''), undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  });
+}
+
+function fileExplorerEntryModifiedValue(entry) {
+  const raw = entry && (entry.mtime ?? entry.modified ?? entry.modified_at ?? entry.updated_at ?? 0);
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(String(raw || ''));
+  return Number.isFinite(parsed) ? parsed / 1000 : 0;
+}
+
+function fileExplorerEntryTypeValue(entry) {
+  if (!entry || entry.type === 'dir') return '';
+  return (fileExplorerExtension(entry.name || entry.path || '') || entry.type || 'file').toLowerCase();
+}
+
+function fileExplorerCompareEntriesByField(a, b, field) {
+  if (field === 'modified') {
+    const diff = fileExplorerEntryModifiedValue(a) - fileExplorerEntryModifiedValue(b);
+    return diff < 0 ? -1 : (diff > 0 ? 1 : 0);
+  }
+  if (field === 'type') {
+    const typeCompare = fileExplorerCompareText(fileExplorerEntryTypeValue(a), fileExplorerEntryTypeValue(b));
+    if (typeCompare) return typeCompare;
+  }
+  return fileExplorerCompareText(a && a.name, b && b.name);
+}
+
+function fileExplorerSort(entries, options = {}) {
+  const field = normalizeGraphicalFileExplorerSortField(options.field || 'name');
+  const direction = normalizeGraphicalFileExplorerSortDirection(options.direction || 'asc');
+  const directionMultiplier = direction === 'desc' ? -1 : 1;
   return (entries || []).slice().sort((a, b) => {
     const ad = a.type === 'dir' ? 0 : 1;
     const bd = b.type === 'dir' ? 0 : 1;
     if (ad !== bd) return ad - bd;
-    return String(a.name || '').localeCompare(String(b.name || ''), undefined, {
-      numeric: true,
-      sensitivity: 'base'
-    });
+    const primary = fileExplorerCompareEntriesByField(a, b, field);
+    if (primary) return primary * directionMultiplier;
+    return fileExplorerCompareText(a && a.name, b && b.name);
+  });
+}
+
+function graphicalFileExplorerSortEntries(entries) {
+  return fileExplorerSort(entries, {
+    field: graphicalFileExplorerSortField(),
+    direction: graphicalFileExplorerSortDirection()
   });
 }
 
@@ -1870,6 +1982,30 @@ function graphicalFileExplorerViewMenuHtml() {
   }).join('');
 }
 
+function graphicalFileExplorerSortMenuHtml() {
+  const activeField = graphicalFileExplorerSortField();
+  const activeDirection = graphicalFileExplorerSortDirection();
+  const fieldOptions = FILE_EXPLORER_GRAPH_SORT_FIELDS.map(field => {
+    const active = field.id === activeField;
+    return `
+      <button class="file-explorer-graph-view-option ${active ? 'is-active' : ''}" type="button" role="menuitemradio" aria-checked="${active ? 'true' : 'false'}" data-graph-sort-field="${escapeHtml(field.id)}">
+        <span class="file-explorer-graph-view-option-check" data-graph-sort-field-check>${active ? '•' : ''}</span>
+        <span class="file-explorer-graph-view-option-label">${escapeHtml(field.label)}</span>
+      </button>
+    `;
+  }).join('');
+  const directionOptions = FILE_EXPLORER_GRAPH_SORT_DIRECTIONS.map(direction => {
+    const active = direction.id === activeDirection;
+    return `
+      <button class="file-explorer-graph-view-option ${active ? 'is-active' : ''}" type="button" role="menuitemradio" aria-checked="${active ? 'true' : 'false'}" data-graph-sort-direction="${escapeHtml(direction.id)}">
+        <span class="file-explorer-graph-view-option-check" data-graph-sort-direction-check>${active ? '•' : ''}</span>
+        <span class="file-explorer-graph-view-option-label">${escapeHtml(direction.label)}</span>
+      </button>
+    `;
+  }).join('');
+  return `${fieldOptions}<div class="file-explorer-graph-view-divider" role="separator"></div>${directionOptions}`;
+}
+
 function hideGraphicalFileExplorerViewMenu() {
   const modal = document.getElementById('fileExplorerGraphModal');
   if (!modal) return;
@@ -1882,8 +2018,30 @@ function hideGraphicalFileExplorerViewMenu() {
 function toggleGraphicalFileExplorerViewMenu() {
   const modal = document.getElementById('fileExplorerGraphModal');
   if (!modal) return;
+  hideGraphicalFileExplorerSortMenu();
   const trigger = modal.querySelector('#fileExplorerGraphViewTrigger');
   const menu = modal.querySelector('#fileExplorerGraphViewMenu');
+  if (!menu) return;
+  const open = menu.hidden;
+  menu.hidden = !open;
+  if (trigger) trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function hideGraphicalFileExplorerSortMenu() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  const trigger = modal.querySelector('#fileExplorerGraphSortTrigger');
+  const menu = modal.querySelector('#fileExplorerGraphSortMenu');
+  if (trigger) trigger.setAttribute('aria-expanded', 'false');
+  if (menu) menu.hidden = true;
+}
+
+function toggleGraphicalFileExplorerSortMenu() {
+  const modal = document.getElementById('fileExplorerGraphModal');
+  if (!modal) return;
+  hideGraphicalFileExplorerViewMenu();
+  const trigger = modal.querySelector('#fileExplorerGraphSortTrigger');
+  const menu = modal.querySelector('#fileExplorerGraphSortMenu');
   if (!menu) return;
   const open = menu.hidden;
   menu.hidden = !open;
@@ -1901,6 +2059,30 @@ function updateGraphicalFileExplorerViewControls(modal = document.getElementById
     btn.classList.toggle('is-active', active);
     btn.setAttribute('aria-checked', active ? 'true' : 'false');
     const check = btn.querySelector('[data-graph-view-check]');
+    if (check) check.textContent = active ? '•' : '';
+  });
+}
+
+function updateGraphicalFileExplorerSortControls(modal = document.getElementById('fileExplorerGraphModal')) {
+  if (!modal) return;
+  const activeField = graphicalFileExplorerSortField();
+  const activeDirection = graphicalFileExplorerSortDirection();
+  const fieldInfo = graphicalFileExplorerSortFieldInfo(activeField);
+  const directionInfo = graphicalFileExplorerSortDirectionInfo(activeDirection);
+  const label = modal.querySelector('#fileExplorerGraphSortLabel');
+  if (label) label.textContent = `${fieldInfo.label} · ${directionInfo.label}`;
+  modal.querySelectorAll('[data-graph-sort-field]').forEach(btn => {
+    const active = btn.dataset.graphSortField === activeField;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-checked', active ? 'true' : 'false');
+    const check = btn.querySelector('[data-graph-sort-field-check]');
+    if (check) check.textContent = active ? '•' : '';
+  });
+  modal.querySelectorAll('[data-graph-sort-direction]').forEach(btn => {
+    const active = btn.dataset.graphSortDirection === activeDirection;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-checked', active ? 'true' : 'false');
+    const check = btn.querySelector('[data-graph-sort-direction-check]');
     if (check) check.textContent = active ? '•' : '';
   });
 }
@@ -1981,10 +2163,11 @@ function updateGraphicalFileExplorerToolbar() {
     btn.disabled = !FILE_EXPLORER_STATE.clipboard;
   });
   updateGraphicalFileExplorerViewControls(modal);
+  updateGraphicalFileExplorerSortControls(modal);
   updateGraphicalFileExplorerSearchControls(modal);
 }
 
-function renderGraphicalFileExplorer(entries = fileExplorerSort(FILE_EXPLORER_STATE.entries)) {
+function renderGraphicalFileExplorer(entries = graphicalFileExplorerSortEntries(FILE_EXPLORER_STATE.entries)) {
   const modal = document.getElementById('fileExplorerGraphModal');
   if (!modal) return;
   const list = modal.querySelector('#fileExplorerGraphList');
@@ -2002,7 +2185,7 @@ function renderGraphicalFileExplorer(entries = fileExplorerSort(FILE_EXPLORER_ST
     } else {
       renderFileExplorerListTarget(
         list,
-        fileExplorerSort(FILE_EXPLORER_STATE.graphSearchResults),
+        graphicalFileExplorerSortEntries(FILE_EXPLORER_STATE.graphSearchResults),
         { graphical: true, search: true, emptyMessage: `未找到“${FILE_EXPLORER_STATE.graphSearchQuery}”` }
       );
     }
@@ -2021,7 +2204,7 @@ function renderFileExplorer() {
 
   const entries = fileExplorerSort(FILE_EXPLORER_STATE.entries);
   renderFileExplorerListTarget(list, entries);
-  renderGraphicalFileExplorer(entries);
+  renderGraphicalFileExplorer();
 }
 
 function ensureGraphicalFileExplorerModal() {
@@ -2060,6 +2243,15 @@ function ensureGraphicalFileExplorerModal() {
             ${graphicalFileExplorerViewMenuHtml()}
           </div>
         </div>
+        <div class="file-explorer-graph-view-wrap file-explorer-graph-sort-wrap">
+          <button id="fileExplorerGraphSortTrigger" class="file-explorer-graph-view-trigger file-explorer-graph-sort-trigger" type="button" data-graph-sort-trigger aria-haspopup="true" aria-expanded="false">
+            <span id="fileExplorerGraphSortLabel">${escapeHtml(`${graphicalFileExplorerSortFieldInfo().label} · ${graphicalFileExplorerSortDirectionInfo().label}`)}</span>
+            <span class="file-explorer-graph-view-caret" aria-hidden="true"></span>
+          </button>
+          <div id="fileExplorerGraphSortMenu" class="file-explorer-graph-view-menu file-explorer-graph-sort-menu" role="menu" hidden>
+            ${graphicalFileExplorerSortMenuHtml()}
+          </div>
+        </div>
         <span class="file-explorer-graph-separator"></span>
         <button type="button" data-graph-command="copy" data-graph-needs-selection>复制</button>
         <button type="button" data-graph-command="cut" data-graph-needs-selection>剪切</button>
@@ -2095,11 +2287,28 @@ function ensureGraphicalFileExplorerModal() {
       hideGraphicalFileExplorerViewMenu();
       return;
     }
+    const sortField = event.target.closest('[data-graph-sort-field]');
+    if (sortField) {
+      setGraphicalFileExplorerSort(sortField.dataset.graphSortField, FILE_EXPLORER_STATE.graphicalSortDirection);
+      hideGraphicalFileExplorerSortMenu();
+      return;
+    }
+    const sortDirection = event.target.closest('[data-graph-sort-direction]');
+    if (sortDirection) {
+      setGraphicalFileExplorerSort(FILE_EXPLORER_STATE.graphicalSortField, sortDirection.dataset.graphSortDirection);
+      hideGraphicalFileExplorerSortMenu();
+      return;
+    }
     if (event.target.closest('[data-graph-view-trigger]')) {
       toggleGraphicalFileExplorerViewMenu();
       return;
     }
+    if (event.target.closest('[data-graph-sort-trigger]')) {
+      toggleGraphicalFileExplorerSortMenu();
+      return;
+    }
     if (!event.target.closest('#fileExplorerGraphViewMenu')) hideGraphicalFileExplorerViewMenu();
+    if (!event.target.closest('#fileExplorerGraphSortMenu')) hideGraphicalFileExplorerSortMenu();
     const command = event.target.closest('[data-graph-command]');
     if (command && !command.disabled) handleGraphicalFileExplorerCommand(command.dataset.graphCommand);
   });
@@ -2182,7 +2391,11 @@ function handleGraphicalFileExplorerCommand(action) {
 }
 
 async function openGraphicalFileExplorer(path = FILE_EXPLORER_STATE.contextPath || FILE_EXPLORER_STATE.path) {
+  if (path && typeof path === 'object' && typeof path.preventDefault === 'function') {
+    path = FILE_EXPLORER_STATE.contextPath || FILE_EXPLORER_STATE.path;
+  }
   loadGraphicalFileExplorerViewMode();
+  loadGraphicalFileExplorerSort();
   const modal = ensureGraphicalFileExplorerModal();
   const localDrivePromise = ensureFileExplorerLocalDrives();
   FILE_EXPLORER_STATE.graphicalVisible = true;
@@ -2201,6 +2414,7 @@ function closeGraphicalFileExplorer() {
   FILE_EXPLORER_STATE.graphForwardStack = [];
   hideFileExplorerContextMenu();
   clearGraphicalFileExplorerSearch({ render: false });
+  hideGraphicalFileExplorerSortMenu();
   scheduleInlineFileLayoutRefresh();
   if (!FILE_EXPLORER_STATE.visible) stopFileExplorerAutoRefresh();
 }

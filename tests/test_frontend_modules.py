@@ -2071,7 +2071,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('.file-explorer-graph-list.is-details', base_css)
         self.assertIn('.file-explorer-graph-view-menu', base_css)
         self.assertIn('grid-template-columns:20px minmax(0,1fr)', base_css)
-        self.assertIn('height:30px;min-height:38px;flex-shrink:0;aspect-ratio:auto', base_css)
+        self.assertIn('height:34px;min-height:34px;flex-shrink:0;aspect-ratio:auto', base_css)
         self.assertIn('grid-template-columns:24px minmax(0,1fr)', base_css)
         self.assertIn('.file-explorer-graph-list.is-list .file-explorer-icon,.file-explorer-graph-list.is-details .file-explorer-icon{width:24px;height:auto', base_css)
         self.assertIn('.file-explorer-graph-list.is-list .file-explorer-name,.file-explorer-graph-list.is-details .file-explorer-name{height:auto', base_css)
@@ -2243,9 +2243,9 @@ class FrontendModuleTests(unittest.TestCase):
             'data-action="newChat"',
             'data-action="onSend"',
             'data-action="toggleSidebar"',
-            'data-action="togglePlan"',
             'data-action="toggleOutline"',
             'data-action="toggleTools"',
+            'data-action="openGraphicalFileExplorer"',
             'data-action="toggleTracePanel"',
             'data-action="openFilePicker"',
             'data-change-action="onPickFiles"',

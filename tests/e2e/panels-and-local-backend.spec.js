@@ -65,7 +65,7 @@ test.describe('feature panels and mocked local backend', () => {
     await page.fill('#plan_maxStepsInput', '3');
     await page.locator('button[data-action="savePlanSettings"]').click();
     await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
-    await expect(page.locator('#planBtn')).toHaveClass(/plan-active/);
+    await expect.poll(() => page.evaluate(() => window.AgentApp.require('state').state.settings.usePlan)).toBe(true);
 
     await page.locator('button[data-action="openSettings"]').first().click();
     await page.locator('.settings-nav-item[data-settings-section="outline"]').click();
@@ -77,7 +77,7 @@ test.describe('feature panels and mocked local backend', () => {
     await page.locator('button[data-action="saveOutlineSettings"]').click();
     await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
     await expect(page.locator('#outlineBtn')).toHaveClass(/outline-active/);
-    await expect(page.locator('#planBtn')).not.toHaveClass(/plan-active/);
+    await expect.poll(() => page.evaluate(() => window.AgentApp.require('state').state.settings.usePlan)).toBe(false);
 
     clientErrors.expectNoErrors();
   });
