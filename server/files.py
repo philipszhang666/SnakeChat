@@ -1432,6 +1432,82 @@ class FilesMixin:
         except Exception as e:
             self.response.json(200, {'ok': False, 'error': str(e)})
 
+    def handle_find_path(self, body):
+        path, err = check_path_or_error(body.get('path', '') or '.')
+        if err: return self.response.json(200, {'ok': False, 'error': err})
+        query = str(body.get('query') or body.get('name') or '').strip()
+        max_results = min(max(int(body.get('max_results', 100) or 100), 1), 200)
+        include_files = body.get('include_files', True) is not False
+        include_dirs = body.get('include_dirs', True) is not False
+        if not query or query in ('.', '..') or '/' in query or '\\' in query:
+            return self.response.json(200, {'ok': False, 'error': 'query 必须是单个文件或文件夹名称片段'})
+        if not os.path.isdir(path):
+            return self.response.json(200, {'ok': False, 'error': f'不是目录: {path}'})
+
+        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache'}
+        target = query.lower()
+        base = os.path.realpath(path)
+        cwd = os.path.realpath(config.get_current_cwd())
+        results = []
+        truncated = False
+
+        def result_path(full):
+            try:
+                return os.path.relpath(full, cwd).replace('\\', '/')
+            except Exception:
+                return full.replace('\\', '/')
+
+        try:
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                if include_dirs:
+                    for dirname in sorted(dirs, key=str.lower):
+                        if target not in dirname.lower():
+                            continue
+                        full = os.path.realpath(os.path.join(root, dirname))
+                        try:
+                            mtime = os.path.getmtime(full)
+                        except Exception:
+                            mtime = 0
+                        results.append({
+                            'name': dirname,
+                            'path': result_path(full),
+                            'type': 'dir',
+                            'size': 0,
+                            'mtime': mtime
+                        })
+                        if len(results) >= max_results:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+                if include_files:
+                    for fname in sorted(files, key=str.lower):
+                        if target not in fname.lower():
+                            continue
+                        full = os.path.realpath(os.path.join(root, fname))
+                        try:
+                            size = os.path.getsize(full)
+                            mtime = os.path.getmtime(full)
+                        except Exception:
+                            size = 0
+                            mtime = 0
+                        results.append({
+                            'name': fname,
+                            'path': result_path(full),
+                            'type': 'file',
+                            'size': size,
+                            'mtime': mtime
+                        })
+                        if len(results) >= max_results:
+                            truncated = True
+                            break
+                if truncated:
+                    break
+            self.response.json(200, {'ok': True, 'query': query, 'matches': results, 'truncated': truncated})
+        except Exception as e:
+            self.response.json(200, {'ok': False, 'error': str(e)})
+
     def handle_search(self, body):
         path, err = check_path_or_error(body.get('path', '') or '.')
         if err: return self.response.json(200, {'ok': False, 'error': err})

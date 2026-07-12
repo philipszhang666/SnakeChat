@@ -62,6 +62,7 @@ async function openFileContextMenu(page, name) {
     .locator('#fileExplorerList .file-explorer-item')
     .filter({ hasText: name })
     .locator('.file-explorer-name');
+  await expect(nameLocator).toBeVisible();
   await nameLocator.evaluate(el => {
     const rect = el.getBoundingClientRect();
     el.dispatchEvent(new MouseEvent('contextmenu', {
@@ -115,6 +116,21 @@ async function openBlankGraphicalContextMenu(page) {
       cancelable: true,
       clientX: 420,
       clientY: 260
+    }));
+  });
+  await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
+}
+
+async function openGraphicalQuickAccessContextMenu(page, label) {
+  const item = page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: label });
+  await expect(item).toBeVisible();
+  await item.evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + 8,
+      clientY: rect.top + rect.height / 2
     }));
   });
   await expect(page.locator('#fileExplorerContextMenu')).not.toHaveAttribute('hidden', '');
@@ -192,8 +208,27 @@ async function graphicalExplorerTopRowCount(page) {
   });
 }
 
-function expectGraphicalCardRatio(box) {
-  expect(Math.abs((box.width / box.height) - (16 / 9))).toBeLessThan(0.04);
+async function expectGraphicalIconLabelGap(itemLocator, minGap = 7) {
+  const metrics = await itemLocator.evaluate(item => {
+    const icon = item.querySelector('.file-explorer-icon')?.getBoundingClientRect();
+    const name = item.querySelector('.file-explorer-name')?.getBoundingClientRect();
+    if (!icon || !name) return null;
+    return {
+      iconTop: icon.top,
+      iconBottom: icon.bottom,
+      nameTop: name.top,
+      nameHeight: name.height,
+      itemHeight: item.getBoundingClientRect().height,
+      nameWhiteSpace: getComputedStyle(item.querySelector('.file-explorer-name')).whiteSpace,
+      nameOverflowWrap: getComputedStyle(item.querySelector('.file-explorer-name')).overflowWrap
+    };
+  });
+  expect(metrics).not.toBeNull();
+  expect(metrics.nameTop - metrics.iconBottom).toBeGreaterThanOrEqual(minGap);
+  expect(metrics.nameHeight).toBeGreaterThan(0);
+  expect(metrics.itemHeight).toBeGreaterThan(metrics.nameHeight);
+  expect(metrics.nameWhiteSpace).toBe('normal');
+  expect(metrics.nameOverflowWrap).toBe('anywhere');
 }
 
 async function expectElementCanScroll(locator) {
@@ -212,6 +247,18 @@ async function expectElementCanScroll(locator) {
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 1);
   expect(metrics.scrollTop).toBeGreaterThan(0);
   expect(['auto', 'scroll']).toContain(metrics.overflowY);
+}
+
+async function expectElementCanScrollHorizontally(locator) {
+  await expect(locator).toBeVisible();
+  await expect.poll(async () => locator.evaluate(el => {
+    el.scrollLeft = 0;
+    el.scrollLeft = el.scrollWidth;
+    const style = getComputedStyle(el);
+    return el.scrollWidth > el.clientWidth + 1 &&
+      el.scrollLeft > 0 &&
+      ['auto', 'scroll'].includes(style.overflowX);
+  }), { timeout: 4000 }).toBe(true);
 }
 
 async function installBrowserStubs(page) {
@@ -491,12 +538,36 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText(/沙箱目录|当前目录/);
     await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
     await expect(graphicalExplorerItem(page, 'sample.txt')).toBeVisible();
+    await expect(page.locator('#fileExplorerGraphSearchInput')).toBeVisible();
+    await page.locator('#fileExplorerGraphSearchInput').fill('nested');
+    await expect.poll(() => backend.backendCalls.some(call =>
+      call.action === 'find_path' && call.body.query === 'nested'
+    )).toBe(true);
+    await expect(page.locator('#fileExplorerGraphList .file-explorer-item[data-path="src/nested-sample.py"]')).toBeVisible();
+    await expect(page.locator('#fileExplorerGraphStatus')).toContainText('1 个搜索结果');
+    await page.locator('#fileExplorerGraphSearchClear').click();
+    await expect(page.locator('#fileExplorerGraphList')).toContainText('sample.txt');
+    await page.locator('#fileExplorerGraphSearchInput').fill('src');
+    await expect(page.locator('#fileExplorerGraphList .file-explorer-item[data-path="src"][data-type="dir"]')).toBeVisible();
+    await page.locator('#fileExplorerGraphSearchClear').click();
     const graphItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
     const graphIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
     expect(graphItemBox).not.toBeNull();
     expect(graphIconBox).not.toBeNull();
-    expectGraphicalCardRatio(graphItemBox);
+    await expectGraphicalIconLabelGap(graphicalExplorerItem(page, 'sample.txt'), 9);
     expect(graphIconBox.width / graphItemBox.width).toBeGreaterThan(0.7);
+    const longNameItem = page.locator('#fileExplorerGraphList .file-explorer-item[data-path="sample.png"]');
+    await longNameItem.locator('.file-explorer-name').evaluate(el => {
+      el.textContent = 'AI-Chat-大模型对话助手.html';
+    });
+    const iconAlignment = await page.evaluate(() => {
+      const shortIcon = document.querySelector('#fileExplorerGraphList .file-explorer-item[data-path="sample.txt"] .file-explorer-icon')?.getBoundingClientRect();
+      const longIcon = document.querySelector('#fileExplorerGraphList .file-explorer-item[data-path="sample.png"] .file-explorer-icon')?.getBoundingClientRect();
+      return shortIcon && longIcon ? Math.abs(shortIcon.top - longIcon.top) : null;
+    });
+    expect(iconAlignment).not.toBeNull();
+    expect(iconAlignment).toBeLessThan(1);
+    await expectGraphicalIconLabelGap(longNameItem, 9);
     const largeTopRowCount = await graphicalExplorerTopRowCount(page);
     expect(largeTopRowCount).toBeGreaterThanOrEqual(4);
 
@@ -506,12 +577,21 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerGraphViewMenu .file-explorer-graph-view-option-icon')).toHaveCount(0);
     await expect(page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="large"]')).toHaveClass(/is-active/);
 
+    await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="medium"]').click();
+    await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-medium/);
+    await expect(page.locator('#fileExplorerGraphViewLabel')).toHaveText('中图标');
+    const mediumItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
+    expect(mediumItemBox).not.toBeNull();
+    expect(mediumItemBox.height).toBeGreaterThan(110);
+    await expectGraphicalIconLabelGap(graphicalExplorerItem(page, 'sample.txt'), 8);
+
+    await page.locator('#fileExplorerGraphViewTrigger').click();
     await page.locator('#fileExplorerGraphViewMenu [data-graph-view-mode="small"]').click();
     await expect(page.locator('#fileExplorerGraphList')).toHaveClass(/is-small/);
     await expect(page.locator('#fileExplorerGraphViewLabel')).toHaveText('小图标');
     const smallItemBox = await graphicalExplorerItem(page, 'sample.txt').boundingBox();
     expect(smallItemBox).not.toBeNull();
-    expectGraphicalCardRatio(smallItemBox);
+    await expectGraphicalIconLabelGap(graphicalExplorerItem(page, 'sample.txt'), 6);
     expect(smallItemBox.width).toBeLessThan(graphItemBox.width);
     expect(await graphicalExplorerTopRowCount(page)).toBeGreaterThan(largeTopRowCount);
 
@@ -547,7 +627,7 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     const xlargeIconBox = await graphicalExplorerItem(page, 'sample.txt').locator('.file-explorer-icon').boundingBox();
     expect(xlargeItemBox).not.toBeNull();
     expect(xlargeIconBox).not.toBeNull();
-    expectGraphicalCardRatio(xlargeItemBox);
+    await expectGraphicalIconLabelGap(graphicalExplorerItem(page, 'sample.txt'), 11);
     expect(xlargeItemBox.width).toBeGreaterThan(graphItemBox.width);
     expect(await graphicalExplorerTopRowCount(page)).toBeLessThan(largeTopRowCount);
     expect(xlargeIconBox.width / xlargeItemBox.width).toBeGreaterThan(0.7);
@@ -593,11 +673,44 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     await graphicalExplorerItem(page, 'src').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await expect(page.locator('#fileExplorerGraphUpBtn')).toHaveText('←');
+    await expect(page.locator('#fileExplorerGraphForwardBtn')).toHaveText('→');
+    await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
+    await page.locator('#fileExplorerGraphForwardBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
+    await page.locator('#fileExplorerGraphForwardBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await page.locator('#fileExplorerGraphUpBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
+    await page.locator('#fileExplorerGraphForwardBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await openBlankGraphicalContextMenu(page);
+    await expect(page.locator('#fileExplorerContextMenu [data-action="add-quick-access"]:visible')).toBeVisible();
+    await clickContextMenuAction(page, 'add-quick-access');
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'src' })).toBeVisible();
+    await page.locator('#fileExplorerGraphUpBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'src' }).click();
+    await expect(page.locator('#fileExplorerPath')).toContainText('src');
+    await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
+    await page.locator('#fileExplorerGraphForwardBtn').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
+    await graphicalExplorerItem(page, 'src').click();
+    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
+    await openGraphicalQuickAccessContextMenu(page, 'src');
+    await clickContextMenuAction(page, 'rename-quick-access');
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'e2e-value' })).toBeVisible();
+    await openGraphicalQuickAccessContextMenu(page, 'e2e-value');
+    await clickContextMenuAction(page, 'delete-quick-access');
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'e2e-value' })).toHaveCount(0);
     await page.locator('#fileExplorerGraphUpBtn').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
 
     await openBlankGraphicalContextMenu(page);
     await expect(page.locator('#fileExplorerContextMenu [data-action="open-graphical"]:visible')).toHaveText('图形化界面');
+    await expect(page.locator('#fileExplorerContextMenu [data-action="add-quick-access"]:visible')).toHaveCount(0);
     await page.locator('[data-file-explorer-graph-close]').click();
     await expect(page.locator('#fileExplorerGraphModal')).not.toHaveClass(/show/);
 
@@ -630,6 +743,36 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await page.locator('#inlinePythonToggle').click();
     await expectElementCanScroll(page.locator('#inlineFileBody .inline-code-preview'));
     await page.locator('[data-action="closeInlineFilePanel"]').click();
+
+    clientErrors.expectNoErrors();
+  });
+
+  test('inline editor keeps horizontal scrolling after graphical explorer closes', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBrowserStubs(page);
+    const { clientErrors } = await gotoApp(page);
+
+    await openExplorer(page);
+    await openBlankExplorerContextMenu(page);
+    await clickContextMenuAction(page, 'open-graphical');
+    await expect(page.locator('#fileExplorerGraphModal')).toHaveClass(/show/);
+
+    await graphicalExplorerItem(page, 'sample.py').click();
+    await expect(page.locator('#fileEditorModal')).toHaveClass(/show/);
+    await page.waitForFunction(() => !!document.querySelector('#fileEditorModal .CodeMirror')?.CodeMirror);
+
+    const longPythonLine = `def e2e_horizontal_scroll_regression():\n    value = "${'x'.repeat(1200)}"\n    return value\n`;
+    await page.evaluate(content => {
+      document.querySelector('#fileEditorModal .CodeMirror').CodeMirror.setValue(content);
+    }, longPythonLine);
+
+    await page.locator('[data-action="openCurrentFileInMainPanel"][data-kind="text"]').click();
+    await expect(page.locator('#fileEditorModal')).not.toHaveClass(/show/);
+    await expect(page.locator('#inlineFilePanel')).not.toHaveAttribute('hidden', '');
+    await page.locator('[data-file-explorer-graph-close]').click();
+    await expect(page.locator('#fileExplorerGraphModal')).not.toHaveClass(/show/);
+
+    await expectElementCanScrollHorizontally(page.locator('#inlineFileCodeShell .CodeMirror-scroll'));
 
     clientErrors.expectNoErrors();
   });

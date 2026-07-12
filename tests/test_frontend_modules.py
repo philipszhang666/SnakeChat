@@ -1960,6 +1960,8 @@ class FrontendModuleTests(unittest.TestCase):
             'data-action="copy-path"',
             'data-action="copy-absolute-path"',
             'data-action="open-graphical"',
+            'data-action="rename-quick-access"',
+            'data-action="delete-quick-access"',
             "action === 'download' || action === 'upload-files' || action === 'upload-folder'",
             '复制相对路径',
             '复制绝对路径',
@@ -1972,6 +1974,10 @@ class FrontendModuleTests(unittest.TestCase):
             'function closeGraphicalFileExplorer',
             'function renderGraphicalFileExplorer',
             'function renderGraphicalFileExplorerQuickAccess',
+            'function fileExplorerQuickAccessDisplayLabel',
+            'function currentFileExplorerIsSandboxRoot',
+            'function renameFileExplorerQuickAccessPath',
+            'function removeFileExplorerQuickAccessPath',
             'function fileExplorerGraphAddressCrumbs',
             'function renderGraphicalFileExplorerAddress',
             'function setGraphicalFileExplorerViewMode',
@@ -2012,6 +2018,7 @@ class FrontendModuleTests(unittest.TestCase):
             'id="fileExplorerGraphAddress"',
             'data-graph-address-path',
             'id="fileExplorerGraphQuickAccessList"',
+            'data-quick-access-user="true"',
             'id="fileExplorerGraphViewTrigger"',
             'data-graph-view-mode',
             "'copy_file'",
@@ -2046,18 +2053,28 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('.file-explorer-graph-address-segment:hover,.file-explorer-graph-address-segment:focus-visible{background:var(--bg-hover)', base_css)
         self.assertIn('.file-explorer-graph-list .file-explorer-item.is-dir.is-drop-target', base_css)
         self.assertIn('--graph-card-width:188px', base_css)
-        self.assertIn('--graph-card-height:106px', base_css)
-        self.assertIn('.file-explorer-graph-list.is-xlarge{--graph-card-width:252px;--graph-card-height:142px', base_css)
-        self.assertIn('.file-explorer-graph-list.is-small{--graph-card-width:132px;--graph-card-height:74px', base_css)
+        self.assertIn('--graph-card-height:144px', base_css)
+        self.assertIn('--graph-icon-box:78px', base_css)
+        self.assertIn('--graph-name-box:32px', base_css)
+        self.assertIn('--graph-label-gap:10px', base_css)
+        self.assertIn('.file-explorer-graph-list.is-xlarge{--graph-card-width:252px;--graph-card-height:178px', base_css)
+        self.assertIn('.file-explorer-graph-list.is-medium{--graph-card-width:156px;--graph-card-height:122px', base_css)
+        self.assertIn('.file-explorer-graph-list.is-small{--graph-card-width:132px;--graph-card-height:94px', base_css)
         self.assertIn('grid-template-columns:repeat(auto-fill,var(--graph-card-width))', base_css)
         self.assertIn('grid-auto-rows:var(--graph-card-height)', base_css)
         self.assertIn('height:var(--graph-card-height);min-height:var(--graph-card-height)', base_css)
+        self.assertIn('grid-template-rows:var(--graph-icon-box) var(--graph-name-box)', base_css)
+        self.assertIn('row-gap:var(--graph-label-gap)', base_css)
+        self.assertIn('height:var(--graph-name-box)', base_css)
+        self.assertIn('overflow-wrap:anywhere;word-break:break-word', base_css)
         self.assertIn('.file-explorer-graph-list.is-list', base_css)
         self.assertIn('.file-explorer-graph-list.is-details', base_css)
         self.assertIn('.file-explorer-graph-view-menu', base_css)
         self.assertIn('grid-template-columns:20px minmax(0,1fr)', base_css)
         self.assertIn('height:30px;min-height:38px;flex-shrink:0;aspect-ratio:auto', base_css)
         self.assertIn('grid-template-columns:24px minmax(0,1fr)', base_css)
+        self.assertIn('.file-explorer-graph-list.is-list .file-explorer-icon,.file-explorer-graph-list.is-details .file-explorer-icon{width:24px;height:auto', base_css)
+        self.assertIn('.file-explorer-graph-list.is-list .file-explorer-name,.file-explorer-graph-list.is-details .file-explorer-name{height:auto', base_css)
         self.assertIn('.file-explorer-graph-sidebar', base_css)
         self.assertNotIn('file-explorer-graph-view-option-icon', file_explorer_js)
         self.assertNotIn('file-explorer-graph-view-trigger-icon', file_explorer_js)

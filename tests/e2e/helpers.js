@@ -1076,6 +1076,22 @@ function agentBackendPayload(action, body, state = {}) {
       ]
     };
   }
+  if (action === 'find_path') {
+    const query = String(body.query || body.name || '').toLowerCase();
+    const candidates = [
+      { name: 'src', path: 'src', type: 'dir', size: 0, modified: Date.now() / 1000 },
+      { name: 'sample.txt', path: 'sample.txt', type: 'file', size: 42, modified: Date.now() / 1000 },
+      { name: 'sample.md', path: 'sample.md', type: 'file', size: 64, modified: Date.now() / 1000 },
+      { name: 'sample.py', path: 'sample.py', type: 'file', size: 96, modified: Date.now() / 1000 },
+      { name: 'nested-sample.py', path: 'src/nested-sample.py', type: 'file', size: 120, modified: Date.now() / 1000 }
+    ];
+    return {
+      ok: true,
+      query,
+      matches: candidates.filter(item => item.name.toLowerCase().includes(query)).slice(0, Number(body.max_results || 100)),
+      truncated: false
+    };
+  }
   if (action === 'read_file') {
     const path = body.path || 'sample.txt';
     let content = 'Sample file content from the mocked backend.\n';
