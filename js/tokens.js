@@ -32,6 +32,9 @@ const MODEL_CONTEXT_LIMITS = {
 const CONTEXT_LIMIT_OVERRIDE_MIN = 1024;
 const CONTEXT_LIMIT_OVERRIDE_MAX = 4000000;
 const CONTEXT_LIMIT_RULES_KEY = 'aichat_context_limit_rules_v1';
+const COMPRESS_AUTO_THRESHOLD_MIN = 50;
+const COMPRESS_AUTO_THRESHOLD_MAX = 95;
+const COMPRESS_AUTO_THRESHOLD_DEFAULT = 75;
 
 const DEFAULT_CONTEXT_LIMIT_RULE_KEYS = [
   'gpt-4o',
@@ -51,6 +54,12 @@ function normalizeContextLimitOverride(value) {
   const n = parseInt(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.max(CONTEXT_LIMIT_OVERRIDE_MIN, Math.min(CONTEXT_LIMIT_OVERRIDE_MAX, n));
+}
+
+function normalizeCompressAutoThreshold(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return COMPRESS_AUTO_THRESHOLD_DEFAULT;
+  return Math.max(COMPRESS_AUTO_THRESHOLD_MIN, Math.min(COMPRESS_AUTO_THRESHOLD_MAX, n));
 }
 
 function getAutoContextLimit(modelName) {
@@ -759,6 +768,86 @@ const COMPRESSION_UNDO_TTL_MS = 30 * 60 * 1000;
 const _compressionUndoSnapshots = {};
 const COMPRESSION_HELPER_TIMEOUT_MS = 90 * 1000;
 const COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS = 0;
+const COMPRESSION_MAX_DELTA_SUMMARIES = 3;
+
+function isCompressionSummaryMessage(m) {
+  return !!(m && (m._isSummary || m._isTransientSummary));
+}
+
+function compressionSummaryLayer(m) {
+  if (!m) return '';
+  if (m._summaryLayer === 'delta' || m._compressionLayer === 'delta') return 'delta';
+  if (m._summaryLayer === 'base' || m._compressionLayer === 'base') return 'base';
+  return isCompressionSummaryMessage(m) ? 'base' : '';
+}
+
+function compressionSummaryTitle(layer, transientLabel) {
+  if (transientLabel) {
+    return layer === 'delta'
+      ? `【${transientLabel}近期增量摘要】`
+      : `【${transientLabel}稳定基础摘要】`;
+  }
+  return layer === 'delta' ? '【近期增量摘要】' : '【稳定基础摘要】';
+}
+
+function compressionWrapSummaryContent(summary, layer = 'base', transientLabel = '') {
+  const title = compressionSummaryTitle(layer, transientLabel);
+  return `${title}\n\n${String(summary || '').trim()}`;
+}
+
+function compressionBuildSummaryPrompt({
+  previousSummary = '',
+  conversationText = '',
+  layer = 'base',
+  label = '',
+  transient = false
+} = {}) {
+  const target = transient
+    ? `长流程 agent 压缩“${label || '内部工具循环'}”中的内部历史`
+    : '会调用工具、读写项目文件的 AI agent 压缩上下文';
+  const summaryKind = layer === 'delta' ? '近期增量摘要' : '稳定基础摘要';
+  const previousBlock = previousSummary
+    ? `【已有摘要，仅作去重和衔接参考，不要改写】\n${previousSummary}\n\n`
+    : '';
+  const layerGuidance = layer === 'delta'
+    ? `本次要输出“${summaryKind}”：只总结下面“需要总结的新内容”，不要重复改写已有摘要；只在必要时用已有摘要补足衔接关系。`
+    : `本次要输出“${summaryKind}”：把已有摘要和下面的新内容合并成一份可独立继续执行的摘要。`;
+  const historyLabel = layer === 'delta' ? '【需要总结的新内容】' : '【需要总结的对话】';
+  const continuation = transient
+    ? '这个摘要会替代旧的内部工具循环记录，并继续参与后续模型请求。'
+    : '目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、文件路径、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。';
+
+  return `${previousBlock}你正在为一个${target}。
+${continuation}
+${layerGuidance}
+
+要求：
+- 不要编造；不知道或没有就写“无”。
+- 文件路径、函数名、命令、错误信息、checkpoint/回滚信息必须尽量原样保留。
+- 摘要应紧凑，但要足够让后续模型不用重读全部历史也能继续工作。
+- 所有 artifact_id、checkpoint_id 和重要文件路径必须逐字保留，不得改写。
+- 如果看到“[工具结果已归档]”，必须在“工具/命令结果”或“下一步建议”里保留对应 artifact_id，并说明可用 read_tool_artifact 读取。
+- 如果某些内容只适合按需重读，请写入“下一步建议”或“可丢弃上下文”。
+- 严格使用下面的 Markdown 结构输出：
+
+## 当前任务
+## 用户目标和约束
+## 已完成事项
+## 关键决策和事实
+## 已查看或修改的文件
+## 工具/命令结果
+## 计划/大纲状态
+## 测试和验证状态
+## 未完成事项
+## 风险/阻塞
+## 下一步建议
+## 可丢弃上下文
+
+${historyLabel}
+${conversationText}
+
+请输出结构化${summaryKind}：`;
+}
 
 function compressionJsonClone(value) {
   try { return JSON.parse(JSON.stringify(value)); } catch (e) { return value; }
@@ -893,6 +982,9 @@ const COMPRESSION_PATH_RE = new RegExp(String.raw`(?:^|[\s"'([{])((?:[A-Za-z]:[\
 const COMPRESSION_FILENAME_COMPONENT = String.raw`[\w\u4e00-\u9fa5.@()+-]+`;
 const COMPRESSION_FILENAME_RE = new RegExp(String.raw`(?:^|[\s"'([{,;:：|])(${COMPRESSION_FILENAME_COMPONENT}\.${COMPRESSION_FILE_EXT_PATTERN})(?=$|[\s"')\]},;:：。；!?|]|[\\/])`, 'g');
 const COMPRESSION_TOKEN_PATH_RE = new RegExp(String.raw`(?:^|[\s"'([{,;:：|])([^\s"'(){}\[\],;:：，。；!?|]+[\\/][^\s"'(){}\[\],;:：，。；!?|]*\.${COMPRESSION_FILE_EXT_PATTERN})(?=$|[\s"'(){}\[\],;:：，。；!?|])`, 'g');
+const COMPRESSION_SHELL_COMMAND_PATTERN = String.raw`(?:python(?:3(?:\.\d+)?)?|node|npm|pnpm|yarn|java|gcc|g\+\+|clang|bash|sh|cmd|powershell|pwsh)`;
+const COMPRESSION_COMMAND_WITH_PATH_ARG_RE = new RegExp(String.raw`\b${COMPRESSION_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+[\\/]`, 'i');
+const COMPRESSION_COMMAND_PATH_WITH_FILE_ARG_RE = new RegExp(String.raw`[\\/]${COMPRESSION_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+\.${COMPRESSION_FILE_EXT_PATTERN}$`, 'i');
 const COMPRESSION_ROOTED_PATH_RE = /^(?:[A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/])/;
 const COMPRESSION_GIT_DIFF_PREFIX_RE = /^[ab][\\/](.+)$/;
 const COMPRESSION_COMMON_ABS_ROOT_RE = /^(?:media|home|mnt|tmp|var|opt|usr|Users|root)\//i;
@@ -930,7 +1022,8 @@ function normalizeCompressionFilePathCandidate(value) {
   if (/\\[rnt]/i.test(p) && !/^[A-Za-z]:[\\/]/.test(p)) return '';
   if (/\s[\\/]\s/.test(p)) return '';
   if (/[\\/]/.test(p) && /\b(?:true|false|none|null|undefined)\b/i.test(p)) return '';
-  if (/[\\/]/.test(p) && /\b(?:python(?:3(?:\.\d+)?)?|node|npm|pnpm|yarn|java|gcc|g\+\+|clang|bash|sh|cmd|powershell|pwsh)\s+\S+[\\/]/i.test(p)) return '';
+  if (/[\\/]/.test(p) && COMPRESSION_COMMAND_WITH_PATH_ARG_RE.test(p)) return '';
+  if (/[\\/]/.test(p) && COMPRESSION_COMMAND_PATH_WITH_FILE_ARG_RE.test(p)) return '';
   if (!COMPRESSION_FILE_EXT_RE.test(p)) return '';
   return p;
 }
@@ -1109,7 +1202,7 @@ function compressionBudgetInfo(chat, extraMessages = [], options = {}) {
   for (const m of extraMessages || []) tokens += estimateMessageTokens(m || {});
   const limit = getContextLimit(tokensState.settings.currentModel);
   const pct = tokens / limit * 100;
-  const threshold = tokensState.settings.compressAutoThreshold || 75;
+  const threshold = normalizeCompressAutoThreshold(tokensState.settings.compressAutoThreshold);
   const maxOutput = Math.max(0, parseInt(tokensState.settings.maxTokens) || 0);
   const safetyBuffer = Math.max(1024, Math.min(8192, Math.round(limit * 0.03)));
   const reserve = maxOutput + safetyBuffer;
@@ -1155,10 +1248,18 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
   const rawToCompress = workMessages.slice(0, cutIdx);
   const toCompress = archiveLongToolMessagesForCompression(rawToCompress, options.chat || null);
   const toKeep = workMessages.slice(cutIdx);
-  const realMessages = toCompress.filter(m => !m._isSummary && !m._isCompressing);
+  const preservedSummaries = toCompress.filter(isCompressionSummaryMessage);
+  const shouldMergeSummaries = preservedSummaries.filter(m => compressionSummaryLayer(m) === 'delta').length >= COMPRESSION_MAX_DELTA_SUMMARIES;
+  const previousSummary = preservedSummaries
+    .map(m => m.content || '')
+    .filter(Boolean)
+    .join('\n\n');
+  const realMessages = toCompress.filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing);
   if (!realMessages.length) return false;
   
-  const requiredRefs = compressionCollectRequiredRefs(toCompress);
+  const summaryLayer = preservedSummaries.length && !shouldMergeSummaries ? 'delta' : 'base';
+  const messagesForSummary = shouldMergeSummaries ? toCompress : realMessages;
+  const requiredRefs = compressionCollectRequiredRefs(messagesForSummary);
   const label = options.label || '内部工具循环';
   const helperOptions = {
     chat: options.chat || null,
@@ -1170,35 +1271,19 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
     sourceLabel: `${label} · 内部压缩`
   };
   const conversationText = middleTrimText(
-    realMessages.map((m, idx) => formatMessageForCompression(m, idx)).join('\n\n'),
+    messagesForSummary
+      .filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing)
+      .map((m, idx) => formatMessageForCompression(m, idx))
+      .join('\n\n'),
     50000
   );
-  const compressPrompt = `你正在为一个长流程 agent 压缩“${label}”中的内部历史。这个摘要会替代旧的内部工具循环记录，并继续参与后续模型请求。
-
-要求：
-- 不要编造；不知道或没有就写“无”。
-- 所有 artifact_id、checkpoint_id 和重要文件路径必须逐字保留。
-- 如果看到“[工具结果已归档]”，必须保留 artifact_id，并说明可用 read_tool_artifact 读取。
-- 保留工具调用结果、用户约束、关键错误、已验证事项和下一步。
-- 严格使用下面的 Markdown 结构输出：
-
-## 当前任务
-## 用户目标和约束
-## 已完成事项
-## 关键决策和事实
-## 已查看或修改的文件
-## 工具/命令结果
-## 计划/大纲状态
-## 测试和验证状态
-## 未完成事项
-## 风险/阻塞
-## 下一步建议
-## 可丢弃上下文
-
-【需要压缩的内部历史】
-${conversationText}
-
-请输出结构化内部上下文摘要：`;
+  const compressPrompt = compressionBuildSummaryPrompt({
+    previousSummary,
+    conversationText,
+    layer: summaryLayer,
+    label,
+    transient: true
+  });
   
   let summary = await tokensApiCore().callOnceWithRole(
     [{ role: 'user', content: compressPrompt }],
@@ -1245,12 +1330,16 @@ ${feedback}
   
   const summaryMsg = {
     role: 'user',
-    content: `【${label}历史摘要】（自动压缩 ${toCompress.length} 条内部消息）\n\n${finalSummary}`,
+    content: compressionWrapSummaryContent(finalSummary, summaryLayer, label),
     _isTransientSummary: true,
-    _originalCount: toCompress.length,
-    _compressTime: Date.now()
+    _originalCount: summaryLayer === 'delta' ? realMessages.length : toCompress.length,
+    _compressTime: Date.now(),
+    _summaryLayer: summaryLayer
   };
-  messages.splice(0, messages.length, ...preserved, summaryMsg, ...toKeep);
+  const replacementSummaries = summaryLayer === 'delta'
+    ? [...preservedSummaries, summaryMsg]
+    : [summaryMsg];
+  messages.splice(0, messages.length, ...preserved, ...replacementSummaries, ...toKeep);
   return true;
 }
 
@@ -1357,7 +1446,7 @@ async function autoCompressCheck(chat = null, options = {}) {
   
   const limit = getContextLimit(tokensState.settings.currentModel);
   const pct = tokens / limit * 100;
-  const threshold = tokensState.settings.compressAutoThreshold || 75;
+  const threshold = normalizeCompressAutoThreshold(tokensState.settings.compressAutoThreshold);
   const maxOutput = Math.max(0, parseInt(tokensState.settings.maxTokens) || 0);
   const safetyBuffer = Math.max(1024, Math.min(8192, Math.round(limit * 0.03)));
   const reserve = maxOutput + safetyBuffer;
@@ -1488,56 +1577,43 @@ async function compressChat(chat, options = {}) {
   const rawToCompress = sourceMessages.slice(0, cutIdx);
   const toCompress = archiveLongToolMessagesForCompression(rawToCompress, chat);
   const toKeep = sourceMessages.slice(cutIdx);
-  const previousSummary = toCompress
-    .filter(m => m._isSummary)
+  const preservedSummaries = toCompress.filter(isCompressionSummaryMessage);
+  const shouldMergeSummaries = preservedSummaries.filter(m => compressionSummaryLayer(m) === 'delta').length >= COMPRESSION_MAX_DELTA_SUMMARIES;
+  const previousSummary = preservedSummaries
     .map(m => m.content || '')
     .filter(Boolean)
     .join('\n\n');
-  const realMessages = toCompress.filter(m => !m._isSummary && !m._isCompressing);
+  const realMessages = toCompress.filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing);
   if (!realMessages.length) {
     TokensUiService.toast('没有新的历史内容需要压缩');
     return false;
   }
-  const requiredRefs = compressionCollectRequiredRefs(toCompress);
+  const summaryLayer = preservedSummaries.length && !shouldMergeSummaries ? 'delta' : 'base';
+  const messagesForSummary = shouldMergeSummaries ? toCompress : realMessages;
+  const requiredRefs = compressionCollectRequiredRefs(messagesForSummary);
   
   const conversationText = middleTrimText(
-    realMessages.map((m, idx) => formatMessageForCompression(m, idx)).join('\n\n'),
+    messagesForSummary
+      .filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing)
+      .map((m, idx) => formatMessageForCompression(m, idx))
+      .join('\n\n'),
     70000
   );
   
-  const compressPrompt = `${previousSummary ? '【已有摘要】\n' + previousSummary + '\n\n' : ''}你正在为一个会调用工具、读写项目文件的 AI agent 压缩上下文。
-目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、文件路径、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。
+  const compressPrompt = compressionBuildSummaryPrompt({
+    previousSummary,
+    conversationText,
+    layer: summaryLayer
+  });
 
-要求：
-- 不要编造；不知道或没有就写“无”。
-- 文件路径、函数名、命令、错误信息、checkpoint/回滚信息必须尽量原样保留。
-- 摘要应紧凑，但要足够让后续模型不用重读全部历史也能继续工作。
-- 所有 artifact_id、checkpoint_id 和重要文件路径必须逐字保留，不得改写。
-- 如果看到“[工具结果已归档]”，必须在“工具/命令结果”或“下一步建议”里保留对应 artifact_id，并说明可用 read_tool_artifact 读取。
-- 如果某些内容只适合按需重读，请写入“下一步建议”或“可丢弃上下文”。
-- 严格使用下面的 Markdown 结构输出：
-
-## 当前任务
-## 用户目标和约束
-## 已完成事项
-## 关键决策和事实
-## 已查看或修改的文件
-## 工具/命令结果
-## 计划/大纲状态
-## 测试和验证状态
-## 未完成事项
-## 风险/阻塞
-## 下一步建议
-## 可丢弃上下文
-
-【需要总结的对话】
-${conversationText}
-
-请输出结构化上下文摘要：`;
-
-  const undoId = rememberCompressionUndo(chat, rawToCompress, {
-    originalCount: toCompress.length,
+  const compressedCount = summaryLayer === 'delta' ? realMessages.length : toCompress.length;
+  const undoCompressedMessages = summaryLayer === 'delta'
+    ? rawToCompress.filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing)
+    : rawToCompress;
+  const undoId = rememberCompressionUndo(chat, undoCompressedMessages, {
+    originalCount: compressedCount,
     reason: options.reason || 'manual',
+    summaryLayer,
     estimatedBefore
   });
   chat.messages.push({
@@ -1618,15 +1694,18 @@ ${feedback}
     
     const summaryMsg = {
       role: 'system',
-      content: `【对话历史摘要】（由 AI ${options.reason === 'auto' ? '自动' : '手动'}压缩，原 ${toCompress.length} 条消息）\n\n${finalSummary}`,
+      content: compressionWrapSummaryContent(finalSummary, summaryLayer),
       _isSummary: true,
-      _originalCount: toCompress.length,
+      _originalCount: compressedCount,
       _compressTime: Date.now(),
       _compressionReason: options.reason || 'manual',
       _compressionUndoId: undoId,
+      _summaryLayer: summaryLayer,
       _estimatedBefore: estimatedBefore
     };
-    chat.messages = [summaryMsg, ...toKeep];
+    chat.messages = summaryLayer === 'delta'
+      ? [...preservedSummaries, summaryMsg, ...toKeep]
+      : [summaryMsg, ...toKeep];
     summaryMsg._estimatedAfter = estimateChatTokens(chat);
     
     // 清除精确统计缓存（消息变了）
@@ -1640,7 +1719,7 @@ ${feedback}
     if (isVisible && typeof updateTokenDisplay === 'function') updateTokenDisplay();
     scheduleAccurateTokenCount(chat.id);
     const saved = Math.max(0, estimatedBefore - summaryMsg._estimatedAfter);
-    TokensUiService.toast(`✓ 已压缩 ${toCompress.length} 条消息，预计节省 ${formatNumber(saved)} token`);
+    TokensUiService.toast(`✓ 已压缩 ${compressedCount} 条消息，预计节省 ${formatNumber(saved)} token`);
     return true;
   } catch (e) {
     delete _compressionUndoSnapshots[undoId];
@@ -1672,6 +1751,7 @@ ${feedback}
 window.estimateTokens = estimateTokens;
 window.estimateMessageTokens = estimateMessageTokens;
 window.estimateChatTokens = estimateChatTokens;
+window.normalizeCompressAutoThreshold = normalizeCompressAutoThreshold;
 window.getChatTokenStats = getChatTokenStats;
 window.recordUsageFromResponse = recordUsageFromResponse;
 window.fetchAnthropicTokenCount = fetchAnthropicTokenCount;
@@ -1698,6 +1778,7 @@ window.AgentApp.define('tokens', {
   saveContextLimitRules,
   getContextLimitInfo,
   getContextLimit,
+  normalizeCompressAutoThreshold,
   estimateTokens,
   estimateMessageTokens,
   estimateChatTokens,

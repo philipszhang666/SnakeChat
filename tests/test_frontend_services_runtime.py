@@ -2169,8 +2169,10 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             run('js/outline-core.js');
 
             const outlineCore = sandbox.AgentApp.require('outlineCore');
-            const codePrompt = outlineCore.buildOutlineSystemPromptForProfile('', [], { domain: 'coding' });
-            assert.match(codePrompt, /不超过 4 项/);
+            const codeSystemPrompt = outlineCore.buildOutlineSystemPromptForProfile('', [], { domain: 'coding' });
+            assert.doesNotMatch(codeSystemPrompt, /不超过 4 项/);
+            const codeProfilePrompt = outlineCore.buildOutlineProfileUserPrompt([], { domain: 'coding' });
+            assert.match(codeProfilePrompt, /不超过 4 项/);
             const sixItems = Array.from({ length: 6 }, (_, idx) => ({
               id: `a${idx + 1}`,
               title: `step ${idx + 1}`,
@@ -2207,6 +2209,7 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
                 ['node', str(script_path)],
                 cwd=ROOT,
                 text=True,
+                encoding='utf-8',
                 capture_output=True,
                 check=False,
             )

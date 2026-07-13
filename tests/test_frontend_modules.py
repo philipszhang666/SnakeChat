@@ -726,7 +726,9 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('function splitMarkdownSpacedFileRefs(text)', markdown_js)
         self.assertIn("if (!p.includes('/') && !isBareMarkdownFileLinkPath(p)) return false;", markdown_js)
         self.assertIn('if (/\\/\\s|\\s\\//.test(p)) return false;', markdown_js)
+        self.assertIn('MARKDOWN_COMMAND_PATH_WITH_FILE_ARG_RE.test(p)', markdown_js)
         self.assertIn("const fileRefNamePart = '[\\\\w@.+\\\\-\\\\u4e00-\\\\u9fa5]+(?: [\\\\w@.+\\\\-\\\\u4e00-\\\\u9fa5]+)*';", markdown_js)
+        self.assertIn('((?:(?:[A-Za-z]:)?[\\\\\\\\/]|\\\\.\\\\/)?(?:(?:', markdown_js)
         self.assertIn('function isBareFileExplorerFileReference(path)', file_explorer_js)
         self.assertIn("callAgentBackend(\n    'find_file'", file_explorer_js)
         self.assertIn('if (!type && isBareFileExplorerFileReference(normalizedPath))', file_explorer_js)
@@ -1001,6 +1003,45 @@ class FrontendModuleTests(unittest.TestCase):
             'data-action="resetTokenStats"',
         ):
             self.assertIn(delegated_attr, tokens_js)
+
+    def test_tokens_compression_uses_two_layer_summaries(self):
+        tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
+
+        self.assertIn('const COMPRESSION_MAX_DELTA_SUMMARIES = 3;', tokens_js)
+        self.assertIn("function compressionWrapSummaryContent(summary, layer = 'base', transientLabel = '')", tokens_js)
+        self.assertIn("const summaryLayer = preservedSummaries.length && !shouldMergeSummaries ? 'delta' : 'base';", tokens_js)
+        self.assertIn("const undoCompressedMessages = summaryLayer === 'delta'", tokens_js)
+        self.assertIn("chat.messages = summaryLayer === 'delta'", tokens_js)
+        self.assertIn("? [...preservedSummaries, summaryMsg, ...toKeep]", tokens_js)
+        self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer)", tokens_js)
+        self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer, label)", tokens_js)
+        self.assertIn('_summaryLayer: summaryLayer', tokens_js)
+        self.assertNotIn('【对话历史摘要】（由 AI', tokens_js)
+        self.assertNotIn('历史摘要】（自动压缩', tokens_js)
+
+    def test_auto_compression_threshold_setting_is_respected(self):
+        tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
+        settings_js = (ROOT / 'js' / 'settings.js').read_text(encoding='utf-8')
+        api_profiles_js = (ROOT / 'js' / 'api-profiles.js').read_text(encoding='utf-8')
+        debate_js = (ROOT / 'js' / 'debate-mode.js').read_text(encoding='utf-8')
+
+        self.assertIn('function normalizeCompressAutoThreshold(value)', tokens_js)
+        self.assertIn('const COMPRESS_AUTO_THRESHOLD_DEFAULT = 75;', tokens_js)
+        self.assertEqual(tokens_js.count('normalizeCompressAutoThreshold(tokensState.settings.compressAutoThreshold)'), 2)
+        self.assertNotIn('tokensState.settings.compressAutoThreshold || 75', tokens_js)
+
+        self.assertIn('function settingsNormalizeCompressAutoThreshold(value)', settings_js)
+        self.assertIn('settingsNormalizeCompressAutoThreshold(s.compressAutoThreshold)', settings_js)
+        self.assertIn('settingsNormalizeCompressAutoThreshold(compThreshold.value)', settings_js)
+
+        self.assertIn("'compressAutoEnabled'", api_profiles_js)
+        self.assertIn("'compressAutoThreshold'", api_profiles_js)
+        self.assertIn("'compressKeepLast'", api_profiles_js)
+        self.assertIn('apiProfilesNormalizeCompressAutoThreshold(compThreshold.value)', api_profiles_js)
+        self.assertIn('apiProfilesNormalizeCompressAutoThreshold(s.compressAutoThreshold)', api_profiles_js)
+
+        self.assertIn('normalizeCompressAutoThreshold(debateState.settings.compressAutoThreshold)', debate_js)
+        self.assertNotIn('debateState.settings.compressAutoThreshold || 75', debate_js)
 
     def test_project_context_modules_consume_state_and_runtime_api_core(self):
         project_instructions_js = (ROOT / 'js' / 'project-instructions.js').read_text(encoding='utf-8')
@@ -1330,6 +1371,16 @@ class FrontendModuleTests(unittest.TestCase):
         ):
             self.assertNotIn(direct_usage, outline_core_code)
 
+    def test_outline_core_keeps_cache_friendly_prompt_prefixes(self):
+        outline_core_js = (ROOT / 'js' / 'outline-core.js').read_text(encoding='utf-8')
+
+        self.assertIn('function buildOutlineProfileUserPrompt(history, taskProfile)', outline_core_js)
+        self.assertIn('const finalStagePrompt = outlinePromptText(', outline_core_js)
+        self.assertIn('const finalUserMsg = [finalStagePrompt,', outline_core_js)
+        self.assertNotIn("withActiveSkillPrompt(systemPrompt) : systemPrompt) +", outline_core_js)
+        self.assertIn('function outlineNextDeterministicId(usedIds, startIndex = 1)', outline_core_js)
+        self.assertNotIn('Math.random()', outline_core_js)
+
     def test_privacy_guard_consumes_state_module(self):
         privacy_guard_js = (ROOT / 'js' / 'privacy-guard.js').read_text(encoding='utf-8')
         privacy_guard_code = '\n'.join(
@@ -1612,6 +1663,10 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('function goalRecordedTokenUsed', goal_core_js)
         self.assertIn('function syncGoalTokenUsageFromChat', goal_core_js)
         self.assertIn('function goalEstimateTurnTokens', goal_core_js)
+        goal_token_accounting = goal_core_js[goal_core_js.index('function goalRecordedTokenUsed'):goal_core_js.index('function goalEstimateTextTokens')]
+        self.assertIn('return Math.max(0, Number(goal.tokenUsed || 0) || 0);', goal_token_accounting)
+        self.assertIn('goal.tokenUsed = goalRecordedTokenUsed(goal);', goal_token_accounting)
+        self.assertNotIn('goalChatRecordedTokenTotal(goalChatById(goal.chatId))', goal_token_accounting)
         self.assertIn('const messageCountBeforeRun = chat.messages.length', goal_core_js)
         self.assertIn('const turnPrompt = buildGoalTurnPrompt(freshGoal, turnGuidance)', goal_core_js)
         self.assertIn('const contextMessages = buildGoalConversationContext(chat, userMsgIdx)', goal_core_js)
@@ -1620,6 +1675,10 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('Math.max(0, goalChatRecordedTokenTotal(chat) - tokenStatsBefore)', goal_core_js)
         self.assertIn('goalEstimateTurnTokens(systemPrompt, turnPrompt, chat, messageCountBeforeRun)', goal_core_js)
         self.assertIn('syncGoalTokenUsageFromChat(latestGoal)', goal_core_js)
+        protocol_audit_fn = goal_core_js[goal_core_js.index('function applyGoalProtocolAudit'):goal_core_js.index('async function continueGoal')]
+        self.assertIn("pushGoalEvent(goal, 'protocol_warning'", protocol_audit_fn)
+        self.assertNotIn("goal.status = 'paused'", protocol_audit_fn)
+        self.assertNotIn("protocol_pause", protocol_audit_fn)
         update_goal_config_idx = config_js.index("name: 'update_goal'")
         update_goal_config_block = config_js[update_goal_config_idx:config_js.index("code: 'return await updateGoal", update_goal_config_idx)]
         self.assertIn("enum: ['active', 'complete', 'blocked']", update_goal_config_block)

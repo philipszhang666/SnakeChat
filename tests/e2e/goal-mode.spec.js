@@ -51,6 +51,7 @@ async function goalSnapshot(page) {
         id: goal.id,
         objective: goal.objective,
         status: goal.status,
+        lastError: goal.lastError || '',
         chatId: goal.chatId,
         turnCount: goal.turnCount
       })),
@@ -84,6 +85,7 @@ test.describe('goal mode workflows', () => {
     expect(afterFirst.currentId).toBe(before.currentId);
     expect(afterFirst.chatCount).toBe(before.chatCount);
     expect(afterFirst.goals.find(goal => goal.objective === 'E2E first reusable goal').chatId).toBe(before.currentId);
+    expect(afterFirst.goals.find(goal => goal.objective === 'E2E first reusable goal').lastError).toBe('');
     expect(afterFirst.chatGoalIds).toContain(afterFirst.goals.find(goal => goal.objective === 'E2E first reusable goal').id);
     expect(afterFirst.messages.some(msg => msg.role === 'assistant' && String(msg.content).includes('Goal complete: E2E first reusable goal'))).toBe(true);
     expect(afterFirst.messages.filter(msg => msg.goalFinal).length).toBe(1);
@@ -95,11 +97,96 @@ test.describe('goal mode workflows', () => {
     expect(afterSecond.currentId).toBe(before.currentId);
     expect(afterSecond.chatCount).toBe(before.chatCount);
     expect(afterSecond.goals.filter(goal => goal.chatId === before.currentId)).toHaveLength(2);
+    expect(afterSecond.goals.find(goal => goal.objective === 'E2E second reusable goal').lastError).toBe('');
     expect(afterSecond.chatGoalIds).toEqual(expect.arrayContaining(afterSecond.goals.map(goal => goal.id)));
     expect(afterSecond.messages.filter(msg => msg.goalFinal)).toHaveLength(2);
     expect(JSON.stringify(afterSecond)).not.toContain('"goal_"');
     expect(backend.llmCalls.length).toBeGreaterThanOrEqual(4);
 
+    clientErrors.expectNoErrors();
+  });
+
+  test('protocol ordering warnings do not pause an otherwise useful goal turn', async ({ page }) => {
+    const objective = 'E2E protocol warning remains active';
+    const { backend, clientErrors } = await gotoApp(page, {
+      goalScenario: true,
+      goalScenarioFirstNonGoalTool: true,
+      goalScenarioKeepActive: true
+    });
+    await configureMockProvider(page);
+    await ensureCurrentChat(page);
+    await page.evaluate(() => {
+      const appState = window.AgentApp.require('state').state;
+      const config = window.AgentApp.require('config');
+      const listNotes = (config.BUILTIN_TOOLS || []).find(tool => tool && tool.name === 'list_notes');
+      if (listNotes && !appState.tools.some(tool => tool && tool.name === 'list_notes')) {
+        appState.tools.push(JSON.parse(JSON.stringify(listNotes)));
+      }
+    });
+
+    await openGoalPanel(page);
+    await page.fill('#goalObjectiveInput', objective);
+    await page.fill('#goalMaxTurnsInput', '1');
+    await page.locator('[data-action="createGoalFromUi"]').click();
+
+    await expect.poll(() => page.evaluate(objective => {
+      const goal = window.AgentApp.require('goalCore').listGoals().find(item => item.objective === objective);
+      return !!(goal && goal.events && goal.events.some(event => event.type === 'protocol_warning'));
+    }, objective), { timeout: 20_000 }).toBe(true);
+
+    const goal = await page.evaluate(objective => {
+      const item = window.AgentApp.require('goalCore').listGoals().find(goal => goal.objective === objective);
+      return {
+        status: item && item.status,
+        lastError: item && item.lastError,
+        turnCount: item && item.turnCount,
+        events: item && Array.isArray(item.events) ? item.events.map(event => event.type) : []
+      };
+    }, objective);
+
+    expect(goal.status).toBe('active');
+    expect(goal.turnCount).toBe(1);
+    expect(goal.events).toContain('protocol_warning');
+    expect(goal.events).not.toContain('protocol_pause');
+    expect(goal.lastError || '').not.toContain('Goal protocol violation');
+    expect(backend.llmCalls.length).toBeGreaterThanOrEqual(4);
+    await expect(page.locator('#sendBtn')).not.toHaveClass(/stop/);
+    clientErrors.expectNoErrors();
+  });
+
+  test('marks a goal blocked only after the repeated blocker threshold is reached', async ({ page }) => {
+    const objective = 'E2E repeated blocker goal';
+    const { clientErrors } = await gotoApp(page, {
+      goalScenario: true,
+      goalScenarioBlocked: true
+    });
+    await configureMockProvider(page);
+    await ensureCurrentChat(page);
+
+    await openGoalPanel(page);
+    await page.fill('#goalObjectiveInput', objective);
+    await page.fill('#goalMaxTurnsInput', '4');
+    await page.locator('[data-action="createGoalFromUi"]').click();
+
+    await waitForGoalStatus(page, objective, 'blocked');
+    const goal = await page.evaluate(objective => {
+      const item = window.AgentApp.require('goalCore').listGoals().find(goal => goal.objective === objective);
+      const events = item && Array.isArray(item.events) ? item.events : [];
+      return {
+        status: item && item.status,
+        lastError: item && item.lastError,
+        turnCount: item && item.turnCount,
+        auditCounts: events.filter(event => event.type === 'blocked_audit').map(event => event.count),
+        eventTypes: events.map(event => event.type)
+      };
+    }, objective);
+
+    expect(goal.status).toBe('blocked');
+    expect(goal.lastError).toBe('E2E blocker requires user input');
+    expect(goal.turnCount).toBe(3);
+    expect(goal.auditCounts).toEqual([1, 2, 3]);
+    expect(goal.eventTypes).toContain('blocked');
+    expect(goal.eventTypes).not.toContain('error');
     clientErrors.expectNoErrors();
   });
 

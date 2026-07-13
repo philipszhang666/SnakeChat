@@ -336,6 +336,7 @@ function refreshReflectionLive(aiMsg, immediate, targetChat) {
         ? `<div class="ref-progress"><span class="ref-spinner"></span><span>${escapeHtml(ref.progressText || '思考中...')}</span></div>`
         : '';
       body.innerHTML = turnsHtml + progressHtml;
+      if (typeof postRender === 'function') postRender(body);
     }
     // 2) 更新顶部统计（轮数 / 评分）
     const stats = panel.querySelector('.reflection-stats');

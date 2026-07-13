@@ -20,6 +20,15 @@ const ApiProfilesUiService = window.AgentApp.require('uiService');
 const API_PROFILES_KEY = 'aichat_api_profiles_v1';
 const ACTIVE_PROFILE_ID_KEY = 'aichat_active_profile_id_v1';
 
+function apiProfilesNormalizeCompressAutoThreshold(value) {
+  if (typeof normalizeCompressAutoThreshold === 'function') {
+    return normalizeCompressAutoThreshold(value);
+  }
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return 75;
+  return Math.max(50, Math.min(95, n));
+}
+
 // profile 中保存的 settings 字段白名单
 // 只存"和某个 API 强相关"的字段，避免把全局开关（useTools/useOutline 等）也覆盖
 const PROFILE_SETTINGS_KEYS = [
@@ -37,7 +46,10 @@ const PROFILE_SETTINGS_KEYS = [
   'useCustomJson',
   'jsonTemplate',
   'jsonHeaders',
-  'reasoningEffort'
+  'reasoningEffort',
+  'compressAutoEnabled',
+  'compressAutoThreshold',
+  'compressKeepLast'
 ];
 
 // ============ 读写工具 ============
@@ -444,6 +456,15 @@ function _harvestSettingsModalToState() {
   const maxTokens = get('maxTokens');       if (maxTokens !== undefined) s.maxTokens = parseInt(maxTokens);
   const useLocalProxy = document.getElementById('useLocalProxy');
   if (useLocalProxy) s.useLocalProxy = useLocalProxy.checked;
+  const compEnabled = document.getElementById('compressAutoEnabled');
+  const compThreshold = document.getElementById('compressAutoThreshold');
+  const compKeep = document.getElementById('compressKeepLast');
+  if (compEnabled) s.compressAutoEnabled = compEnabled.checked;
+  if (compThreshold) s.compressAutoThreshold = apiProfilesNormalizeCompressAutoThreshold(compThreshold.value);
+  if (compKeep) {
+    const keepLast = parseInt(compKeep.value, 10);
+    s.compressKeepLast = Number.isFinite(keepLast) ? Math.max(2, Math.min(10, keepLast)) : 4;
+  }
 }
 
 // 把 apiProfilesState.settings 的值写回设置面板的输入框
@@ -499,7 +520,7 @@ function _refreshSettingsModalFromState() {
   const compKeepVal = document.getElementById('compressKeepLastVal');
   if (compEnabled) compEnabled.checked = !!s.compressAutoEnabled;
   if (compThreshold) {
-    const v = s.compressAutoThreshold || 75;
+    const v = apiProfilesNormalizeCompressAutoThreshold(s.compressAutoThreshold);
     compThreshold.value = v;
     if (compThresholdVal) compThresholdVal.textContent = v + '%';
   }

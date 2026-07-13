@@ -1364,7 +1364,9 @@ async function autoCompressDebateCheck(chat, options = {}) {
   const limit = _debateContextLimit(chat);
   const tokens = _debateEstimateSpeakerContextTokens(chat);
   const pct = tokens / limit * 100;
-  const threshold = debateState.settings.compressAutoThreshold || 75;
+  const threshold = typeof normalizeCompressAutoThreshold === 'function'
+    ? normalizeCompressAutoThreshold(debateState.settings.compressAutoThreshold)
+    : 75;
   const maxOutput = Math.max(0, parseInt(debateState.settings.maxTokens) || 0);
   const safetyBuffer = Math.max(1024, Math.min(8192, Math.round(limit * 0.03)));
   const reserve = maxOutput + safetyBuffer;

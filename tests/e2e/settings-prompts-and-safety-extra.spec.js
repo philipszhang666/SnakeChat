@@ -193,6 +193,264 @@ test.describe('extra settings prompts and safety controls without real services'
     clientErrors.expectNoErrors();
   });
 
+  test('auto compression honors the saved usage threshold setting', async ({ page }) => {
+    const { clientErrors } = await gotoApp(page);
+
+    await openSettingsSection(page, 'main');
+    await page.locator('#compressAutoThreshold').evaluate(el => {
+      el.value = '90';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.locator('#settingsPageContent [data-action="saveAndClose"]').click();
+    await expect.poll(() => page.evaluate(() => state.settings.compressAutoThreshold)).toBe(90);
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      window.__e2eOriginalThresholdCallOnce = apiCore.callOnceWithRole;
+      window.__e2eThresholdCompressionCalls = 0;
+      apiCore.callOnceWithRole = async () => {
+        window.__e2eThresholdCompressionCalls += 1;
+        return [
+          '## 当前任务',
+          'E2E threshold summary.',
+          '',
+          '## 用户目标和约束',
+          'Verify auto compression threshold settings without a live model.',
+          '',
+          '## 已完成事项',
+          'Generated a mocked compression summary.',
+          '',
+          '## 关键决策和事实',
+          'The threshold should be read from settings instead of falling back to 75.',
+          '',
+          '## 已查看或修改的文件',
+          '无',
+          '',
+          '## 工具/命令结果',
+          '无',
+          '',
+          '## 计划/大纲状态',
+          '无',
+          '',
+          '## 测试和验证状态',
+          'Playwright is exercising the auto compression threshold path.',
+          '',
+          '## 未完成事项',
+          'Continue after compression.',
+          '',
+          '## 风险/阻塞',
+          '无',
+          '',
+          '## 下一步建议',
+          'Keep using the configured threshold.',
+          '',
+          '## 可丢弃上下文',
+          'Earlier raw message wording can be discarded.'
+        ].join('\n');
+      };
+
+      window.saveContextLimitRules([{ key: 'e2e-threshold-model', limit: 8000 }]);
+      state.settings.currentModel = 'e2e-threshold-model';
+      state.settings.compressAutoEnabled = true;
+      state.settings.compressKeepLast = 2;
+      state.settings.maxTokens = 0;
+      state.settings.systemPrompt = '';
+      window.AgentApp.require('chat').newChat();
+      const chat = currentChat();
+      const roles = ['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant'];
+      chat.messages = roles.map((role, idx) => ({
+        role,
+        content: `threshold message ${idx} ` + 'x'.repeat(3000)
+      }));
+      renderMessages();
+    });
+
+    const highThresholdResult = await page.evaluate(() => window.autoCompressCheck(currentChat()));
+    expect(highThresholdResult).toBe(false);
+    await expect.poll(() => page.evaluate(() => window.__e2eThresholdCompressionCalls)).toBe(0);
+
+    const lowThresholdResult = await page.evaluate(async () => {
+      state.settings.compressAutoThreshold = 50;
+      return await window.autoCompressCheck(currentChat());
+    });
+    expect(lowThresholdResult).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__e2eThresholdCompressionCalls)).toBe(1);
+    await expect.poll(() => page.evaluate(() => currentChat().messages.some(m => !!m._isSummary))).toBe(true);
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      if (window.__e2eOriginalThresholdCallOnce) {
+        apiCore.callOnceWithRole = window.__e2eOriginalThresholdCallOnce;
+        delete window.__e2eOriginalThresholdCallOnce;
+      }
+      delete window.__e2eThresholdCompressionCalls;
+    });
+    clientErrors.expectNoErrors();
+  });
+
+  test('context compression keeps stable base summaries and merges bounded deltas', async ({ page }) => {
+    const { clientErrors } = await gotoApp(page);
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      window.__e2eOriginalCompressionCallOnce = apiCore.callOnceWithRole;
+      window.__e2eCompressionPrompts = [];
+      apiCore.callOnceWithRole = async messages => {
+        const prompt = String(messages && messages[0] && messages[0].content || '');
+        window.__e2eCompressionPrompts.push(prompt);
+        const isDelta = prompt.includes('本次要输出“近期增量摘要”');
+        const kind = isDelta ? 'delta' : 'base';
+        const seq = window.__e2eCompressionPrompts.length;
+        return [
+          '## 当前任务',
+          `E2E ${kind} summary ${seq}.`,
+          '',
+          '## 用户目标和约束',
+          'Verify two-layer compression summaries without a live model.',
+          '',
+          '## 已完成事项',
+          `Generated ${kind} summary in mocked compression call ${seq}.`,
+          '',
+          '## 关键决策和事实',
+          'Stable base summaries should be preserved while delta summaries are below the merge threshold.',
+          '',
+          '## 已查看或修改的文件',
+          '无',
+          '',
+          '## 工具/命令结果',
+          '无',
+          '',
+          '## 计划/大纲状态',
+          '无',
+          '',
+          '## 测试和验证状态',
+          'Playwright is exercising the compression state transitions.',
+          '',
+          '## 未完成事项',
+          'Continue after compression.',
+          '',
+          '## 风险/阻塞',
+          '无',
+          '',
+          '## 下一步建议',
+          'Use the newest kept user message.',
+          '',
+          '## 可丢弃上下文',
+          'Earlier raw message wording can be discarded.'
+        ].join('\n');
+      };
+
+      window.AgentApp.require('chat').newChat();
+      const chat = currentChat();
+      state.settings.compressKeepLast = 2;
+      state.settings.currentModel = 'mock-model';
+      chat.messages = [
+        { role: 'user', content: 'base old user one' },
+        { role: 'assistant', content: 'base old assistant one' },
+        { role: 'user', content: 'base old user two' },
+        { role: 'assistant', content: 'base old assistant two' },
+        { role: 'user', content: 'initial latest keep user' }
+      ];
+
+      window.__e2eRunCompression = async label => {
+        const c = currentChat();
+        if (label) {
+          const last = c.messages[c.messages.length - 1];
+          if (last && last.role === 'user') {
+            c.messages.push({ role: 'assistant', content: `${label} answer to previous keep` });
+          }
+          c.messages.push({ role: 'user', content: `${label} compressible user detail` });
+          c.messages.push({ role: 'assistant', content: `${label} compressible assistant detail` });
+          c.messages.push({ role: 'user', content: `${label} latest keep user` });
+        }
+        renderMessages();
+        return await window.compressChat(c, {
+          reason: 'manual',
+          retryMaxAttempts: 0
+        });
+      };
+      renderMessages();
+    });
+
+    await expect.poll(() => page.evaluate(() => window.__e2eRunCompression(''))).toBe(true);
+    const afterBase = await page.evaluate(() => {
+      const summaries = currentChat().messages.filter(m => m && m._isSummary);
+      return summaries.map(m => ({
+        layer: m._summaryLayer,
+        content: m.content,
+        originalCount: m._originalCount
+      }));
+    });
+    expect(afterBase).toHaveLength(1);
+    expect(afterBase[0].layer).toBe('base');
+    expect(afterBase[0].content).toContain('【稳定基础摘要】');
+    expect(afterBase[0].content).not.toContain('由 AI');
+    expect(afterBase[0].content).not.toContain('原 4 条消息');
+    const firstBaseContent = afterBase[0].content;
+
+    await expect.poll(() => page.evaluate(() => window.__e2eRunCompression('delta-one'))).toBe(true);
+    const afterDelta = await page.evaluate(() => {
+      const summaries = currentChat().messages.filter(m => m && m._isSummary);
+      return {
+        summaries: summaries.map(m => ({
+          layer: m._summaryLayer,
+          content: m.content,
+          undoId: m._compressionUndoId
+        })),
+        prompts: window.__e2eCompressionPrompts.slice()
+      };
+    });
+    expect(afterDelta.summaries.map(m => m.layer)).toEqual(['base', 'delta']);
+    expect(afterDelta.summaries[0].content).toBe(firstBaseContent);
+    expect(afterDelta.summaries[1].content).toContain('【近期增量摘要】');
+    expect(afterDelta.prompts.at(-1)).toContain('【已有摘要，仅作去重和衔接参考，不要改写】');
+    expect(afterDelta.prompts.at(-1)).toContain('本次要输出“近期增量摘要”');
+
+    await page.locator('.msg-action').filter({ hasText: '撤销压缩' }).last().click();
+    await expect.poll(() => page.evaluate(() =>
+      currentChat().messages.filter(m => m && m._isSummary).map(m => m._summaryLayer)
+    )).toEqual(['base']);
+    const afterUndo = await page.evaluate(() => ({
+      baseContent: currentChat().messages.find(m => m && m._isSummary)?.content || '',
+      allText: currentChat().messages.map(m => m.content || '').join('\n')
+    }));
+    expect(afterUndo.baseContent).toBe(firstBaseContent);
+    expect(afterUndo.allText).toContain('delta-one compressible user detail');
+
+    for (const label of ['delta-two', 'delta-three', 'delta-four']) {
+      await expect.poll(() => page.evaluate(value => window.__e2eRunCompression(value), label)).toBe(true);
+    }
+    const beforeMerge = await page.evaluate(() =>
+      currentChat().messages.filter(m => m && m._isSummary).map(m => m._summaryLayer)
+    );
+    expect(beforeMerge).toEqual(['base', 'delta', 'delta', 'delta']);
+
+    await expect.poll(() => page.evaluate(() => window.__e2eRunCompression('merge-after-three-deltas'))).toBe(true);
+    const afterMerge = await page.evaluate(() => {
+      const summaries = currentChat().messages.filter(m => m && m._isSummary);
+      return {
+        summaries: summaries.map(m => ({ layer: m._summaryLayer, content: m.content })),
+        lastPrompt: window.__e2eCompressionPrompts.at(-1) || ''
+      };
+    });
+    expect(afterMerge.summaries).toHaveLength(1);
+    expect(afterMerge.summaries[0].layer).toBe('base');
+    expect(afterMerge.summaries[0].content).toContain('【稳定基础摘要】');
+    expect(afterMerge.lastPrompt).toContain('本次要输出“稳定基础摘要”');
+    expect(afterMerge.lastPrompt).toContain('【已有摘要，仅作去重和衔接参考，不要改写】');
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      if (window.__e2eOriginalCompressionCallOnce) {
+        apiCore.callOnceWithRole = window.__e2eOriginalCompressionCallOnce;
+        delete window.__e2eOriginalCompressionCallOnce;
+      }
+      delete window.__e2eCompressionPrompts;
+      delete window.__e2eRunCompression;
+    });
+    clientErrors.expectNoErrors();
+  });
+
   test('context compression auto-patches missing file paths and ignores escaped log fragments', async ({ page }) => {
     const { clientErrors } = await gotoApp(page);
     await page.evaluate(() => {
@@ -247,6 +505,8 @@ test.describe('extra settings prompts and safety controls without real services'
             '日志：reviews_Beauty_5.json.gz False None\\nmeta_Beauty.js, False None\\n/media/inspur/disk1/zhzhang/conda_envs/llm4rec/bin/python data/process_beauty.py',
             '命令：chmod +x scripts/run_beauty_graph_random_811_gpu3.sh；bash -n scripts/run_beauty_graph_random_811_gpu3.sh；+x scripts/run_beauty_graph_random_811_gpu3.sh',
             '新增脚本 scripts/run_beauty_graph_random_811_gpu3.sh，正在运行 model/main.py',
+            'remote command: ../../../conda_envs/nlgcl/bin/python main.py',
+            'project entry: /media/inspur/disk1/zhzhang/NLGCL/main.py',
             'model/main.py|resume_beauty_tiger|run_beauty_paper|generate_code|rqvae/main.py',
             'diff --git a/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py b/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py',
             '/media/inspur/disk1/zhzhang/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py'
@@ -283,11 +543,13 @@ test.describe('extra settings prompts and safety controls without real services'
     expect(summary).toContain('scripts/run_beauty_graph_random_811_gpu3.sh');
     expect(summary).toContain('model/main.py');
     expect(summary).toContain('rqvae/main.py');
+    expect(summary).toContain('/media/inspur/disk1/zhzhang/NLGCL/main.py');
     expect(summary).toContain('/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
     expect(summary).not.toContain('student.txt / course.txt / sc.txt');
     expect(summary).not.toContain('False None\\nmeta_Beauty.js');
     expect(summary).not.toContain('reviews_Beauty_5.json.gz False None');
     expect(summary).not.toContain('python data/process_beauty.py');
+    expect(summary).not.toContain('../../../conda_envs/nlgcl/bin/python main.py');
     expect(summary).not.toContain('chmod +x scripts/run_beauty_graph_random_811_gpu3.sh');
     expect(summary).not.toContain('bash -n scripts/run_beauty_graph_random_811_gpu3.sh');
     expect(summary).not.toContain('+x scripts/run_beauty_graph_random_811_gpu3.sh');
@@ -297,6 +559,17 @@ test.describe('extra settings prompts and safety controls without real services'
     expect(summary).not.toContain('a/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
     expect(summary).not.toContain('b/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
     expect(summary).not.toContain('/media/inspur/disk1/zhzhang/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
+
+    const renderedPaths = await page.evaluate(() => window.renderMarkdown([
+      '/media/inspur/disk1/zhzhang/NLGCL/main.py',
+      '../../../conda_envs/nlgcl/bin/python main.py',
+      '- search_54.py'
+    ].join('\n')));
+    expect(renderedPaths).toContain('data-explorer-file="/media/inspur/disk1/zhzhang/NLGCL/main.py"');
+    expect(renderedPaths).toContain('data-explorer-file="search_54.py"');
+    expect(renderedPaths).not.toContain('data-explorer-file="- search_54.py"');
+    expect(renderedPaths).not.toContain('>- search_54.py</a>');
+    expect(renderedPaths).not.toContain('data-explorer-file="../../../conda_envs/nlgcl/bin/python main.py"');
 
     await page.evaluate(() => {
       const apiCore = window.AgentApp.require('apiCore');

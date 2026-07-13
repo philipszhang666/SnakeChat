@@ -1094,14 +1094,13 @@ function goalChatRecordedTokenTotal(chat) {
 
 function goalRecordedTokenUsed(goal) {
   if (!goal) return 0;
-  return Math.max(Number(goal.tokenUsed || 0) || 0, goalChatRecordedTokenTotal(goalChatById(goal.chatId)));
+  return Math.max(0, Number(goal.tokenUsed || 0) || 0);
 }
 
 function syncGoalTokenUsageFromChat(goal) {
   if (!goal) return 0;
-  const recorded = goalRecordedTokenUsed(goal);
-  if (recorded > (Number(goal.tokenUsed || 0) || 0)) goal.tokenUsed = recorded;
-  return recorded;
+  goal.tokenUsed = goalRecordedTokenUsed(goal);
+  return goal.tokenUsed;
 }
 
 function goalEstimateTextTokens(text) {
@@ -1180,12 +1179,13 @@ function applyGoalProtocolAudit(goal, report, finalText) {
   }
   if (!issues.length) return false;
 
-  goal.status = 'paused';
-  goal.lastError = 'Goal protocol violation: ' + issues.join(' ');
+  const reason = 'Goal protocol warning: ' + issues.join(' ');
   if (finalText && !goal.summary) goal.summary = clipGoalText(finalText, 500);
-  goal.nextStep = 'Resume and follow the goal protocol: call get_goal first, do one verifiable step, then call update_goal.';
-  pushGoalEvent(goal, 'protocol_pause', { reason: goal.lastError, result: clipGoalText(finalText || '', 500) });
-  return true;
+  if (!goal.nextStep) {
+    goal.nextStep = 'Continue the goal protocol: call get_goal early, do one verifiable step, then call update_goal.';
+  }
+  pushGoalEvent(goal, 'protocol_warning', { reason, result: clipGoalText(finalText || '', 500) });
+  return false;
 }
 
 async function continueGoal(goalId) {
@@ -1328,6 +1328,9 @@ async function continueGoal(goalId) {
         latestGoal.status = 'active';
         latestGoal.lastError = '';
         restartAfterGuidance = true;
+      } else if (stoppedByGoalStatus) {
+        // A goal tool intentionally changed the status, e.g. update_goal
+        // reached complete/blocked. Preserve the status-specific reason.
       } else {
         if (controller.signal.aborted && latestGoal.status === 'active') latestGoal.status = 'paused';
         latestGoal.lastError = e && e.message ? e.message : String(e);

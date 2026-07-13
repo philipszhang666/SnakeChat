@@ -68,6 +68,14 @@ function renderMarkdown(text) {
     mathBlocks.push({ display: true, formula: c });
     return `\x00MATH${mathBlocks.length - 1}\x00`;
   });
+  text = text.replace(/\\\[([\s\S]+?)\\\]/g, (m, c) => {
+    mathBlocks.push({ display: true, formula: c });
+    return `\x00MATH${mathBlocks.length - 1}\x00`;
+  });
+  text = text.replace(/\\\(([\s\S]+?)\\\)/g, (m, c) => {
+    mathBlocks.push({ display: false, formula: c });
+    return `\x00MATH${mathBlocks.length - 1}\x00`;
+  });
   text = text.replace(/(?<![\\$])\$([^\n$]+?)\$(?!\$)/g, (m, c) => {
     mathBlocks.push({ display: false, formula: c });
     return `\x00MATH${mathBlocks.length - 1}\x00`;
@@ -169,6 +177,16 @@ function renderMarkdownStreaming(text) {
   if (dollarCount % 2 === 1) {
     text = text + '\n$$';
   }
+  const bracketOpenCount = (text.match(/\\\[/g) || []).length;
+  const bracketCloseCount = (text.match(/\\\]/g) || []).length;
+  if (bracketOpenCount > bracketCloseCount) {
+    text = text + '\n\\]';
+  }
+  const parenOpenCount = (text.match(/\\\(/g) || []).length;
+  const parenCloseCount = (text.match(/\\\)/g) || []).length;
+  if (parenOpenCount > parenCloseCount) {
+    text = text + '\\)';
+  }
   
   // 3) 处理孤立的 ` `（行内代码）— 一行末尾刚开的 `xxx 没闭合时
   // 仅当末尾 token 看起来像未闭合行内代码才补；保守起见只看最后一行
@@ -246,6 +264,9 @@ const MARKDOWN_FILE_LINK_EXTENSIONS = new Set([
   'bat', 'cmd', 'ps1', 'sql', 'xml', 'yaml', 'yml', 'toml', 'ini', 'env',
   'vue', 'svelte', 'scss', 'sass', 'less', 'csv', 'log'
 ]);
+const MARKDOWN_SHELL_COMMAND_PATTERN = String.raw`(?:python(?:3(?:\.\d+)?)?|node|npm|pnpm|yarn|java|gcc|g\+\+|clang|bash|sh|cmd|powershell|pwsh)`;
+const MARKDOWN_COMMAND_WITH_PATH_ARG_RE = new RegExp(String.raw`\b${MARKDOWN_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+[\\/]`, 'i');
+const MARKDOWN_COMMAND_PATH_WITH_FILE_ARG_RE = new RegExp(String.raw`[\\/]${MARKDOWN_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+\.[A-Za-z0-9]{1,12}$`, 'i');
 
 function normalizeMarkdownFileLinkPath(path) {
   let p = String(path || '').trim();
@@ -274,6 +295,8 @@ function isLikelyMarkdownFileLinkPath(path) {
   if (/^(https?:|data:|mailto:|javascript:)/i.test(p)) return false;
   if (p.includes('..')) return false;
   if (/\/\s|\s\//.test(p)) return false;
+  if (/[\\/]/.test(p) && MARKDOWN_COMMAND_WITH_PATH_ARG_RE.test(p)) return false;
+  if (/[\\/]/.test(p) && MARKDOWN_COMMAND_PATH_WITH_FILE_ARG_RE.test(p)) return false;
   const extMatch = p.match(/\.([a-z0-9]+)$/i);
   if (!extMatch) return false;
   if (!MARKDOWN_FILE_LINK_EXTENSIONS.has(extMatch[1].toLowerCase())) return false;
@@ -285,16 +308,23 @@ function renderFilePathLinks(text) {
   const fileRefNamePart = '[\\w@.+\\-\\u4e00-\\u9fa5]+(?: [\\w@.+\\-\\u4e00-\\u9fa5]+)*';
   const fileRefPattern = new RegExp(
     '(^|[\\s([{\\uFF0C\\u3002\\uFF1B\\uFF1A\\u3001\\uFF08\\u3010\\u300A])'
-      + '((?:\\.\\/)?(?:(?:' + fileRefNamePart + '[\\\\/])+)?'
+      + '((?:(?:[A-Za-z]:)?[\\\\/]|\\.\\/)?(?:(?:' + fileRefNamePart + '[\\\\/])+)?'
       + fileRefNamePart
       + '\\.[A-Za-z0-9]{1,12}(?::\\d+(?:-\\d+)?|#L\\d+(?:-L?\\d+)?)?)'
       + '(?=$|[\\s)\\]}.,!?;:\\uFF0C\\u3002\\uFF1B\\uFF1A\\u3001\\uFF09\\u3011\\u300B])',
     'g'
   );
   return String(text || '').replace(fileRefPattern, (match, prefix, rawPath) => {
-    if (!isLikelyMarkdownFileLinkPath(rawPath)) return match;
-    const normalized = normalizeMarkdownFileLinkPath(rawPath);
-    return `${prefix}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(rawPath)}</a>`;
+    let listMarker = '';
+    let pathText = rawPath;
+    const markerMatch = String(rawPath || '').match(/^((?:[-*+]|\d+[.)])\s+)(.+)$/);
+    if (markerMatch && isLikelyMarkdownFileLinkPath(markerMatch[2])) {
+      listMarker = markerMatch[1];
+      pathText = markerMatch[2];
+    }
+    if (!isLikelyMarkdownFileLinkPath(pathText)) return match;
+    const normalized = normalizeMarkdownFileLinkPath(pathText);
+    return `${prefix}${listMarker}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(pathText)}</a>`;
   });
 }
 

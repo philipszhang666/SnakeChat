@@ -9,6 +9,15 @@ const settingsState = SettingsStateModule ? SettingsStateModule.state : state;
 const settingsPersistSettings = SettingsStateModule ? SettingsStateModule.persistSettings : persistSettings;
 const SETTINGS_PROVIDERS = SettingsConfig ? SettingsConfig.PROVIDERS : PROVIDERS;
 
+function settingsNormalizeCompressAutoThreshold(value) {
+  if (typeof normalizeCompressAutoThreshold === 'function') {
+    return normalizeCompressAutoThreshold(value);
+  }
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return 75;
+  return Math.max(50, Math.min(95, n));
+}
+
 // ============ 设置面板 ============
 
 function openSettings() {
@@ -103,9 +112,10 @@ function openSettings() {
   const compThresholdVal = document.getElementById('compressThresholdVal');
   const compKeep = document.getElementById('compressKeepLast');
   const compKeepVal = document.getElementById('compressKeepLastVal');
+  const compThresholdValue = settingsNormalizeCompressAutoThreshold(s.compressAutoThreshold);
   if (compEnabled) compEnabled.checked = !!s.compressAutoEnabled;
-  if (compThreshold) compThreshold.value = s.compressAutoThreshold || 75;
-  if (compThresholdVal) compThresholdVal.textContent = (s.compressAutoThreshold || 75) + '%';
+  if (compThreshold) compThreshold.value = compThresholdValue;
+  if (compThresholdVal) compThresholdVal.textContent = compThresholdValue + '%';
   if (compKeep) compKeep.value = s.compressKeepLast || 4;
   if (compKeepVal) compKeepVal.textContent = s.compressKeepLast || 4;
   // 🧪 自动信标
@@ -433,7 +443,7 @@ function saveAndClose() {
   const compThreshold = document.getElementById('compressAutoThreshold');
   const compKeep = document.getElementById('compressKeepLast');
   if (compEnabled) s.compressAutoEnabled = compEnabled.checked;
-  if (compThreshold) s.compressAutoThreshold = parseInt(compThreshold.value);
+  if (compThreshold) s.compressAutoThreshold = settingsNormalizeCompressAutoThreshold(compThreshold.value);
   if (compKeep) s.compressKeepLast = parseInt(compKeep.value);
   
   // 🧪 自动信标

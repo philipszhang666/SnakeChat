@@ -358,12 +358,24 @@ function goalScenarioObjective(body) {
   return match ? match[1].trim() : 'E2E goal';
 }
 
-function makeGoalScenarioResponse(body, callNumber) {
+function makeGoalScenarioResponse(body, callNumber, options = {}) {
   const turnMessages = goalScenarioMessages(body);
   const toolMessages = turnMessages.filter(msg => msg && msg.role === 'tool');
+  const hasNonGoalFirstTool = toolMessages.some(msg => msg.name === 'list_notes' || msg.tool_call_id === 'call_e2e_goal_list_notes');
   const hasGetGoal = toolMessages.some(msg => msg.name === 'get_goal' || msg.tool_call_id === 'call_e2e_goal_get');
   const hasUpdateGoal = toolMessages.some(msg => msg.name === 'update_goal' || msg.tool_call_id === 'call_e2e_goal_update');
   const objective = goalScenarioObjective(body);
+
+  if (options.goalScenarioFirstNonGoalTool && bodyHasTool(body, 'list_notes') && !hasNonGoalFirstTool) {
+    return makeOpenAiToolCallResponse(body, callNumber, {
+      id: 'call_e2e_goal_list_notes',
+      name: 'list_notes',
+      arguments: {
+        path: '.',
+        max_depth: 1
+      }
+    });
+  }
 
   if (!hasGetGoal) {
     return makeOpenAiToolCallResponse(body, callNumber, {
@@ -374,14 +386,25 @@ function makeGoalScenarioResponse(body, callNumber) {
   }
 
   if (!hasUpdateGoal) {
+    if (options.goalScenarioBlocked) {
+      return makeOpenAiToolCallResponse(body, callNumber, {
+        id: 'call_e2e_goal_update',
+        name: 'update_goal',
+        arguments: {
+          status: 'blocked',
+          progress: `E2E reported a repeated blocker for ${objective}`,
+          blocker_reason: 'E2E blocker requires user input'
+        }
+      });
+    }
     return makeOpenAiToolCallResponse(body, callNumber, {
       id: 'call_e2e_goal_update',
       name: 'update_goal',
       arguments: {
-        status: 'complete',
+        status: options.goalScenarioKeepActive ? 'active' : 'complete',
         progress: `E2E completed one verifiable step for ${objective}`,
         evidence: 'E2E mocked goal evidence',
-        final_summary: `Goal complete: ${objective}`
+        final_summary: options.goalScenarioKeepActive ? '' : `Goal complete: ${objective}`
       }
     });
   }
@@ -997,7 +1020,7 @@ async function mockLlm(route, options, state) {
   }
 
   if (options.goalScenario && bodyHasTool(body, 'get_goal')) {
-    await fulfillSafely(route, jsonResponse(makeGoalScenarioResponse(body, callNumber)));
+    await fulfillSafely(route, jsonResponse(makeGoalScenarioResponse(body, callNumber, options)));
     return;
   }
 

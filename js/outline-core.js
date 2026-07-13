@@ -243,6 +243,18 @@ function outlineMaxItemsSetting() {
   return Math.max(3, Number.isFinite(raw) ? raw : 8);
 }
 
+function outlineNextDeterministicId(usedIds, startIndex = 1) {
+  const used = usedIds instanceof Set ? usedIds : new Set();
+  let n = Math.max(1, parseInt(startIndex, 10) || 1);
+  let id = `a${n}`;
+  while (used.has(id)) {
+    n += 1;
+    id = `a${n}`;
+  }
+  used.add(id);
+  return id;
+}
+
 function outlinePromptVars(extra = {}) {
   const maxOutlineItems = outlineMaxItemsSetting();
   return { maxOutlineItems, ...extra };
@@ -250,12 +262,16 @@ function outlinePromptVars(extra = {}) {
 
 function buildOutlineSystemPromptForProfile(basePrompt, history, taskProfile) {
   const prompt = outlineTemplate(basePrompt || DEFAULT_OUTLINE_SYSTEM_PROMPT, outlinePromptVars());
-  if (!outlineShouldUseCodeProfile(taskProfile, history)) return prompt;
+  return prompt;
+}
+
+function buildOutlineProfileUserPrompt(history, taskProfile) {
+  if (!outlineShouldUseCodeProfile(taskProfile, history)) return '';
   let extra = outlinePromptText('outlineCodeTaskPrompt', CODE_TASK_OUTLINE_PROFILE_PROMPT, outlinePromptVars());
   if (taskProfile && taskProfile.suggestedCommands && taskProfile.suggestedCommands.length) {
     extra += `\n\n【建议验证命令】\n${taskProfile.suggestedCommands.map(x => `- ${x}`).join('\n')}`;
   }
-  return prompt + extra;
+  return extra;
 }
 
 function outlineToolCallEntries(outlineObj) {
@@ -841,7 +857,7 @@ async function callAPIWithOutline(options = {}) {
   OutlineCoreUiService.renderChatList();
   
   let aiMsg, msgIdx;
-  let conversationMessages, finalAnswer, completedNaturally, taskProfile;
+  let conversationMessages, finalAnswer, completedNaturally, taskProfile, profileUserPrompt;
   let startLoop, model, systemPrompt, maxRounds, history;
   let stoppedByToolPolicy = false;
 
@@ -856,7 +872,8 @@ async function callAPIWithOutline(options = {}) {
       systemPrompt,
       maxRounds,
       history,
-      taskProfile
+      taskProfile,
+      profileUserPrompt
     };
   };
 
@@ -879,6 +896,7 @@ async function callAPIWithOutline(options = {}) {
     maxRounds = snap.maxRounds;
     history = snap.history;
     taskProfile = snap.taskProfile || outlineFallbackTaskProfile(snap.history || history || [], '旧任务快照缺少 taskProfile，已回退关键词规则。');
+    profileUserPrompt = snap.profileUserPrompt || buildOutlineProfileUserPrompt(history || [], taskProfile);
     aiMsg.outline.taskProfile = taskProfile;
     completedNaturally = false;
     
@@ -953,6 +971,7 @@ async function callAPIWithOutline(options = {}) {
     startLoop = 0;
     taskProfile = outlineFallbackTaskProfile(history, '任务分类尚未完成，已建立初始恢复点。');
     systemPrompt = buildOutlineSystemPromptForProfile(s.outlineSystemPrompt || DEFAULT_OUTLINE_SYSTEM_PROMPT, history, taskProfile);
+    profileUserPrompt = buildOutlineProfileUserPrompt(history, taskProfile);
     saveSnap(0);
     aiMsg.outline.progressText = '🧭 识别任务类型...';
     OutlineCoreUiService.refreshMsgNode(msgIdx, c);
@@ -992,6 +1011,7 @@ async function callAPIWithOutline(options = {}) {
     }
     aiMsg.outline.taskProfile = taskProfile;
     systemPrompt = buildOutlineSystemPromptForProfile(s.outlineSystemPrompt || DEFAULT_OUTLINE_SYSTEM_PROMPT, history, taskProfile);
+    profileUserPrompt = buildOutlineProfileUserPrompt(history, taskProfile);
     saveSnap(startLoop);
   }
   
@@ -1059,6 +1079,10 @@ async function callAPIWithOutline(options = {}) {
         const safeConversationMessages = typeof privacyGuardPrepareHistory === 'function'
           ? privacyGuardPrepareHistory(conversationMessages, { format: s.apiFormat || 'openai' })
           : conversationMessages;
+        const profileMessages = profileUserPrompt ? [{ role: 'user', content: profileUserPrompt }] : [];
+        const safeProfileMessages = typeof privacyGuardPrepareHistory === 'function'
+          ? privacyGuardPrepareHistory(profileMessages, { format: s.apiFormat || 'openai' })
+          : profileMessages;
         const safeSystemPrompt = typeof privacyGuardSanitizeAuxiliarySystemText === 'function'
           ? privacyGuardSanitizeAuxiliarySystemText(typeof withActiveSkillPrompt === 'function' ? withActiveSkillPrompt(systemPrompt) : systemPrompt)
           : (typeof withActiveSkillPrompt === 'function' ? withActiveSkillPrompt(systemPrompt) : systemPrompt);
@@ -1068,7 +1092,7 @@ async function callAPIWithOutline(options = {}) {
           ? buildAnthropicMessages(safeHistory, { includeResponseGuard: false }) : [];
         const allMsgs = [...baseMsgs];
         
-        for (const m of safeConversationMessages) {
+        for (const m of [...safeProfileMessages, ...safeConversationMessages]) {
           if (m.role === 'assistant') {
             const parts = [];
             if (m.content && m.content.trim()) parts.push({ type: 'text', text: m.content });
@@ -1125,7 +1149,7 @@ async function callAPIWithOutline(options = {}) {
       } else if (s.apiFormat === 'responses') {
         body = {
           model,
-          input: outlineBuildResponsesInput(safeHistory, safeConversationMessages),
+          input: outlineBuildResponsesInput(safeHistory, [...safeProfileMessages, ...safeConversationMessages]),
           instructions: safeSystemPrompt,
           temperature: parseFloat(s.temperature),
           max_output_tokens: parseInt(s.maxTokens),
@@ -1134,10 +1158,12 @@ async function callAPIWithOutline(options = {}) {
         if (tools.length) body.tools = tools;
       } else {
         const baseMsgs = outlineBuildOpenAICompatMessages(safeHistory);
+        const profileMsgs = outlineBuildOpenAICompatMessages(safeProfileMessages);
         const outlineMsgs = outlineBuildOpenAICompatMessages(safeConversationMessages);
         const allMsgs = [
           { role: 'system', content: safeSystemPrompt },
           ...baseMsgs,
+          ...profileMsgs,
           ...outlineMsgs
         ];
         const fixedMsgs = (typeof fixOpenAIMessageSequence === 'function')
@@ -1618,8 +1644,8 @@ async function callAPIWithOutline(options = {}) {
 async function doFinalSummaryCall(conversationMessages, history, systemPrompt, model, outlineObj, abortSignal, recordChat) {
   const s = outlineCoreState.settings;
   
-  const finalSystemPrompt = (typeof withActiveSkillPrompt === 'function' ? withActiveSkillPrompt(systemPrompt) : systemPrompt) + 
-    '\n\n' + outlinePromptText('outlineForceFinalSystemPrompt', DEFAULT_OUTLINE_FORCE_FINAL_SYSTEM_PROMPT);
+  const finalSystemPrompt = (typeof withActiveSkillPrompt === 'function' ? withActiveSkillPrompt(systemPrompt) : systemPrompt);
+  const finalStagePrompt = outlinePromptText('outlineForceFinalSystemPrompt', DEFAULT_OUTLINE_FORCE_FINAL_SYSTEM_PROMPT);
   
   // 给当前 outline 状态做个文字快照，便于模型理解进展
   let outlineSnapshot = '';
@@ -1630,7 +1656,9 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
     }).join('\n');
   }
   
-  const finalUserMsg = outlinePromptText('outlineForceFinalUserPrompt', DEFAULT_OUTLINE_FORCE_FINAL_USER_PROMPT) + outlineSnapshot;
+  const finalUserMsg = [finalStagePrompt, outlinePromptText('outlineForceFinalUserPrompt', DEFAULT_OUTLINE_FORCE_FINAL_USER_PROMPT) + outlineSnapshot]
+    .filter(Boolean)
+    .join('\n\n');
   
   // ----- 构造请求（不带 tools 字段）-----
   let body;
@@ -1641,6 +1669,13 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
   const safeConversationMessages = typeof privacyGuardPrepareHistory === 'function'
     ? privacyGuardPrepareHistory(conversationMessages, { format: s.apiFormat || 'openai' })
     : conversationMessages;
+  const finalProfileUserPrompt = buildOutlineProfileUserPrompt(history, outlineObj && outlineObj.taskProfile);
+  const profileMessages = finalProfileUserPrompt
+    ? [{ role: 'user', content: finalProfileUserPrompt }]
+    : [];
+  const safeProfileMessages = typeof privacyGuardPrepareHistory === 'function'
+    ? privacyGuardPrepareHistory(profileMessages, { format: s.apiFormat || 'openai' })
+    : profileMessages;
   const safeFinalSystemPrompt = typeof privacyGuardSanitizeAuxiliarySystemText === 'function'
     ? privacyGuardSanitizeAuxiliarySystemText(finalSystemPrompt)
     : finalSystemPrompt;
@@ -1652,7 +1687,7 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
     const baseMsgs = (typeof buildAnthropicMessages === 'function') ? buildAnthropicMessages(safeHistory, { includeResponseGuard: false }) : [];
     const allMsgs = [...baseMsgs];
     
-    for (const m of safeConversationMessages) {
+    for (const m of [...safeProfileMessages, ...safeConversationMessages]) {
       if (m.role === 'assistant') {
         const parts = [];
         if (m.content && m.content.trim()) parts.push({ type: 'text', text: m.content });
@@ -1720,6 +1755,7 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
   } else if (s.apiFormat === 'responses') {
     const allMessages = [
       ...(safeHistory || []),
+      ...safeProfileMessages,
       ...(safeConversationMessages || []),
       { role: 'user', content: safeFinalUserMsg }
     ];
@@ -1734,10 +1770,12 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
     };
   } else {
     const baseMsgs = outlineBuildOpenAICompatMessages(safeHistory);
+    const profileMsgs = outlineBuildOpenAICompatMessages(safeProfileMessages);
     const outlineMsgs = outlineBuildOpenAICompatMessages(safeConversationMessages);
     const allMsgs = [
       { role: 'system', content: safeFinalSystemPrompt },
       ...baseMsgs,
+      ...profileMsgs,
       ...outlineMsgs,
       { role: 'user', content: safeFinalUserMsg }
     ];
@@ -1911,9 +1949,19 @@ function handleOutlineTool(name, args, outline) {
     // 保留旧条目的 toolCalls（按 id 匹配）
     const oldMap = {};
     for (const it of existingItems) oldMap[it.id] = it;
+    const explicitIds = new Set(items.map(it => String(it && it.id || '').trim()).filter(Boolean));
+    const usedIds = new Set();
     
-    outline.items = items.map(it => {
-      const id = String(it.id || ('a' + Math.random().toString(36).slice(2, 6)));
+    outline.items = items.map((it, idx) => {
+      const rawId = String(it.id || '').trim();
+      let id;
+      if (rawId && !usedIds.has(rawId)) {
+        id = rawId;
+        usedIds.add(id);
+      } else {
+        id = outlineNextDeterministicId(new Set([...explicitIds, ...usedIds]), idx + 1);
+        usedIds.add(id);
+      }
       const status = ['pending', 'active', 'done', 'skipped'].includes(it.status) ? it.status : 'pending';
       const old = oldMap[id];
       return {
@@ -1932,7 +1980,10 @@ function handleOutlineTool(name, args, outline) {
   }
   
   if (name === 'append_outline') {
-    const id = String(args.id || ('a' + Math.random().toString(36).slice(2, 6)));
+    const id = String(args.id || '').trim() || outlineNextDeterministicId(
+      new Set((outline.items || []).map(it => String(it && it.id || '').trim()).filter(Boolean)),
+      (outline.items || []).length + 1
+    );
     if (outline.items.some(it => it.id === id)) {
       return { ok: false, value: `条目 id "${id}" 已存在，请换一个 id 或用 update_outline` };
     }
@@ -2074,8 +2125,10 @@ window.AgentApp.define('outlineCore', {
   classifyOutlineTaskProfile,
   outlineShouldUseCodeProfile,
   outlineMaxItemsSetting,
+  outlineNextDeterministicId,
   outlinePromptVars,
   buildOutlineSystemPromptForProfile,
+  buildOutlineProfileUserPrompt,
   outlineToolCallEntries,
   outlineHasExecuteAction,
   outlineRecordAssistantSpeech,
