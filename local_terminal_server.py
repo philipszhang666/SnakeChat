@@ -15,7 +15,7 @@
     把仓库根目录的 start_agent.bat / start_agent.sh 复制到任何工作文件夹
     双击即可启动，自动锁定沙箱根 = 该文件夹
 
-🧱 业务实现已拆分到 server/ 包：
+🧱 业务实现已拆分到 server/ 包
     config / sandbox / handler / exec / files / web / git_ops / proxy
 本文件只负责：解析 CLI 参数 + banner + 启动 HTTP 服务。
 """

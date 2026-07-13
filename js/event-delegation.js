@@ -69,6 +69,7 @@
     'toggleInlineFileSide',
     'closeInlineFilePanel',
     'copyInlineFileContent',
+    'saveInlineFilePanel',
     'toggleInlineMarkdownPreview',
     'toggleInlinePythonPreview',
     'reloadInlineFilePanel',

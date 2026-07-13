@@ -411,6 +411,9 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             sandbox.copyInlineFileContent = () => {
               sandbox.inlineFileCopied = true;
             };
+            sandbox.saveInlineFilePanel = () => {
+              sandbox.inlineFileSaved = true;
+            };
             sandbox.editTool = (idx) => {
               sandbox.editedToolIdx = idx;
             };
@@ -1026,6 +1029,12 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
               preventDefault() {}
             });
             assert.strictEqual(sandbox.inlineFileCopied, true);
+
+            listeners.click({
+              target: eventTarget({ action: 'saveInlineFilePanel' }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.inlineFileSaved, true);
 
             listeners.click({
               target: eventTarget({

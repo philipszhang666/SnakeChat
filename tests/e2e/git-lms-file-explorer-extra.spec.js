@@ -428,6 +428,27 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#inlineFilePanel')).not.toHaveAttribute('hidden', '');
     await page.locator('[data-action="copyInlineFileContent"]').click();
     await expect.poll(() => page.evaluate(() => window.__e2eClipboard)).toContain('Sample file content');
+    const inlineSaveText = 'inline save through ctrl+s';
+    const inlineCodeMirror = page.locator('#inlineFilePanel .CodeMirror');
+    if (await inlineCodeMirror.count()) {
+      await inlineCodeMirror.click();
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(inlineSaveText);
+      await expect.poll(() => page.evaluate(() =>
+        document.querySelector('#inlineFilePanel .CodeMirror')?.CodeMirror?.getValue()
+      )).toBe(inlineSaveText);
+    } else {
+      await page.locator('#inlineFileTextContent').click();
+      await page.keyboard.press('Control+A');
+      await page.keyboard.type(inlineSaveText);
+      await expect(page.locator('#inlineFileTextContent')).toHaveValue(inlineSaveText);
+    }
+    await page.keyboard.press('Control+S');
+    await expect.poll(() => backend.backendCalls.some(call =>
+      call.action === 'write_file' &&
+      call.body.path === 'e2e-created.txt' &&
+      call.body.content === inlineSaveText
+    )).toBe(true);
     await page.locator('[data-action="closeInlineFilePanel"]').click();
 
     await openBlankExplorerContextMenu(page);

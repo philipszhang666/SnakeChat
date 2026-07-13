@@ -32,6 +32,7 @@ const FILE_EXPLORER_STATE = {
   editorPythonMode: false,
   editorCodeMirror: null,
   inlineCodeMirror: null,
+  editorFontSize: 13,
   editorFoldedLines: new Set(),
   editorBracketMatch: null,
   pdfPath: '',
@@ -99,6 +100,10 @@ const FILE_EXPLORER_GRAPH_SORT_DIRECTIONS = [
 ];
 const FILE_EXPLORER_GRAPH_SORT_FIELD_IDS = new Set(FILE_EXPLORER_GRAPH_SORT_FIELDS.map(item => item.id));
 const FILE_EXPLORER_GRAPH_SORT_DIRECTION_IDS = new Set(FILE_EXPLORER_GRAPH_SORT_DIRECTIONS.map(item => item.id));
+const FILE_EXPLORER_EDITOR_FONT_SIZE_KEY = 'aichat_file_editor_font_size_v1';
+const FILE_EXPLORER_EDITOR_FONT_SIZE_DEFAULT = 13;
+const FILE_EXPLORER_EDITOR_FONT_SIZE_MIN = 10;
+const FILE_EXPLORER_EDITOR_FONT_SIZE_MAX = 24;
 
 function fileExplorerBackendContext(options = {}) {
   return {
@@ -122,6 +127,66 @@ function fileExplorerStorageSet(key, value) {
     }
   } catch (_) {}
   try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+function clampFileExplorerEditorFontSize(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return FILE_EXPLORER_EDITOR_FONT_SIZE_DEFAULT;
+  return Math.max(FILE_EXPLORER_EDITOR_FONT_SIZE_MIN, Math.min(FILE_EXPLORER_EDITOR_FONT_SIZE_MAX, Math.round(num)));
+}
+
+function fileExplorerEditorLineHeight(fontSize = FILE_EXPLORER_STATE.editorFontSize) {
+  return Math.round(clampFileExplorerEditorFontSize(fontSize) * 1.6 * 10) / 10;
+}
+
+function loadFileExplorerEditorFontSize() {
+  const stored = fileExplorerStorageGet(FILE_EXPLORER_EDITOR_FONT_SIZE_KEY);
+  return clampFileExplorerEditorFontSize(stored || FILE_EXPLORER_EDITOR_FONT_SIZE_DEFAULT);
+}
+
+function applyFileExplorerEditorFontSize() {
+  const fontSize = clampFileExplorerEditorFontSize(FILE_EXPLORER_STATE.editorFontSize);
+  const lineHeight = fileExplorerEditorLineHeight(fontSize);
+  [fileEditorCodeShell(), inlineFileCodeShell()].forEach(shell => {
+    if (!shell) return;
+    shell.style.setProperty('--editor-font-size', `${fontSize}px`);
+    shell.style.setProperty('--editor-line-height', `${lineHeight}px`);
+    if (shell.classList.contains('python-editor')) {
+      shell.style.setProperty('--editor-gutter-width', `${Math.round(fontSize * 4.2)}px`);
+    } else {
+      shell.style.removeProperty('--editor-gutter-width');
+    }
+  });
+  if (FILE_EXPLORER_STATE.editorPythonMode) {
+    renderPythonEditor();
+    syncPythonEditorScroll();
+  }
+  refreshFileEditorCodeMirror();
+  refreshInlineCodeMirror();
+}
+
+function setFileExplorerEditorFontSize(value, options = {}) {
+  const next = clampFileExplorerEditorFontSize(value);
+  FILE_EXPLORER_STATE.editorFontSize = next;
+  if (options.persist !== false) fileExplorerStorageSet(FILE_EXPLORER_EDITOR_FONT_SIZE_KEY, String(next));
+  applyFileExplorerEditorFontSize();
+  return next;
+}
+
+function handleFileExplorerEditorWheelZoom(event) {
+  if (!event || !event.ctrlKey || event.deltaY === 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const direction = event.deltaY < 0 ? 1 : -1;
+  setFileExplorerEditorFontSize(FILE_EXPLORER_STATE.editorFontSize + direction);
+}
+
+function bindFileExplorerEditorWheelZoom(shell) {
+  if (!shell || shell.dataset.editorWheelZoomBound === '1') return;
+  shell.dataset.editorWheelZoomBound = '1';
+  shell.addEventListener('wheel', handleFileExplorerEditorWheelZoom, { passive: false });
+  shell.title = shell.title || '按住 Ctrl 并滚动鼠标滚轮可调整编辑器字号';
+  applyFileExplorerEditorFontSize();
 }
 
 function normalizeGraphicalFileExplorerViewMode(mode) {
@@ -1046,6 +1111,8 @@ function ensureFileEditorCodeMirror(path = FILE_EXPLORER_STATE.editorPath) {
   const isPython = isFileExplorerPythonFile(path);
   if (FILE_EXPLORER_STATE.editorCodeMirror) {
     FILE_EXPLORER_STATE.editorCodeMirror.setOption('mode', mode);
+    bindFileExplorerEditorWheelZoom(FILE_EXPLORER_STATE.editorCodeMirror.getWrapperElement && FILE_EXPLORER_STATE.editorCodeMirror.getWrapperElement());
+    applyFileExplorerEditorFontSize();
     return FILE_EXPLORER_STATE.editorCodeMirror;
   }
   const cm = window.CodeMirror.fromTextArea(textarea, {
@@ -1077,6 +1144,8 @@ function ensureFileEditorCodeMirror(path = FILE_EXPLORER_STATE.editorPath) {
   });
   FILE_EXPLORER_STATE.editorCodeMirror = cm;
   shell.classList.add('cm-active');
+  bindFileExplorerEditorWheelZoom(cm.getWrapperElement && cm.getWrapperElement());
+  applyFileExplorerEditorFontSize();
   return cm;
 }
 
@@ -1322,6 +1391,7 @@ function handlePythonEditorKeydown(event) {
 function bindPythonFileEditor() {
   const textarea = fileEditorTextarea();
   const gutter = fileEditorCodeGutter();
+  bindFileExplorerEditorWheelZoom(fileEditorCodeShell());
   if (textarea && textarea.dataset.pythonEditorBound !== '1') {
     textarea.dataset.pythonEditorBound = '1';
     textarea.addEventListener('input', () => {
@@ -2810,7 +2880,11 @@ function ensureInlineCodeMirror(path) {
   const textarea = inlineFileTextarea();
   const shell = inlineFileCodeShell();
   if (!textarea || !shell) return null;
-  if (FILE_EXPLORER_STATE.inlineCodeMirror) return FILE_EXPLORER_STATE.inlineCodeMirror;
+  if (FILE_EXPLORER_STATE.inlineCodeMirror) {
+    bindFileExplorerEditorWheelZoom(FILE_EXPLORER_STATE.inlineCodeMirror.getWrapperElement && FILE_EXPLORER_STATE.inlineCodeMirror.getWrapperElement());
+    applyFileExplorerEditorFontSize();
+    return FILE_EXPLORER_STATE.inlineCodeMirror;
+  }
   const targetPath = path || FILE_EXPLORER_STATE.inlineFilePath;
   const isPython = isFileExplorerPythonFile(targetPath);
   const mode = fileExplorerCodeMirrorMode(targetPath);
@@ -2845,6 +2919,8 @@ function ensureInlineCodeMirror(path) {
   });
   FILE_EXPLORER_STATE.inlineCodeMirror = cm;
   shell.classList.add('cm-active');
+  bindFileExplorerEditorWheelZoom(cm.getWrapperElement && cm.getWrapperElement());
+  applyFileExplorerEditorFontSize();
   scheduleInlineFileLayoutRefresh();
   return cm;
 }
@@ -3112,10 +3188,12 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
   shell.appendChild(textarea);
   body.appendChild(shell);
   body.appendChild(preview);
+  bindFileExplorerEditorWheelZoom(shell);
   footer.innerHTML = `
     <button class="btn" type="button" data-action="copyInlineFileContent">复制内容</button>
     ${isMarkdown ? '<button class="btn" type="button" id="inlineMarkdownToggle" data-action="toggleInlineMarkdownPreview">Markdown 预览</button>' : ''}
     ${isPython ? '<button class="btn" type="button" id="inlinePythonToggle" data-action="toggleInlinePythonPreview">Python 高亮预览</button>' : ''}
+    <button class="btn btn-primary" type="button" data-action="saveInlineFilePanel">保存修改</button>
     <button class="btn" type="button" data-action="reloadInlineFilePanel">重新读取</button>
   `;
   const setContent = (content, disabled = false) => {
@@ -3250,12 +3328,45 @@ function copyInlineFileContent() {
   });
 }
 
+async function saveInlineFilePanel() {
+  const path = FILE_EXPLORER_STATE.inlineFilePath;
+  const textarea = inlineFileTextarea();
+  if (!path || !textarea || !isFileExplorerTextFile(path)) return;
+  if (textarea.disabled) {
+    setInlineFileStatus('文件仍在读取或当前不可编辑', 'error');
+    return;
+  }
+  syncInlineTextareaFromCodeMirror();
+  const content = textarea.value;
+  setInlineFileStatus('等待保存确认...', 'loading');
+  const preview = content.slice(0, 500) + (content.length > 500 ? '\n...' : '');
+  try {
+    const r = await callAgentBackend(
+      'write_file',
+      { path, content },
+      '保存主页面文件修改',
+      `[保存文件] ${path}\n\n字符数：${content.length}\n\n${preview}`,
+      fileExplorerBackendContext()
+    );
+    if (typeof r === 'string') throw new Error(r);
+    if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
+    const previewEl = document.querySelector('#inlineFileBody .inline-markdown-preview, #inlineFileBody .inline-code-preview');
+    if (previewEl && !previewEl.hidden && isFileExplorerMarkdownFile(path)) renderMarkdownPreviewInto(previewEl, content);
+    if (previewEl && !previewEl.hidden && isFileExplorerPythonFile(path)) renderPythonPreviewInto(previewEl, content);
+    setInlineFileStatus(`已保存 ${formatSize(Number(r.bytes_written || 0))}`, 'ok');
+    fileExplorerToast('文件已保存');
+    if (FILE_EXPLORER_STATE.visible) refreshFileExplorer();
+  } catch (e) {
+    setInlineFileStatus(e.message || String(e), 'error');
+  }
+}
+
 async function reloadInlineFilePanel() {
   const path = FILE_EXPLORER_STATE.inlineFilePath;
   const kind = FILE_EXPLORER_STATE.inlineFileKind;
   if (!path) return;
   if (kind === 'pdf') await openPdfInMainPanel(path);
-  else if (kind === 'text' || kind === 'markdown') await openTextInMainPanel(path);
+  else if (kind === 'text' || kind === 'markdown' || kind === 'python') await openTextInMainPanel(path);
 }
 
 function openInlineFileInNewTab() {
@@ -3403,6 +3514,25 @@ async function saveFileEditor() {
     if (FILE_EXPLORER_STATE.visible) refreshFileExplorer();
   } catch (e) {
     setFileEditorStatus(e.message || String(e), 'error');
+  }
+}
+
+function handleFileExplorerSaveShortcut(event) {
+  if (!event || !(event.ctrlKey || event.metaKey) || event.altKey || String(event.key || '').toLowerCase() !== 's') return;
+  const target = event.target;
+  const closest = target && typeof target.closest === 'function' ? selector => target.closest(selector) : () => null;
+  const modal = document.getElementById('fileEditorModal');
+  if (modal && modal.classList.contains('show') && closest('#fileEditorModal')) {
+    event.preventDefault();
+    event.stopPropagation();
+    saveFileEditor();
+    return;
+  }
+  const panel = document.getElementById('inlineFilePanel');
+  if (panel && !panel.hidden && closest('#inlineFilePanel')) {
+    event.preventDefault();
+    event.stopPropagation();
+    saveInlineFilePanel();
   }
 }
 
@@ -4546,6 +4676,7 @@ function handleFileExplorerContextMenuAction(event) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  setFileExplorerEditorFontSize(loadFileExplorerEditorFontSize(), { persist: false });
   bindPythonFileEditor();
   const list = document.getElementById('fileExplorerList');
   if (list) {
@@ -4565,6 +4696,7 @@ document.addEventListener('DOMContentLoaded', () => {
       closeGraphicalFileExplorer();
     }
   });
+  document.addEventListener('keydown', handleFileExplorerSaveShortcut, true);
   window.addEventListener('resize', enforceInlineFileResponsive);
   bindInlineFileResizer();
   setSidebarExplorerMode(false);
@@ -4623,6 +4755,7 @@ window.setFileEditorMarkdownPreview = setFileEditorMarkdownPreview;
 window.setFileEditorCodePreview = setFileEditorCodePreview;
 window.toggleFileEditorMarkdownPreview = toggleFileEditorMarkdownPreview;
 window.toggleFileEditorCodePreview = toggleFileEditorCodePreview;
+window.saveInlineFilePanel = saveInlineFilePanel;
 window.reloadInlineFilePanel = reloadInlineFilePanel;
 window.copyInlineFileContent = copyInlineFileContent;
 window.openInlineFileInNewTab = openInlineFileInNewTab;
@@ -4649,6 +4782,7 @@ window.AgentApp.define('fileExplorer', {
   openFileEditor,
   closeFileEditor,
   saveFileEditor,
+  saveInlineFilePanel,
   openPdfViewer,
   openImageViewer,
   openMediaViewer,

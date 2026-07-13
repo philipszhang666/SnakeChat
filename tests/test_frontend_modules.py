@@ -1863,6 +1863,7 @@ class FrontendModuleTests(unittest.TestCase):
             self.assertNotIn(inline_attr, file_explorer_js)
         for delegated_attr in (
             'data-action="copyInlineFileContent"',
+            'data-action="saveInlineFilePanel"',
             'data-action="toggleInlineMarkdownPreview"',
             'data-action="toggleInlinePythonPreview"',
             'data-action="reloadInlineFilePanel"',
