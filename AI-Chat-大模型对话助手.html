@@ -267,6 +267,7 @@
         <!-- 输入区 -->
         <div class="input-area">
           <div class="input-inner" id="inputInner">
+            <div class="prompt-suggestions" id="promptSuggestions" role="listbox" aria-label="最近使用的 Prompt 建议" hidden></div>
             <div class="pending-atts" id="pendingAtts"></div>
             <textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行 / 可拖拽或粘贴图片..." rows="1"></textarea>
             <div class="input-bar">
@@ -2162,6 +2163,7 @@
 <script src="js/config.js"></script>
 <script src="js/state.js"></script>
 <script src="js/utils.js"></script>
+<script src="js/prompt-history.js"></script>
 <script src="js/project-instructions.js"></script>
 <script src="js/project-memory.js"></script>
 <script src="js/mcp-skills.js"></script>

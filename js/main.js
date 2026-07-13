@@ -194,6 +194,7 @@ async function init() {
   // 10. 杈撳叆妗嗚嚜閫傚簲楂樺害
   const input = document.getElementById('input');
   if (input) {
+    if (typeof initPromptAutocomplete === 'function') initPromptAutocomplete(input);
     input.addEventListener('input', () => {
       input.style.height = 'auto';
       input.style.height = Math.min(input.scrollHeight, 100) + 'px';
@@ -204,6 +205,8 @@ async function init() {
       }, 300);
     });
     input.addEventListener('keydown', e => {
+      if (typeof handlePromptHistoryKeydown === 'function' && handlePromptHistoryKeydown(e)) return;
+      if (e.isComposing) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         onSend();

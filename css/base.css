@@ -665,9 +665,15 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 
 /* 输入区 */
 .input-area{padding:12px 20px 20px;border-top:1px solid var(--border)}
-.input-inner{max-width:800px;margin:0 auto;background:var(--bg-input);border:1px solid var(--border);border-radius:14px;padding:8px;transition:border-color .2s}
+.input-inner{position:relative;max-width:800px;margin:0 auto;background:var(--bg-input);border:1px solid var(--border);border-radius:14px;padding:8px;transition:border-color .2s}
 .input-inner:focus-within{border-color:var(--primary)}
 .input-inner.drag-over{border-color:var(--primary);background:rgba(79,70,229,.05)}
+.prompt-suggestions{position:absolute;left:0;right:0;bottom:calc(100% + 8px);z-index:120;display:flex;flex-direction:column;gap:2px;padding:6px;background:var(--bg-sidebar);border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 30px rgba(15,23,42,.18);max-height:224px;overflow:auto}
+.prompt-suggestions[hidden]{display:none}
+.prompt-suggestion{width:100%;height:34px;border:0;border-radius:8px;background:transparent;color:var(--text);cursor:pointer;display:flex;align-items:center;padding:0 10px;text-align:left;font-family:inherit;font-size:13px;line-height:1.2}
+.prompt-suggestion:hover{background:var(--bg-hover)}
+.prompt-suggestion.is-active{background:rgba(79,70,229,.10);color:var(--primary)}
+.prompt-suggestion-text{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pending-atts{display:none;flex-wrap:wrap;gap:6px;padding:8px}
 .pending-atts.show{display:flex}
 .pending-att{position:relative;background:var(--bg-sidebar);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:12px;display:flex;align-items:center;gap:6px;max-width:200px}

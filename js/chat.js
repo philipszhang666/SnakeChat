@@ -108,6 +108,7 @@ function _clearComposerAfterSend(input) {
     input.value = '';
     input.style.height = 'auto';
   }
+  if (typeof hidePromptSuggestions === 'function') hidePromptSuggestions();
   chatState.pendingAttachments = [];
   if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -146,6 +147,7 @@ function queueMidrunGuidance(chat, input, text) {
     task.guidanceRequested = true;
   }
   if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   _clearComposerAfterSend(input);
 
   const runningTask = chatTaskByIdFromState(chat.id);
@@ -302,6 +304,7 @@ async function submitEditResend(input) {
   c.messages.push(userMsg);
   if (c.messages.length === 1) c.title = (text || '附件对话').slice(0, 30);
   if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   if (typeof maybeInsertBeacon === 'function') {
     try { maybeInsertBeacon(c); } catch (e) { console.warn('[beacon] 插入失败:', e); }
   }
@@ -1647,6 +1650,7 @@ async function onSend() {
     }
     const scheduled = createScheduledMessageFromComposer(c, input, text);
     if (!scheduled) return;
+    if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
     if (c.messages.length === 1) c.title = (text || '定时任务').slice(0, 30);
     if (typeof maybeInsertBeacon === 'function') {
       try { maybeInsertBeacon(c); } catch (e) { console.warn('[beacon] 插入失败:', e); }
@@ -1665,6 +1669,7 @@ async function onSend() {
   
   // ⭐ Trace: 记录一条用户消息（仅本地）
   if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   
   // 🧪 自动信标：在最新 user 消息之前可能插入一条隐藏的"记代号"消息
   //    判定逻辑在 beacon.js：按用户消息计数 + 间隔
