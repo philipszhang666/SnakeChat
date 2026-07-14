@@ -167,7 +167,9 @@ function updateSendBtn() {
   const currentGenerating = apiStreamIsCurrentChatGenerating();
   if (currentGenerating) {
     const input = document.getElementById('input');
-    const hasDraft = !!(input && input.value.trim()) || !!(apiStreamState.pendingAttachments && apiStreamState.pendingAttachments.length);
+    const hasDraft = typeof hasComposerDraftForChat === 'function'
+      ? hasComposerDraftForChat(c && c.id, input ? input.value : '')
+      : (!!(input && input.value.trim()) || !!(apiStreamState.pendingAttachments && apiStreamState.pendingAttachments.length));
     const task = c ? apiStreamChatTaskById(c.id) : null;
     const canGuide = !!(task && task.isGenerating && (!task.mode || task.mode === 'chat'));
     if (hasDraft && canGuide && !debateWaitingManual) {

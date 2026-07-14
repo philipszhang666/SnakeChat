@@ -1188,6 +1188,7 @@ async function callAPIWithOutline(options = {}) {
           label: '大纲模式',
           extraMessages: conversationMessages,
           mutableMessages: conversationMessages,
+          skipChatCompression: true,
           chat: c,
           chatId: taskChatId,
           signal: abortSignal,
@@ -1659,6 +1660,20 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
   const finalUserMsg = [finalStagePrompt, outlinePromptText('outlineForceFinalUserPrompt', DEFAULT_OUTLINE_FORCE_FINAL_USER_PROMPT) + outlineSnapshot]
     .filter(Boolean)
     .join('\n\n');
+
+  if (typeof ensureContextBeforeAgentRun === 'function') {
+    const ok = await ensureContextBeforeAgentRun(recordChat || null, {
+      label: '大纲模式收尾',
+      extraMessages: [...(conversationMessages || []), { role: 'user', content: finalUserMsg }],
+      mutableMessages: conversationMessages,
+      skipChatCompression: true,
+      chat: recordChat || null,
+      chatId: recordChat && recordChat.id || '',
+      signal: abortSignal,
+      isStopped: () => !!(abortSignal && abortSignal.aborted)
+    });
+    if (!ok) throw new Error('自动压缩失败，无法安全发起大纲收尾请求');
+  }
   
   // ----- 构造请求（不带 tools 字段）-----
   let body;
@@ -1875,9 +1890,9 @@ function consumePendingAttachments(conversationMessages, outlineObj, chatId) {
   
   // 分类
   const images = atts.filter(a => a.type === 'image' && a.data);
-  const textFiles = atts.filter(a => a.type === 'file' && a.text);
+  const textFiles = atts.filter(a => a.type === 'file' && typeof a.text === 'string');
   const otherFiles = atts.filter(a => 
-    !(a.type === 'image' && a.data) && !(a.type === 'file' && a.text)
+    !(a.type === 'image' && a.data) && !(a.type === 'file' && typeof a.text === 'string')
   );
   
   // 文本文件 → 拼到 textPart

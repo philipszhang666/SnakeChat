@@ -1014,13 +1014,81 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn("function compressionWrapSummaryContent(summary, layer = 'base', transientLabel = '')", tokens_js)
         self.assertIn("const summaryLayer = preservedSummaries.length && !shouldMergeSummaries ? 'delta' : 'base';", tokens_js)
         self.assertIn("const undoCompressedMessages = summaryLayer === 'delta'", tokens_js)
-        self.assertIn("chat.messages = summaryLayer === 'delta'", tokens_js)
-        self.assertIn("? [...preservedSummaries, summaryMsg, ...toKeep]", tokens_js)
+        self.assertIn('function compressedMessagesForApi(chat, sourceMessages = null)', tokens_js)
+        self.assertIn('chat.compressedContext = {', tokens_js)
+        self.assertIn('summaryMessages: replacementSummaries.map', tokens_js)
+        self.assertIn('applyCompressionSummaryMarkers(chat)', tokens_js)
+        self.assertNotIn("chat.messages = summaryLayer === 'delta'", tokens_js)
         self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer)", tokens_js)
         self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer, label)", tokens_js)
         self.assertIn('_summaryLayer: summaryLayer', tokens_js)
+        chat_js = (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
+        self.assertIn('<details class="compression-summary-card">', chat_js)
+        self.assertIn('点击展开完整摘要', chat_js)
+        self.assertNotIn('discarded-context-badge', chat_js)
+        self.assertIn('.compression-summary-card{', base_css)
+        self.assertNotIn('.discarded-context-msg{', base_css)
+        self.assertNotIn('.discarded-context-badge{', base_css)
+        dialog_manager_js = (ROOT / 'js' / 'dialog-manager.js').read_text(encoding='utf-8')
+        self.assertIn('discarded: compressionSummaryIdx > 0 && index < compressionSummaryIdx', dialog_manager_js)
+        self.assertIn("dialog-timeline-point ${i === activeIdx ? 'active' : ''} ${anchor.discarded ? 'discarded' : ''}", dialog_manager_js)
+        self.assertIn('.dialog-timeline-point.discarded .dialog-timeline-point-dot', base_css)
         self.assertNotIn('【对话历史摘要】（由 AI', tokens_js)
         self.assertNotIn('历史摘要】（自动压缩', tokens_js)
+
+    def test_tokens_compression_does_not_auto_patch_file_paths(self):
+        tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
+        refs_fn = tokens_js[tokens_js.index('function compressionCollectRequiredRefs'):tokens_js.index('function compressionMissingRefs')]
+        missing_fn = tokens_js[tokens_js.index('function compressionMissingRefs'):tokens_js.index('function compressionValidateSummary')]
+        retry_block = tokens_js[tokens_js.index('请重写摘要。要求：'):tokens_js.index('const retrySummary = await')]
+        self.assertIn('artifactIds: new Set()', refs_fn)
+        self.assertIn('checkpointIds: new Set()', refs_fn)
+        self.assertNotIn('filePaths', refs_fn)
+        self.assertNotIn('filePaths', missing_fn)
+        self.assertNotIn('自动补全的关键文件路径', tokens_js)
+        self.assertNotIn('必须保留文件路径', tokens_js)
+        self.assertNotIn('artifact_id / checkpoint_id / 文件路径', retry_block)
+        self.assertIn('只保留关键工作集文件路径', tokens_js)
+        self.assertIn('所有 artifact_id、checkpoint_id 必须逐字保留', tokens_js)
+
+    def test_compression_uses_streaming_helper_call(self):
+        tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
+        api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
+
+        self.assertIn('async function _apiReadHelperStreamText', api_core_js)
+        self.assertIn('const helperStream = !!(options && options.stream === true);', api_core_js)
+        self.assertIn('stream: helperStream', api_core_js)
+        self.assertIn('helperBody.stream_options = { include_usage: true };', api_core_js)
+        self.assertIn('isStream: true', api_core_js)
+        self.assertIn('辅助调用流式超时', api_core_js)
+        self.assertIn('function _apiHelperStreamUnsupportedError', api_core_js)
+        self.assertIn('_helperStreamFallbackTried: true', api_core_js)
+        self.assertGreaterEqual(tokens_js.count('stream: true'), 2)
+
+    def test_internal_agent_compression_does_not_rewrite_outer_chat(self):
+        tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
+        api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
+        outline_core_js = (ROOT / 'js' / 'outline-core.js').read_text(encoding='utf-8')
+
+        ensure_fn = tokens_js[tokens_js.index('async function ensureContextBeforeAgentRun'):tokens_js.index('async function compressChat')]
+        self.assertIn('const ignoreChatForBudget = !!options.ignoreChat || isConcurrentChat;', ensure_fn)
+        self.assertIn('const skipChatCompression = !!options.skipChatCompression;', ensure_fn)
+        self.assertIn('compressionBudgetInfo(c, extraMessages, { ignoreChat: ignoreChatForBudget })', ensure_fn)
+        self.assertIn('if (skipChatCompression) {', ensure_fn)
+        self.assertIn('if (skipChatCompression) return true;', ensure_fn)
+
+        run_loop_guard = api_core_js[api_core_js.index("label: '师生/隔离工具循环'"):api_core_js.index('if (!ok) throw new Error', api_core_js.index("label: '师生/隔离工具循环'"))]
+        self.assertIn('ignoreChat: true', run_loop_guard)
+        self.assertIn('skipChatCompression: true', run_loop_guard)
+        self.assertIn("if (options.chat && typeof compressedMessagesForApi === 'function')", api_core_js)
+        self.assertIn('history = compressedMessagesForApi(options.chat, history);', api_core_js)
+        self.assertIn('chat: c', api_core_js)
+
+        outline_guard = outline_core_js[outline_core_js.index("label: '大纲模式'"):outline_core_js.index('if (!ok) throw new Error', outline_core_js.index("label: '大纲模式'"))]
+        self.assertIn('skipChatCompression: true', outline_guard)
+        self.assertIn("label: '大纲模式收尾'", outline_core_js)
+        self.assertIn('extraMessages: [...(conversationMessages || []), { role: \'user\', content: finalUserMsg }]', outline_core_js)
 
     def test_auto_compression_threshold_setting_is_respected(self):
         tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
@@ -1672,6 +1740,8 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertNotIn('goalChatRecordedTokenTotal(goalChatById(goal.chatId))', goal_token_accounting)
         self.assertIn('const messageCountBeforeRun = chat.messages.length', goal_core_js)
         self.assertIn('const turnPrompt = buildGoalTurnPrompt(freshGoal, turnGuidance)', goal_core_js)
+        self.assertIn('turn: String(Math.max(1, Number(goal.turnCount || 0) || 0))', goal_core_js)
+        self.assertNotIn('turn: String(goal.turnCount + 1)', goal_core_js)
         self.assertIn('const contextMessages = buildGoalConversationContext(chat, userMsgIdx)', goal_core_js)
         self.assertIn("initialMessages: [...contextMessages, { role: 'user', content: turnPrompt }]", goal_core_js)
         self.assertIn('const tokenStatsBefore = goalChatRecordedTokenTotal(chat)', goal_core_js)
@@ -1998,10 +2068,31 @@ class FrontendModuleTests(unittest.TestCase):
         chat_js = (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8')
 
         self.assertIn('function chatReadFileAsDataUrl', chat_js)
+        self.assertIn('function chatReadFileAsText', chat_js)
+        self.assertIn('function pendingAttachmentsForChat', chat_js)
+        self.assertIn('function hasPendingAttachmentReads', chat_js)
+        self.assertIn('function preparePendingAttachmentsForSend', chat_js)
+        self.assertIn('_pending: true', chat_js)
         self.assertIn('function chatDropContainsDirectory', chat_js)
         self.assertIn('reader.readAsArrayBuffer(file)', chat_js)
         self.assertIn('文件夹请拖到资源管理器上传', chat_js)
         self.assertNotIn('readAsDataURL(file)', chat_js)
+
+    def test_chat_attachment_save_and_adapters_keep_large_and_empty_text_attachments(self):
+        state_js = (ROOT / 'js' / 'state.js').read_text(encoding='utf-8')
+        api_adapters_js = (ROOT / 'js' / 'api-adapters.js').read_text(encoding='utf-8')
+        outline_core_js = (ROOT / 'js' / 'outline-core.js').read_text(encoding='utf-8')
+
+        self.assertIn('function sanitizeMessageAttachmentsForSave', state_js)
+        self.assertNotIn('dataSize < 5 * 1024 * 1024', state_js)
+        self.assertNotIn('附件超大', state_js)
+        self.assertIn('delete clean._pending', state_js)
+        self.assertIn('delete clean._error', state_js)
+
+        self.assertIn('function attachmentHasText(att)', api_adapters_js)
+        self.assertIn("typeof att.text === 'string'", api_adapters_js)
+        self.assertNotIn("a.type === 'file' && a.text", api_adapters_js)
+        self.assertIn("a.type === 'file' && typeof a.text === 'string'", outline_core_js)
 
     def test_file_explorer_context_menu_supports_copy_cut_paste_and_download(self):
         file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
@@ -2787,12 +2878,30 @@ class FrontendModuleTests(unittest.TestCase):
             'data-handler="requestStopDebate"',
             'data-handler="debateManualPass"',
             'data-handler="debateManualWin"',
+            'data-handler="debateRegenerateRejectedSpeech"',
             'data-extra-value="pro"',
             'data-extra-value="con"',
             'data-handler="copyMsg"',
             'data-value-type="number"',
         ):
             self.assertIn(delegated_attr, debate_mode_js)
+
+    def test_debate_history_cards_show_role_models(self):
+        debate_mode_js = (ROOT / 'js' / 'debate-mode.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
+
+        self.assertIn('function _debateRoleModel(meta, role)', debate_mode_js)
+        self.assertIn('function _debateHistoryRolePill(meta, role, scoreValue = null)', debate_mode_js)
+        self.assertIn('function debateRegenerateRejectedSpeech(chatId)', debate_mode_js)
+        self.assertIn('function _debateRemoveRejectedSpeechTurn(chat, waiting)', debate_mode_js)
+        self.assertIn("_debateHistoryRolePill(meta, 'pro', score.pro || 0)", debate_mode_js)
+        self.assertIn("_debateHistoryRolePill(meta, 'con', score.con || 0)", debate_mode_js)
+        self.assertIn("_debateHistoryRolePill(meta, 'judge')", debate_mode_js)
+        self.assertIn('.debate-history-meta > span', base_css)
+        self.assertNotIn('.debate-history-meta span{', base_css)
+        self.assertIn('.debate-history-meta .debate-role-pill', base_css)
+        self.assertIn('.debate-role-model', base_css)
+        self.assertIn('.debate-role-score', base_css)
 
     def test_dialog_manager_click_controls_use_event_delegation(self):
         dialog_manager_js = (ROOT / 'js' / 'dialog-manager.js').read_text(encoding='utf-8')

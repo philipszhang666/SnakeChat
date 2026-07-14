@@ -49,6 +49,14 @@ function attachOpenAIReasoningContent(outMsg, sourceMsg) {
   return outMsg;
 }
 
+function attachmentHasText(att) {
+  return !!(att && typeof att.text === 'string');
+}
+
+function formatTextAttachment(att) {
+  return `\n\n[附件: ${att.name}]\n\`\`\`\n${att.text}\n\`\`\``;
+}
+
 function appendTextTail(existing, text) {
   const current = typeof existing === 'string' ? existing : '';
   return current ? `${current}\n\n${text}` : text;
@@ -165,8 +173,8 @@ function buildOpenAIMessages(history, options = {}) {
     const attachments = m.attachments || [];
     const imageAttachments = attachments.filter(a => a.type === 'image' && a.data && !a._stripped);
     const textFileTexts = attachments.filter(a => 
-      a.type === 'file' && a.text
-    ).map(a => `\n\n[附件: ${a.name}]\n\`\`\`\n${a.text}\n\`\`\``).join('');
+      a.type === 'file' && attachmentHasText(a)
+    ).map(formatTextAttachment).join('');
     
     const strippedNotes = attachments.filter(a => a._stripped).map(a => 
       `\n\n[附件: ${a.name} - ⚠️ 数据已丢失]`
@@ -296,8 +304,8 @@ function buildOpenAIResponsesInput(history, options = {}) {
     const imageAttachments = attachments.filter(a => a.type === 'image' && a.data && !a._stripped);
     const pdfAttachments = attachments.filter(a => a.mime === 'application/pdf' && a.data && !a._stripped);
     const textFileTexts = attachments.filter(a => 
-      a.type === 'file' && a.text && a.mime !== 'application/pdf'
-    ).map(a => `\n\n[附件: ${a.name}]\n\`\`\`\n${a.text}\n\`\`\``).join('');
+      a.type === 'file' && attachmentHasText(a) && a.mime !== 'application/pdf'
+    ).map(formatTextAttachment).join('');
     const strippedNotes = attachments.filter(a => a._stripped).map(a => 
       `\n\n[附件: ${a.name} - ⚠️ 数据已丢失]`
     ).join('');
@@ -435,8 +443,8 @@ function buildAnthropicMessages(history, options = {}) {
       a.mime === 'application/pdf' && a.data && !a._stripped
     );
     const fileTexts = attachments.filter(a => 
-      a.type === 'file' && a.text && a.mime !== 'application/pdf'
-    ).map(a => `\n\n[附件: ${a.name}]\n\`\`\`\n${a.text}\n\`\`\``).join('');
+      a.type === 'file' && attachmentHasText(a) && a.mime !== 'application/pdf'
+    ).map(formatTextAttachment).join('');
     const strippedNotes = attachments.filter(a => a._stripped).map(a => 
       `\n\n[附件: ${a.name} - ⚠️ 数据已丢失]`
     ).join('');

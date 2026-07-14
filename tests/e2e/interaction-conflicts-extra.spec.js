@@ -186,7 +186,7 @@ test.describe('extra interaction conflicts without real API keys', () => {
   });
 
   test('debate mode can be stopped and resumed from settings, then handled through manual review actions', async ({ page }) => {
-    const { clientErrors } = await gotoApp(page, {
+    const { backend, clientErrors } = await gotoApp(page, {
       stream: true,
       replyPrefix: 'Debate conflict mock',
       delayForLlm(body, callNumber) {
@@ -205,6 +205,9 @@ test.describe('extra interaction conflicts without real API keys', () => {
 
     await openSettingsSection(page, 'debateMode');
     await page.locator('#debateModeContent [data-handler="requestStopDebate"]:not([disabled])').first().click();
+    await expect(page.locator('.debate-history-card').first()).toContainText('正方：mock-model');
+    await expect(page.locator('.debate-history-card').first()).toContainText('反方：mock-model');
+    await expect(page.locator('.debate-history-card').first()).toContainText('评委：mock-model');
     await expect.poll(() => debateStatus(page), { timeout: 10_000 }).toBe('stopped');
     await expect.poll(() => page.evaluate(() => isAnyDebateRunning()), { timeout: 10_000 }).toBe(false);
 
@@ -214,6 +217,12 @@ test.describe('extra interaction conflicts without real API keys', () => {
 
     await closeSettingsPageIfOpen(page);
     await expect(page.locator('[data-handler="debateManualPass"]')).toBeVisible();
+    await expect(page.locator('[data-handler="debateRegenerateRejectedSpeech"]')).toBeVisible();
+    const callsBeforeRegenerate = backend.llmCalls.length;
+    await page.locator('[data-handler="debateRegenerateRejectedSpeech"]').first().click();
+    await expect.poll(() => backend.llmCalls.length, { timeout: 25_000 }).toBeGreaterThan(callsBeforeRegenerate);
+    await expect.poll(() => debateStatus(page), { timeout: 25_000 }).toBe('waiting_manual');
+    await expect(page.locator('[data-handler="debateRegenerateRejectedSpeech"]')).toBeVisible();
     const judgeCardsBeforePass = await page.locator('.debate-judge-card').count();
     await page.locator('[data-handler="debateManualPass"]').first().click();
     await expect.poll(() => page.locator('.debate-judge-card').count(), { timeout: 25_000 }).toBeGreaterThan(judgeCardsBeforePass);

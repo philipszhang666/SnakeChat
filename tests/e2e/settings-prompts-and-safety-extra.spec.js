@@ -187,9 +187,21 @@ test.describe('extra settings prompts and safety controls without real services'
     await page.locator('[data-action="manualCompress"]').click();
     await expect.poll(() => backend.llmCalls.length, { timeout: 15_000 }).toBeGreaterThan(3);
     await expect.poll(() => page.evaluate(() => currentChat().messages.some(m => !!m._isSummary)), { timeout: 15_000 }).toBe(true);
+    await expect.poll(() => page.evaluate(() => currentChat().messages.some(m => String(m.content || '').includes('compress seed one')))).toBe(true);
+    await expect.poll(() => page.evaluate(() => !!currentChat().compressedContext && currentChat().compressedContext.summaryMessages.length > 0)).toBe(true);
+    await expect(page.locator('.compression-summary-card')).not.toHaveAttribute('open', '');
+    await expect(page.locator('.message').filter({ hasText: 'compress seed one' }).first()).not.toHaveClass(/discarded-context-msg/);
+    await expect(page.locator('.message').filter({ hasText: 'compress seed one' }).first()).not.toContainText('已从上下文丢弃');
+    await expect.poll(() => page.locator('.dialog-timeline-point.discarded').count()).toBeGreaterThan(0);
+    await page.locator('.compression-summary-head').first().click();
+    await expect(page.locator('.compression-summary-card')).toHaveAttribute('open', '');
+    await expect(page.locator('.compression-summary-content')).toContainText('E2E');
     await expect(page.locator('#sendBtn')).not.toHaveClass(/stop/);
     await sendMessage(page, 'after manual compression');
     await waitForAssistantReply(page, 'Mock reply');
+    const latestRequest = backend.llmCalls.at(-1)?.body || {};
+    expect(JSON.stringify(latestRequest)).toContain('E2E');
+    expect(JSON.stringify(latestRequest)).not.toContain('compress seed one');
     clientErrors.expectNoErrors();
   });
 
@@ -406,6 +418,8 @@ test.describe('extra settings prompts and safety controls without real services'
     expect(afterDelta.prompts.at(-1)).toContain('【已有摘要，仅作去重和衔接参考，不要改写】');
     expect(afterDelta.prompts.at(-1)).toContain('本次要输出“近期增量摘要”');
 
+    await page.locator('.compression-summary-head').last().click();
+    await expect(page.locator('.compression-summary-card').last()).toHaveAttribute('open', '');
     await page.locator('.msg-action').filter({ hasText: '撤销压缩' }).last().click();
     await expect.poll(() => page.evaluate(() =>
       currentChat().messages.filter(m => m && m._isSummary).map(m => m._summaryLayer)
@@ -451,7 +465,7 @@ test.describe('extra settings prompts and safety controls without real services'
     clientErrors.expectNoErrors();
   });
 
-  test('context compression auto-patches missing file paths and ignores escaped log fragments', async ({ page }) => {
+  test('context compression does not auto-patch omitted file paths and ignores escaped log fragments', async ({ page }) => {
     const { clientErrors } = await gotoApp(page);
     await page.evaluate(() => {
       const apiCore = window.AgentApp.require('apiCore');
@@ -534,17 +548,18 @@ test.describe('extra settings prompts and safety controls without real services'
       const msg = currentChat().messages.find(m => m && m._isSummary);
       return msg ? msg.content : '';
     });
-    expect(summary).toContain('student.txt');
-    expect(summary).toContain('course.txt');
-    expect(summary).toContain('sc.txt');
-    expect(summary).toContain('reviews_Beauty_5.json.gz');
-    expect(summary).toContain('meta_Beauty.js');
-    expect(summary).toContain('data/process_beauty.py');
-    expect(summary).toContain('scripts/run_beauty_graph_random_811_gpu3.sh');
-    expect(summary).toContain('model/main.py');
-    expect(summary).toContain('rqvae/main.py');
-    expect(summary).toContain('/media/inspur/disk1/zhzhang/NLGCL/main.py');
-    expect(summary).toContain('/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
+    expect(summary).not.toContain('【自动补全的关键文件路径】');
+    expect(summary).not.toContain('student.txt');
+    expect(summary).not.toContain('course.txt');
+    expect(summary).not.toContain('sc.txt');
+    expect(summary).not.toContain('reviews_Beauty_5.json.gz');
+    expect(summary).not.toContain('meta_Beauty.js');
+    expect(summary).not.toContain('data/process_beauty.py');
+    expect(summary).not.toContain('scripts/run_beauty_graph_random_811_gpu3.sh');
+    expect(summary).not.toContain('model/main.py');
+    expect(summary).not.toContain('rqvae/main.py');
+    expect(summary).not.toContain('/media/inspur/disk1/zhzhang/NLGCL/main.py');
+    expect(summary).not.toContain('/media/inspur/disk1/zhzhang/TIGER-XiaoLongtaoo/data/process_beauty.py');
     expect(summary).not.toContain('student.txt / course.txt / sc.txt');
     expect(summary).not.toContain('False None\\nmeta_Beauty.js');
     expect(summary).not.toContain('reviews_Beauty_5.json.gz False None');

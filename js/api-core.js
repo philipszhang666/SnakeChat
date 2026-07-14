@@ -65,6 +65,9 @@ function _buildRequestBodyInternal(history, modelOverride, streamOverride, optio
   const s = apiCoreState.settings;
   const model = modelOverride || s.currentModel;
   const stream = streamOverride !== undefined ? streamOverride : !!s.stream;
+  if (options.chat && typeof compressedMessagesForApi === 'function') {
+    history = compressedMessagesForApi(options.chat, history);
+  }
   if (Array.isArray(history)) {
     history = history.filter(m => !(m && m._hiddenFromAI));
   }
@@ -632,6 +635,152 @@ async function _apiFetchWithTimeout(url, init, externalSignal, timeoutMs) {
   });
 }
 
+async function _apiReadHelperStreamText(resp, body, options = {}) {
+  const s = apiCoreState.settings;
+  if (!resp || !resp.body || typeof resp.body.getReader !== 'function') {
+    return { content: '', usage: null, raw: '' };
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let rawAccumulated = '';
+  let content = '';
+  let usage = null;
+  let streamFinishedByProtocol = false;
+  const idleTimeoutMs = Math.max(0, parseInt(options.timeoutMs, 10) || 0);
+
+  const readChunk = async () => {
+    if (!idleTimeoutMs) return await _apiReadStreamChunk(reader, options.signal, options.isStopped);
+    let timer = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        try {
+          const cancelResult = reader.cancel();
+          if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
+        } catch (_) {}
+        const err = new Error(`⏱ 辅助调用流式超时（${Math.round(idleTimeoutMs / 1000)}s 无新内容）`);
+        err.name = 'TimeoutError';
+        reject(err);
+      }, idleTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        _apiReadStreamChunk(reader, options.signal, options.isStopped),
+        timeoutPromise
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
+  const applyJsonPayload = (j) => {
+    if (!j || typeof j !== 'object') return;
+    if (s.apiFormat === 'anthropic') {
+      if (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') {
+        content += j.delta.text || '';
+      }
+      if (j.type === 'message_start' && j.message?.usage) {
+        usage = { ...(usage || {}), ...j.message.usage };
+      }
+      if (j.type === 'message_delta' && j.usage) {
+        usage = { ...(usage || {}), ...j.usage };
+      }
+      if (j.type === 'message_stop') streamFinishedByProtocol = true;
+      return;
+    }
+    if (s.apiFormat === 'responses') {
+      if (j.type === 'response.output_text.delta') {
+        content += j.delta || '';
+      }
+      if (j.type === 'response.completed' && j.response) {
+        usage = normalizeResponsesUsage(j.response.usage) || usage;
+        if (!content) content = extractResponsesText(j.response) || '';
+        streamFinishedByProtocol = true;
+      }
+      return;
+    }
+    const delta = j.choices?.[0]?.delta;
+    if (delta?.content) content += delta.content;
+    if (j.usage) usage = j.usage;
+  };
+
+  const processLine = (line) => {
+    const t = String(line || '').trim();
+    if (!t || !t.startsWith('data:')) return;
+    const data = t.slice(5).trim();
+    if (data === '[DONE]') {
+      streamFinishedByProtocol = true;
+      return;
+    }
+    try {
+      applyJsonPayload(JSON.parse(data));
+    } catch (_) {}
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await readChunk();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      rawAccumulated += chunk;
+      buf += chunk;
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        processLine(line);
+        if (streamFinishedByProtocol) break;
+      }
+      if (streamFinishedByProtocol) {
+        try {
+          const cancelResult = reader.cancel();
+          if (cancelResult && typeof cancelResult.catch === 'function') cancelResult.catch(() => {});
+        } catch (_) {}
+        break;
+      }
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      rawAccumulated += tail;
+      buf += tail;
+    }
+    if (buf) processLine(buf);
+  } finally {
+    _apiCleanupResponseAbortBridge(resp);
+    try { if (reader.releaseLock) reader.releaseLock(); } catch (_) {}
+  }
+
+  if (!content) {
+    const trimmed = rawAccumulated.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const j = JSON.parse(trimmed);
+        if (j.error) throw new Error(`API 错误：${j.error.message || JSON.stringify(j.error)}`);
+        if (s.apiFormat === 'anthropic') {
+          content = (j.content || []).filter(p => p.type === 'text').map(p => p.text).join('') || '';
+          usage = usage || j.usage || null;
+        } else if (s.apiFormat === 'responses') {
+          content = extractResponsesText(j) || '';
+          usage = usage || normalizeResponsesUsage(j.usage);
+        } else {
+          content = j.choices?.[0]?.message?.content || '';
+          usage = usage || j.usage || null;
+        }
+      } catch (e) {
+        if (e && /^API 错误/.test(e.message || '')) throw e;
+      }
+    }
+  }
+
+  return { content, usage, raw: rawAccumulated };
+}
+
+function _apiHelperStreamUnsupportedError(error) {
+  const status = Number(error && (error.httpStatus || error.status) || 0);
+  if (status && status !== 400 && status !== 404 && status !== 422) return false;
+  const msg = String((error && error.message) || error || '');
+  return /stream_options|streaming|stream\s*is\s*not\s*supported|stream.*unsupported|unsupported.*stream|not\s+support.*stream|unrecognized.*stream|unknown.*stream|extra_forbidden.*stream/i.test(msg);
+}
+
 async function callAPI(roundLimit, options = {}) {
   const requestedChatId = options && options.chatId;
   const c = requestedChatId ? apiCoreChatById(requestedChatId) : apiCoreCurrentChat();
@@ -784,6 +933,7 @@ async function callAPI(roundLimit, options = {}) {
       forceDisableTools: !mainToolsAllowedThisRound,
       extraSystemPrompt: mainToolBudgetPrompt,
       includeTextToolCallRecovery: !!options.textToolCallRecoveryUsed,
+      chat: c,
       showPrivacyReport: true
     });
   } catch (e) {
@@ -1489,6 +1639,7 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
     }, 250);
   }
   const tempMessages = history.filter(m => m.role !== 'system' && m.role !== 'tool');
+  const helperStream = !!(options && options.stream === true);
   let body;
   const buildHelperBody = () => {
     const helperRolePrompt = typeof privacyGuardSanitizeSystemText === 'function'
@@ -1500,7 +1651,7 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         messages: buildAnthropicMessages(tempMessages),
         max_tokens: parseInt(s.maxTokens),
         temperature: parseFloat(s.temperature),
-        stream: false,
+        stream: helperStream,
         system: helperRolePrompt
       };
     }
@@ -1511,18 +1662,20 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         instructions: helperRolePrompt,
         temperature: parseFloat(s.temperature),
         max_output_tokens: parseInt(s.maxTokens),
-        stream: false
+        stream: helperStream
       };
     }
     const msgs = [{ role: 'system', content: helperRolePrompt }];
     for (const m of buildOpenAIMessages(tempMessages)) if (m.role !== 'system') msgs.push(m);
-    return {
+    const helperBody = {
       model,
       messages: msgs,
       temperature: parseFloat(s.temperature),
       max_tokens: parseInt(s.maxTokens),
-      stream: false
+      stream: helperStream
     };
+    if (helperStream) helperBody.stream_options = { include_usage: true };
+    return helperBody;
   };
   body = typeof withPrivacyGuardRequest === 'function'
     ? withPrivacyGuardRequest(buildHelperBody, { source: 'helper', silentReport: true })
@@ -1567,8 +1720,8 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         }
         
         const ct = resp.headers.get('content-type') || '';
-        const txt = await _apiReadResponseText(resp, signal, isStopped);
         if (!resp.ok) {
+          const txt = await _apiReadResponseText(resp, signal, isStopped);
           httpStatus = resp.status;
           retryAfter = resp.headers.get('retry-after');
           const err = new Error(`HTTP ${resp.status}: ${txt.slice(0, 300)}`);
@@ -1576,51 +1729,72 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
           err.retryAfter = retryAfter;
           throw err;
         }
-        
-        // ⭐ 放宽 Content-Type 检查：与 handleNonStream 保持一致
-        // 一些中转服务会把 JSON 响应错标成 text/plain，只要内容像 JSON 就尝试解析
-        let j;
-        const trimmed = (txt || '').trim();
-        const looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[');
-        if (!ct.toLowerCase().includes('json') && !looksLikeJson) {
-          throw new Error(`非 JSON 响应 (${ct})\n${txt.slice(0, 200)}`);
+
+        let content = '';
+        let usageForRecord = null;
+        if (helperStream) {
+          const streamResult = await _apiReadHelperStreamText(resp, body, { signal, isStopped, timeoutMs: helperTimeoutMs });
+          content = streamResult.content || '';
+          usageForRecord = streamResult.usage || null;
+          if (typeof recordRawResponse === 'function') {
+            recordRawResponse({
+              ts: Date.now(),
+              isStream: true,
+              contentType: ct,
+              raw: streamResult.raw || '',
+              parsedContent: content,
+              usage: usageForRecord,
+              request: { url, method: 'POST', headers: reqHeaders, body },
+              _source: options.sourceLabel || '辅助调用 (callOnceWithRole · 流式)'
+            });
+          }
+        } else {
+          const txt = await _apiReadResponseText(resp, signal, isStopped);
+
+          // ⭐ 放宽 Content-Type 检查：与 handleNonStream 保持一致
+          // 一些中转服务会把 JSON 响应错标成 text/plain，只要内容像 JSON 就尝试解析
+          let j;
+          const trimmed = (txt || '').trim();
+          const looksLikeJson = trimmed.startsWith('{') || trimmed.startsWith('[');
+          if (!ct.toLowerCase().includes('json') && !looksLikeJson) {
+            throw new Error(`非 JSON 响应 (${ct})\n${txt.slice(0, 200)}`);
+          }
+          try { j = JSON.parse(trimmed); }
+          catch (e) { throw new Error('JSON 解析失败：' + trimmed.slice(0, 200)); }
+          if (j.error) throw new Error(`API 错误：${j.error.message || JSON.stringify(j.error)}`);
+
+          // ⭐ 记录原始响应（callOnceWithRole 被 Plan 规划/师生评审/Token 摘要等多处复用）
+          if (typeof recordRawResponse === 'function') {
+            recordRawResponse({
+              ts: Date.now(),
+              isStream: false,
+              contentType: ct,
+              raw: txt,
+              parsedJson: j,
+              usage: j.usage || null,
+              request: { url, method: 'POST', headers: reqHeaders, body },
+              _source: options.sourceLabel || '辅助调用 (callOnceWithRole)'
+            });
+          }
+
+          usageForRecord = s.apiFormat === 'responses' ? normalizeResponsesUsage(j.usage) : j.usage;
+          if (s.apiFormat === 'anthropic') {
+            content = (j.content || []).filter(p => p.type === 'text').map(p => p.text).join('') || '';
+          } else if (s.apiFormat === 'responses') {
+            content = extractResponsesText(j) || '';
+          } else {
+            content = j.choices?.[0]?.message?.content || '';
+          }
         }
-        try { j = JSON.parse(trimmed); }
-        catch (e) { throw new Error('JSON 解析失败：' + trimmed.slice(0, 200)); }
-        if (j.error) throw new Error(`API 错误：${j.error.message || JSON.stringify(j.error)}`);
-        
-        // ⭐ 记录原始响应（callOnceWithRole 被 Plan 规划/师生评审/Token 摘要等多处复用）
-        if (typeof recordRawResponse === 'function') {
-          recordRawResponse({
-            ts: Date.now(),
-            isStream: false,
-            contentType: ct,
-            raw: txt,
-            parsedJson: j,
-            usage: j.usage || null,
-            request: { url, method: 'POST', headers: reqHeaders, body },
-            _source: options.sourceLabel || '辅助调用 (callOnceWithRole)'
-          });
-        }
-        
+
         // ⭐ 把辅助调用（Plan 规划/审查/整合、师生评审、压缩摘要等）的 usage 计入当前对话统计
         // 之前漏算导致 Plan/大纲/师生 模式的 token 都不进总账
-        const usageForRecord = s.apiFormat === 'responses' ? normalizeResponsesUsage(j.usage) : j.usage;
         if (usageForRecord && typeof recordUsageFromResponse === 'function') {
           const _c = options.chat
             || (options.chatId ? apiCoreChatById(options.chatId) : null)
             || apiCoreActiveTaskChat()
             || apiCoreCurrentChat();
           if (_c) recordUsageFromResponse(_c, usageForRecord, { model });
-        }
-        
-        let content = '';
-        if (s.apiFormat === 'anthropic') {
-          content = (j.content || []).filter(p => p.type === 'text').map(p => p.text).join('') || '';
-        } else if (s.apiFormat === 'responses') {
-          content = extractResponsesText(j) || '';
-        } else {
-          content = j.choices?.[0]?.message?.content || '';
         }
         if (!String(content || '').trim()) {
           throw _emptyAssistantResponseError('辅助调用');
@@ -1630,6 +1804,15 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         lastErr = attemptErr;
         // 用户主动 abort（含桥接外层主对话中止）：不重试，直接抛
         if (attemptErr.name === 'AbortError' || signal.aborted) throw attemptErr;
+
+        if (helperStream && !(options && options._helperStreamFallbackTried) && _apiHelperStreamUnsupportedError(attemptErr)) {
+          console.warn(`[callOnceWithRole] 当前接口不兼容辅助流式调用，已回退非流式：${attemptErr.message}`);
+          return callOnceWithRole(history, model, rolePrompt, {
+            ...options,
+            stream: false,
+            _helperStreamFallbackTried: true
+          });
+        }
         
         const retryable = (typeof _isRetryableError === 'function')
           ? _isRetryableError(attemptErr, httpStatus || attemptErr.httpStatus, signal)
@@ -1772,6 +1955,8 @@ async function runAgentLoop({
         extraMessages: messages,
         mutableMessages: messages,
         preserveFirstUser: true,
+        ignoreChat: true,
+        skipChatCompression: true,
         chat: guardChat || chat || null,
         chatId: chatId || (guardChat && guardChat.id) || '',
         signal,

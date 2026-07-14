@@ -1037,7 +1037,7 @@ function buildGoalTurnPrompt(goal, guidanceText = '') {
   const values = {
     objective: goal.objective,
     status: goal.status,
-    turn: String(goal.turnCount + 1),
+    turn: String(Math.max(1, Number(goal.turnCount || 0) || 0)),
     maxTurns: String(goal.maxTurns),
     tokenUsed: String(goalRecordedTokenUsed(goal)),
     tokenBudget: goal.tokenBudget ? String(goal.tokenBudget) : 'unlimited',

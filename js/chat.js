@@ -82,13 +82,98 @@ function _consumeOneShotMode() {
   return mode;
 }
 
+function ensurePendingAttachmentBuckets() {
+  if (!chatState.pendingAttachmentsByChat || typeof chatState.pendingAttachmentsByChat !== 'object' || Array.isArray(chatState.pendingAttachmentsByChat)) {
+    chatState.pendingAttachmentsByChat = {};
+  }
+  if (!chatState._pendingAttachmentsByChatInitialized && Array.isArray(chatState.pendingAttachments) && chatState.pendingAttachments.length && chatState.currentId) {
+    const bucket = chatState.pendingAttachmentsByChat[chatState.currentId] || [];
+    for (const att of chatState.pendingAttachments) {
+      if (att && !bucket.some(existing => existing && existing.id === att.id)) bucket.push(att);
+    }
+    chatState.pendingAttachmentsByChat[chatState.currentId] = bucket;
+  }
+  chatState._pendingAttachmentsByChatInitialized = true;
+  return chatState.pendingAttachmentsByChat;
+}
+
+function syncPendingAttachmentMirror(chatId = chatState.currentId) {
+  const id = chatId || chatState.currentId || '';
+  const list = id ? pendingAttachmentsForChat(id, false) : [];
+  chatState.pendingAttachments = id === chatState.currentId ? list : pendingAttachmentsForChat(chatState.currentId, false);
+  return chatState.pendingAttachments;
+}
+
+function pendingAttachmentsForChat(chatId, create = true) {
+  const id = chatId || chatState.currentId || '';
+  if (!id) return [];
+  const buckets = ensurePendingAttachmentBuckets();
+  if (!Array.isArray(buckets[id])) {
+    if (!create) return [];
+    buckets[id] = [];
+  }
+  if (id === chatState.currentId) chatState.pendingAttachments = buckets[id];
+  return buckets[id];
+}
+
+function setPendingAttachmentsForChat(chatId, attachments) {
+  const id = chatId || chatState.currentId || '';
+  if (!id) return [];
+  const buckets = ensurePendingAttachmentBuckets();
+  buckets[id] = Array.isArray(attachments) ? attachments : [];
+  if (id === chatState.currentId) chatState.pendingAttachments = buckets[id];
+  return buckets[id];
+}
+
+function currentPendingAttachments() {
+  return pendingAttachmentsForChat(chatState.currentId, false);
+}
+
+function hasPendingAttachmentReads(chatId = chatState.currentId) {
+  return pendingAttachmentsForChat(chatId, false).some(att => att && att._pending);
+}
+
+function hasPendingAttachmentErrors(chatId = chatState.currentId) {
+  return pendingAttachmentsForChat(chatId, false).some(att => att && att._error);
+}
+
+function preparePendingAttachmentsForSend(chatId = chatState.currentId) {
+  const list = pendingAttachmentsForChat(chatId, false);
+  if (list.some(att => att && att._pending)) {
+    if (typeof toast === 'function') toast('附件仍在读取中，请稍等', 2500);
+    return null;
+  }
+  if (list.some(att => att && att._error)) {
+    if (typeof toast === 'function') toast('附件读取失败，请移除后重试', 3000);
+    return null;
+  }
+  return list;
+}
+
+function hasComposerDraftForChat(chatId = chatState.currentId, text = '') {
+  return !!String(text || '').trim() || pendingAttachmentsForChat(chatId, false).length > 0;
+}
+
+function clearPendingAttachmentsForChat(chatId = chatState.currentId) {
+  setPendingAttachmentsForChat(chatId, []);
+}
+
+function cloneAttachmentForMessage(att) {
+  const copy = { ...(att || {}) };
+  delete copy._pending;
+  delete copy._error;
+  return copy;
+}
+
 function _buildUserMessageFromInput(chat, text, opts = {}) {
   const userMsg = { role: 'user', content: text };
   if (opts.midrunGuidance) {
     userMsg._midrunGuidance = true;
     userMsg._queuedAt = Date.now();
   }
-  const allAttachments = [...chatState.pendingAttachments];
+  const pending = preparePendingAttachmentsForSend(chat && chat.id);
+  if (!pending) return null;
+  const allAttachments = [...pending];
   const pendingAIForChat = (typeof takePendingAIAttachments === 'function')
     ? takePendingAIAttachments(chat.id)
     : (chatState.pendingAIAttachments || []).splice(0);
@@ -99,7 +184,7 @@ function _buildUserMessageFromInput(chat, text, opts = {}) {
       }
     }
   }
-  if (allAttachments.length) userMsg.attachments = allAttachments.map(a => ({ ...a }));
+  if (allAttachments.length) userMsg.attachments = allAttachments.map(cloneAttachmentForMessage);
   return userMsg;
 }
 
@@ -109,7 +194,7 @@ function _clearComposerAfterSend(input) {
     input.style.height = 'auto';
   }
   if (typeof hidePromptSuggestions === 'function') hidePromptSuggestions();
-  chatState.pendingAttachments = [];
+  clearPendingAttachmentsForChat(chatState.currentId);
   if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
 }
@@ -122,13 +207,14 @@ function _canGuideCurrentTask(chatId) {
 }
 
 function queueMidrunGuidance(chat, input, text) {
-  if (!chat || !input || (!text && !chatState.pendingAttachments.length)) return false;
+  if (!chat || !input || !hasComposerDraftForChat(chat.id, text)) return false;
   if (!_canGuideCurrentTask(chat.id)) return false;
   const task = chatTaskByIdFromState(chat.id);
   if (task && task.mode === 'ppt' && typeof queuePptMidrunGuidanceFromComposer === 'function') {
     return queuePptMidrunGuidanceFromComposer(chat, input, text);
   }
   const userMsg = _buildUserMessageFromInput(chat, text, { midrunGuidance: true });
+  if (!userMsg) return true;
   if (task && task.pendingGuidance) {
     const previous = task.pendingGuidance;
     previous.content = [previous.content || '', userMsg.content || ''].filter(Boolean).join('\n\n');
@@ -254,7 +340,7 @@ function editResendUserMsg(idx) {
     msgIdx: idx,
     mode: _inferReplyModeAfterUser(c, idx)
   };
-  chatState.pendingAttachments = _cloneMessageAttachmentsForEdit(msg);
+  setPendingAttachmentsForChat(c.id, _cloneMessageAttachmentsForEdit(msg));
   if (typeof renderPendingAtts === 'function') renderPendingAtts();
   _setComposerDraft(input, _messageTextForEdit(msg));
   if (typeof updateSendBtn === 'function') updateSendBtn();
@@ -284,7 +370,15 @@ async function submitEditResend(input) {
     return false;
   }
   const text = input ? input.value.trim() : '';
-  if (!text && !chatState.pendingAttachments.length) return true;
+  if (!hasComposerDraftForChat(c.id, text)) return true;
+  if (hasPendingAttachmentReads(c.id)) {
+    if (typeof toast === 'function') toast('附件仍在读取中，请稍等', 2500);
+    return true;
+  }
+  if (hasPendingAttachmentErrors(c.id)) {
+    if (typeof toast === 'function') toast('附件读取失败，请移除后重试', 3000);
+    return true;
+  }
   if (!chatState.settings.apiKey) {
     alert('请先在「设置」中填写 API Key');
     openSettings();
@@ -300,7 +394,9 @@ async function submitEditResend(input) {
   }
 
   const userMsg = _buildUserMessageFromInput(c, text);
+  if (!userMsg) return true;
   c.messages = c.messages.slice(0, edit.msgIdx);
+  delete c.compressedContext;
   c.messages.push(userMsg);
   if (c.messages.length === 1) c.title = (text || '附件对话').slice(0, 30);
   if (typeof traceUserMessage === 'function') traceUserMessage(text);
@@ -329,7 +425,7 @@ async function submitEditResend(input) {
     const compressResult = await autoCompressCheck(c, { touchGlobalGenerating: true });
     if (compressResult === 'failed') {
       _editResendState = { ...edit };
-      chatState.pendingAttachments = userMsg.attachments ? userMsg.attachments.map(a => ({ ...a })) : [];
+      setPendingAttachmentsForChat(c.id, userMsg.attachments ? userMsg.attachments.map(a => ({ ...a })) : []);
       if (typeof renderPendingAtts === 'function') renderPendingAtts();
       _setComposerDraft(input, text);
       toast('自动压缩失败，本轮请求已取消，避免发送超长上下文', 4000);
@@ -361,9 +457,11 @@ function newChat() {
   chatState.chats.unshift({ id, title: '新对话', messages: [], createdAt: Date.now() });
   chatState.currentId = id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(id);
+  syncPendingAttachmentMirror(id);
   chatSaveData();
   renderChatList();
   renderMessages();
+  if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
@@ -373,9 +471,11 @@ function switchChat(id) {
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: id });
   chatState.currentId = id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(id);
+  syncPendingAttachmentMirror(id);
   chatSaveData();
   renderChatList();
   renderMessages();
+  if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
@@ -398,9 +498,11 @@ function startTemporaryChat() {
     : { id: 'tmp_' + Date.now(), title: '临时会话', messages: [], createdAt: Date.now(), temporary: true };
   chatState.currentId = chatState.temporaryChat.id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(chatState.currentId);
+  syncPendingAttachmentMirror(chatState.currentId);
   chatSaveData();
   renderChatList();
   renderMessages();
+  if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   updateTemporaryChatButton();
@@ -731,6 +833,7 @@ function clearCurrentChat() {
     _abortCurrentTaskIfAny(c.id);
   }
   c.messages = [];
+  delete c.compressedContext;
   c.title = '新对话';
   chatSaveData();
   renderChatList();
@@ -1127,16 +1230,27 @@ function renderMsg(m, idx) {
     const undoBtn = (m._compressionUndoId && typeof canUndoCompression === 'function' && canUndoCompression(m._compressionUndoId, chatCurrentChat()))
       ? `<button class="msg-action" data-action="valueClick" data-handler="undoCompressionSnapshot" data-value="${escapeHtml(m._compressionUndoId)}">↩ 撤销压缩</button>`
       : '';
+    const layerText = m._summaryLayer === 'delta' ? '增量摘要' : '基础摘要';
+    const countText = Number(m._originalCount || 0) ? `已压缩 ${m._originalCount} 条` : '已压缩';
     return `
       <div class="message summary-msg" data-idx="${idx}">
-        <div class="avatar" style="background:linear-gradient(135deg, var(--warning), #fbbf24);">🗜️</div>
+        <div class="avatar">🗜️</div>
         <div class="msg-body">
-          <div class="msg-role">对话摘要 <span class="summary-badge">已压缩 ${m._originalCount} 条</span></div>
-          <div class="msg-content">${renderMarkdown(m.content || '')}</div>
-          <div class="msg-actions">
-            <button class="msg-action" data-action="valueClick" data-handler="copyMsg" data-value="${idx}" data-value-type="number">📋 复制</button>
-            ${undoBtn}
-          </div>
+          <details class="compression-summary-card">
+            <summary class="compression-summary-head">
+              <span class="compression-summary-title">压缩摘要</span>
+              <span class="summary-badge">${escapeHtml(countText)}</span>
+              <span class="compression-summary-layer">${escapeHtml(layerText)}</span>
+              <span class="compression-summary-hint">点击展开完整摘要</span>
+            </summary>
+            <div class="compression-summary-body">
+              <div class="msg-content compression-summary-content">${renderMarkdown(m.content || '')}</div>
+              <div class="msg-actions">
+                <button class="msg-action" data-action="valueClick" data-handler="copyMsg" data-value="${idx}" data-value-type="number">📋 复制</button>
+                ${undoBtn}
+              </div>
+            </div>
+          </details>
         </div>
       </div>`;
   }
@@ -1417,6 +1531,16 @@ async function chatReadFileAsDataUrl(file) {
   return `data:${mime};base64,${base64}`;
 }
 
+function chatReadFileAsText(file) {
+  if (file && typeof file.text === 'function') return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e && e.target ? e.target.result : '');
+    reader.onerror = () => reject(reader.error || new Error('读取文件失败'));
+    reader.readAsText(file);
+  });
+}
+
 function chatDropContainsDirectory(dataTransfer) {
   const items = Array.from((dataTransfer && dataTransfer.items) || []);
   return items.some(item => {
@@ -1426,45 +1550,69 @@ function chatDropContainsDirectory(dataTransfer) {
   });
 }
 
+function ensureAttachmentTargetChat() {
+  let c = chatCurrentChat();
+  if (!c) {
+    newChat();
+    c = chatCurrentChat();
+  }
+  return c;
+}
+
+function markAttachmentReadResult(chatId, attId, patch) {
+  const list = pendingAttachmentsForChat(chatId, false);
+  const att = list.find(item => item && item.id === attId);
+  if (!att) return false;
+  Object.assign(att, patch);
+  if (chatId === chatState.currentId) {
+    syncPendingAttachmentMirror(chatId);
+    renderPendingAtts();
+  }
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+  return true;
+}
+
 function addAttachment(file, type) {
   if (file.size > 20 * 1024 * 1024) {
     alert(`文件 ${file.name} 超过 20MB`);
     return;
   }
+  const c = ensureAttachmentTargetChat();
+  if (!c) {
+    if (typeof toast === 'function') toast('创建新对话失败，无法添加附件', 3000);
+    return;
+  }
+  const chatId = c.id;
   const att = {
     id: 'a_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
     name: file.name,
     mime: file.type,
     size: file.size,
-    type: type
+    type: type,
+    _pending: true
+  };
+  pendingAttachmentsForChat(chatId, true).push(att);
+  syncPendingAttachmentMirror(chatId);
+  renderPendingAtts();
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+  const finish = patch => markAttachmentReadResult(chatId, att.id, { ...patch, _pending: false, _error: null });
+  const fail = e => {
+    const message = e && e.message ? e.message : String(e || '读取文件失败');
+    markAttachmentReadResult(chatId, att.id, { _pending: false, _error: message });
+    if (typeof toast === 'function') toast(`读取文件失败：${message}`, 3000);
   };
   if (type === 'image') {
     chatReadFileAsDataUrl(file).then(dataUrl => {
-      att.data = dataUrl;
-      chatState.pendingAttachments.push(att);
-      renderPendingAtts();
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-    }).catch(e => {
-      if (typeof toast === 'function') toast(`读取文件失败：${e.message || e}`, 3000);
-    });
+      finish({ data: dataUrl });
+    }).catch(fail);
   } else if (isTextLike(file)) {
-    const r = new FileReader();
-    r.onload = e => {
-      att.text = e.target.result;
-      chatState.pendingAttachments.push(att);
-      renderPendingAtts();
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-    };
-    r.readAsText(file);
+    chatReadFileAsText(file).then(text => {
+      finish({ text: typeof text === 'string' ? text : String(text || '') });
+    }).catch(fail);
   } else {
     chatReadFileAsDataUrl(file).then(dataUrl => {
-      att.data = dataUrl;
-      chatState.pendingAttachments.push(att);
-      renderPendingAtts();
-      if (typeof updateSendBtn === 'function') updateSendBtn();
-    }).catch(e => {
-      if (typeof toast === 'function') toast(`读取文件失败：${e.message || e}`, 3000);
-    });
+      finish({ data: dataUrl });
+    }).catch(fail);
   }
 }
 
@@ -1475,7 +1623,7 @@ function isTextLike(file) {
 }
 
 function removeAttachment(id) {
-  chatState.pendingAttachments = chatState.pendingAttachments.filter(a => a.id !== id);
+  setPendingAttachmentsForChat(chatState.currentId, pendingAttachmentsForChat(chatState.currentId, false).filter(a => a.id !== id));
   if (chatState.pendingAIAttachments) {
     chatState.pendingAIAttachments = chatState.pendingAIAttachments.filter(a => a.id !== id);
   }
@@ -1488,22 +1636,29 @@ function removeAttachment(id) {
 
 function renderPendingAtts() {
   const wrap = document.getElementById('pendingAtts');
-  if (!chatState.pendingAttachments.length) {
+  if (!wrap) return;
+  const attachments = pendingAttachmentsForChat(chatState.currentId, false);
+  syncPendingAttachmentMirror(chatState.currentId);
+  if (!attachments.length) {
     wrap.classList.remove('show');
     wrap.innerHTML = '';
     return;
   }
   wrap.classList.add('show');
-  wrap.innerHTML = chatState.pendingAttachments.map(a => {
+  wrap.innerHTML = attachments.map(a => {
     const fromAI = a._fromAI;
     const aiBadge = fromAI 
       ? '<span style="background:var(--tool);color:white;padding:1px 5px;border-radius:8px;font-size:9px;margin-left:4px;font-weight:600;">AI</span>' 
       : '';
     const borderStyle = fromAI ? 'border-color:var(--tool);box-shadow:0 0 0 1px var(--tool);' : '';
+    const statusText = a._pending ? '<span class="pending-att-status">读取中</span>' : (a._error ? '<span class="pending-att-status error">读取失败</span>' : '');
+    const icon = a.type === 'image' && a.data && !a._pending && !a._error
+      ? `<img src="${a.data}">`
+      : '<span class="pending-att-icon">📄</span>';
     return `
-      <div class="pending-att" style="${borderStyle}">
-        ${a.type === 'image' ? `<img src="${a.data}">` : `<span style="font-size:18px;">📄</span>`}
-        <span class="name">${escapeHtml(a.name)}${aiBadge}</span>
+      <div class="pending-att${a._pending ? ' is-loading' : ''}${a._error ? ' is-error' : ''}" style="${borderStyle}" title="${escapeHtml(a._error || '')}">
+        ${icon}
+        <span class="name">${escapeHtml(a.name)}${aiBadge}${statusText}</span>
         <button class="remove" data-action="valueClick" data-handler="removeAttachment" data-value="${escapeHtml(a.id)}">×</button>
       </div>`;
   }).join('');
@@ -1555,7 +1710,7 @@ async function onSend() {
   }
   if (!scheduledActive && currentGenerating) {
     const c = chatCurrentChat();
-    if (c && (text || chatState.pendingAttachments.length)) {
+    if (c && hasComposerDraftForChat(c.id, text)) {
       console.log('[onSend] 当前对话正在生成，发送中途引导...');
       if (queueMidrunGuidance(c, input, text)) return;
     }
@@ -1591,7 +1746,7 @@ async function onSend() {
     return;
   }
 
-  if (!text && !chatState.pendingAttachments.length) return;
+  if (!hasComposerDraftForChat(currentId, text)) return;
   if (!chatState.settings.apiKey) {
     alert('请先在「设置」中填写 API Key');
     openSettings();
@@ -1604,6 +1759,14 @@ async function onSend() {
   }
   if (!c) {
     toast('创建新对话失败，请刷新页面后重试', 3000);
+    return;
+  }
+  if (hasPendingAttachmentReads(c.id)) {
+    if (typeof toast === 'function') toast('附件仍在读取中，请稍等', 2500);
+    return;
+  }
+  if (hasPendingAttachmentErrors(c.id)) {
+    if (typeof toast === 'function') toast('附件读取失败，请移除后重试', 3000);
     return;
   }
   
@@ -1663,6 +1826,7 @@ async function onSend() {
   }
 
   const userMsg = _buildUserMessageFromInput(c, text);
+  if (!userMsg) return;
   
   c.messages.push(userMsg);
   if (c.messages.length === 1) c.title = (text || '附件对话').slice(0, 30);
@@ -1802,6 +1966,7 @@ async function deleteMessageTurn(idx) {
   bounds = _findMessageTurnBounds(c.messages, idx);
   if (!bounds || bounds.count <= 0) return;
   c.messages.splice(bounds.start, bounds.count);
+  delete c.compressedContext;
   _refreshChatTitleAfterTurnDelete(c, oldDerivedTitle);
   chatSaveData();
   renderChatList();
@@ -1840,6 +2005,7 @@ async function regenerate(idx) {
   }
   
   c.messages = c.messages.slice(0, _findRegenerateCutIndex(c.messages, idx));
+  delete c.compressedContext;
   // ⭐ 重新生成等价于"重新开始一个 AI 回合"，必须清理上次残留状态：
   // 1. 任务级临时授权 + 自动重发定时器（与 newChat/onSend 行为一致）
   // 2. 计划模式 / 大纲的执行中标志（防止旧标志卡住 onSend）
@@ -2080,6 +2246,12 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     copyMsg,
     regenerate,
     _findRegenerateCutIndex,
+    pendingAttachmentsForChat,
+    setPendingAttachmentsForChat,
+    currentPendingAttachments,
+    hasComposerDraftForChat,
+    hasPendingAttachmentReads,
+    hasPendingAttachmentErrors,
     deleteMessageTurn,
     _findMessageTurnBounds,
     addAttachment,

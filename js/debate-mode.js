@@ -160,6 +160,22 @@ function _debateRoleLabel(role) {
   return role || '';
 }
 
+function _debateRoleModel(meta, role) {
+  const roleCfg = meta && meta.roles && meta.roles[role] ? meta.roles[role] : null;
+  const explicit = String((roleCfg && roleCfg.model) || '').trim();
+  if (explicit) return explicit;
+  const normalized = _debateNormalizeRoleConfig({ ...(roleCfg || {}), _roleKey: role });
+  return normalized.model || '未设置模型';
+}
+
+function _debateHistoryRolePill(meta, role, scoreValue = null) {
+  const label = _debateRoleLabel(role);
+  const model = _debateRoleModel(meta, role);
+  const hasScore = scoreValue !== null && scoreValue !== undefined;
+  const title = hasScore ? `${label}：${model}，得分 ${scoreValue}` : `${label}：${model}`;
+  return `<span class="debate-role-pill debate-role-pill-${role}" title="${escapeHtml(title)}"><span class="debate-role-label">${escapeHtml(label)}：</span><span class="debate-role-model">${escapeHtml(model)}</span>${hasScore ? `<span class="debate-role-score">${escapeHtml(scoreValue)}</span>` : ''}</span>`;
+}
+
 function _debateGetProfiles() {
   return typeof loadApiProfiles === 'function' ? loadApiProfiles() : [];
 }
@@ -405,8 +421,9 @@ function renderDebateModeModal() {
             </div>
             <div class="debate-history-meta">
               <span>${_debateClampRounds(meta.totalRounds || 3)} 局</span>
-              <span>正方 ${score.pro || 0}</span>
-              <span>反方 ${score.con || 0}</span>
+              ${_debateHistoryRolePill(meta, 'pro', score.pro || 0)}
+              ${_debateHistoryRolePill(meta, 'con', score.con || 0)}
+              ${_debateHistoryRolePill(meta, 'judge')}
               <span>${new Date(meta.updatedAt || chat.createdAt || Date.now()).toLocaleString('zh-CN')}</span>
             </div>
             <div class="debate-history-actions">
@@ -1039,6 +1056,56 @@ function debateManualWin(chatId, side) {
       DebateUiService.toast('继续辩论失败：' + (e.message || e), 5000);
     });
   }
+}
+
+function _debateRemoveRejectedSpeechTurn(chat, waiting) {
+  if (!chat || !Array.isArray(chat.messages) || !waiting) return 0;
+  const round = parseInt(waiting.round, 10);
+  const speechSeq = parseInt(waiting.speechSeq, 10);
+  const side = waiting.side || '';
+  if (!Number.isFinite(round) || !Number.isFinite(speechSeq) || !side) return 0;
+  const before = chat.messages.length;
+  chat.messages = chat.messages.filter(msg => {
+    const d = msg && msg.debate;
+    if (!d || parseInt(d.round, 10) !== round || d.side !== side) return true;
+    if (d.kind === 'speech' && parseInt(d.seq, 10) === speechSeq) return false;
+    if (d.kind === 'judge' && parseInt(d.speechSeq, 10) === speechSeq) return false;
+    return true;
+  });
+  return before - chat.messages.length;
+}
+
+function debateRegenerateRejectedSpeech(chatId) {
+  const chat = debateChatById(chatId);
+  if (!chat || !chat.debate || chat.debate.status !== 'waiting_manual' || !chat.debate.waitingManual) return;
+  if (isDebateCompressing(chat.id)) {
+    DebateUiService.toast('辩论历史正在压缩，完成后再重新生成', 3000);
+    return;
+  }
+  const waiting = chat.debate.waitingManual || {};
+  if (waiting.reason !== 'judge_rejected') {
+    DebateUiService.toast('当前评审状态不需要重新生成发言', 2500);
+    return;
+  }
+  _debateClearFinalJudgeTimeout(chat);
+  _debateClearManualPassTimeout(chat);
+  const removed = _debateRemoveRejectedSpeechTurn(chat, waiting);
+  if (!removed) {
+    DebateUiService.toast('未找到需要重新生成的发言', 3000);
+    return;
+  }
+  const round = _debateEnsureRound(chat.debate, waiting.round || chat.debate.currentRound || 1);
+  _debateSyncRoundAnswerCount(chat, round);
+  round.status = 'running';
+  delete chat.debate.waitingManual;
+  chat.debate.status = 'running';
+  chat.debate.updatedAt = Date.now();
+  debateSaveData();
+  _debateRenderRefresh(chat);
+  startDebate(chat.id).catch(e => {
+    console.error('[debate] regenerate rejected speech failed:', e);
+    DebateUiService.toast('重新生成失败：' + (e.message || e), 5000);
+  });
 }
 
 function _debateSetRoundWinner(chat, round, side, source) {
@@ -2117,6 +2184,7 @@ function renderDebateJudgeMsg(m, idx) {
   const chat = debateCurrentChat();
   const waiting = chat && chat.debate && chat.debate.status === 'waiting_manual' && chat.debate.waitingManual;
   const showActions = waiting && waiting.round === d.round && waiting.side === d.side && waiting.speechSeq === d.speechSeq;
+  const showRegenerate = showActions && !pass && waiting.reason === 'judge_rejected';
   const reason = d.reason || m.content || '';
   let countdownHtml = '';
   if (showActions && waiting.reason === 'threshold' && chat.debate._manualPassTimeoutAt) {
@@ -2135,7 +2203,8 @@ function renderDebateJudgeMsg(m, idx) {
           <div class="debate-judge-reason">${renderMarkdown(reason)}</div>
           ${showActions ? `
             <div class="debate-manual-actions">
-              <button class="btn btn-primary" data-action="valueClick" data-handler="debateManualPass" data-value="${escapeHtml(chat.id)}">通过</button>
+              ${showRegenerate ? `<button class="btn btn-primary" data-action="valueClick" data-handler="debateRegenerateRejectedSpeech" data-value="${escapeHtml(chat.id)}">重新生成</button>` : ''}
+              <button class="btn ${pass ? 'btn-primary' : ''}" data-action="valueClick" data-handler="debateManualPass" data-value="${escapeHtml(chat.id)}">通过</button>
               <button class="btn" data-action="valueClick" data-handler="debateManualWin" data-value="${escapeHtml(chat.id)}" data-extra-value="pro">判正方胜利</button>
               <button class="btn" data-action="valueClick" data-handler="debateManualWin" data-value="${escapeHtml(chat.id)}" data-extra-value="con">判反方胜利</button>
             </div>
@@ -2307,6 +2376,7 @@ window.debateTimeoutInputChanged = debateTimeoutInputChanged;
 window.debateTimeoutSliderChanged = debateTimeoutSliderChanged;
 window.debateManualPass = debateManualPass;
 window.debateManualWin = debateManualWin;
+window.debateRegenerateRejectedSpeech = debateRegenerateRejectedSpeech;
 window.openDebateChat = openDebateChat;
 window.requestStopDebate = requestStopDebate;
 window.stopCurrentDebate = stopCurrentDebate;
@@ -2349,6 +2419,7 @@ window.AgentApp.define('debateMode', {
   isAnyDebatePausable,
   debateManualPass,
   debateManualWin,
+  debateRegenerateRejectedSpeech,
   compressDebateChat,
   manualCompressDebate,
   autoCompressDebateCheck,

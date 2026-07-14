@@ -180,6 +180,45 @@ function estimateMessageTokens(msg) {
   return total;
 }
 
+function compressionContextSummaries(chat) {
+  const ctx = chat && chat.compressedContext;
+  const summaries = ctx && Array.isArray(ctx.summaryMessages) ? ctx.summaryMessages : [];
+  return summaries
+    .filter(m => m && m._isSummary)
+    .map(m => {
+      const copy = compressionJsonClone(m) || {};
+      delete copy._hiddenFromAI;
+      delete copy._compressionSummaryMarker;
+      return copy;
+    });
+}
+
+function compressionTailMessages(chat, sourceMessages = null) {
+  const messages = Array.isArray(sourceMessages)
+    ? sourceMessages
+    : (Array.isArray(chat && chat.messages) ? chat.messages : []);
+  const visibleMessages = messages.filter(m => !(m && m._compressionSummaryMarker));
+  const ctx = chat && chat.compressedContext;
+  if (!ctx || !ctx.keepStartBoundaryId) return visibleMessages;
+
+  let startIdx = visibleMessages.findIndex(m => m && m._compressionBoundaryId === ctx.keepStartBoundaryId);
+  if (startIdx < 0) {
+    startIdx = Math.max(0, Math.min(Number(ctx.keepStartIndex || 0) || 0, visibleMessages.length));
+  }
+  return visibleMessages.slice(startIdx);
+}
+
+function compressedMessagesForApi(chat, sourceMessages = null) {
+  const summaries = compressionContextSummaries(chat);
+  if (!summaries.length) {
+    const messages = Array.isArray(sourceMessages)
+      ? sourceMessages
+      : (Array.isArray(chat && chat.messages) ? chat.messages : []);
+    return messages.filter(m => !(m && m._compressionSummaryMarker));
+  }
+  return [...summaries, ...compressionTailMessages(chat, sourceMessages)];
+}
+
 function estimateChatTokens(chat) {
   if (!chat || !chat.messages) return 0;
   const systemPrompt = typeof getEffectiveSystemPrompt === 'function'
@@ -193,7 +232,7 @@ function estimateChatTokens(chat) {
     if (concurrentTotal > 0) return concurrentTotal;
   }
   let total = estimateTokens(systemPrompt);
-  for (const m of chat.messages) total += estimateMessageTokens(m);
+  for (const m of compressedMessagesForApi(chat)) total += estimateMessageTokens(m);
   return total;
 }
 
@@ -390,7 +429,7 @@ function recordUsageFromResponse(chat, usage, meta = {}) {
   const model = meta.model || tokensState.settings.currentModel || 'unknown';
   
   // 累计统计（注意：累加，不是覆盖）
-  stats.msgCount = chat.messages.length;
+  stats.msgCount = compressedMessagesForApi(chat).length;
   stats.inputTokens += inputTokens;
   stats.outputTokens += outputTokens;
   stats.lastInputTokens = inputTokens;
@@ -435,7 +474,7 @@ async function fetchAnthropicTokenCount(chat) {
   
   try {
     const buildCountTokensBody = () => {
-      const messages = buildAnthropicMessages(chat.messages, { includeResponseGuard: false });
+      const messages = buildAnthropicMessages(compressedMessagesForApi(chat), { includeResponseGuard: false });
       if (!messages.length) return null;
       const body = { model: s.currentModel, messages };
       let systemPrompt = typeof getEffectiveSystemPrompt === 'function'
@@ -815,7 +854,7 @@ function compressionBuildSummaryPrompt({
   const historyLabel = layer === 'delta' ? '【需要总结的新内容】' : '【需要总结的对话】';
   const continuation = transient
     ? '这个摘要会替代旧的内部工具循环记录，并继续参与后续模型请求。'
-    : '目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、文件路径、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。';
+    : '目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、关键工作集文件、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。';
 
   return `${previousBlock}你正在为一个${target}。
 ${continuation}
@@ -823,9 +862,11 @@ ${layerGuidance}
 
 要求：
 - 不要编造；不知道或没有就写“无”。
-- 文件路径、函数名、命令、错误信息、checkpoint/回滚信息必须尽量原样保留。
+- 只保留关键工作集文件路径：用户明确提到的文件；AI 实际读取、修改、创建、删除的文件；当前任务后续还需要继续操作的文件；报错、验证、测试结果相关的关键文件。
+- 不要把搜索结果、import 列表、日志片段、候选文件列表、偶然出现的路径、重复的绝对/相对路径全部塞进摘要。
+- 函数名、关键命令、错误信息、checkpoint/回滚信息必须尽量原样保留。
 - 摘要应紧凑，但要足够让后续模型不用重读全部历史也能继续工作。
-- 所有 artifact_id、checkpoint_id 和重要文件路径必须逐字保留，不得改写。
+- 所有 artifact_id、checkpoint_id 必须逐字保留，不得改写；关键文件路径如需保留也应原样写出。
 - 如果看到“[工具结果已归档]”，必须在“工具/命令结果”或“下一步建议”里保留对应 artifact_id，并说明可用 read_tool_artifact 读取。
 - 如果某些内容只适合按需重读，请写入“下一步建议”或“可丢弃上下文”。
 - 严格使用下面的 Markdown 结构输出：
@@ -882,11 +923,60 @@ function canUndoCompression(undoId, chat) {
   return !snap.chatId || !chat || snap.chatId === chat.id;
 }
 
+function removeCompressionSummaryMarkers(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return;
+  chat.messages = chat.messages.filter(m => !(m && m._compressionSummaryMarker));
+}
+
+function applyCompressionSummaryMarkers(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return;
+  removeCompressionSummaryMarkers(chat);
+  const ctx = chat.compressedContext;
+  const summaries = compressionContextSummaries(chat);
+  if (!ctx || !summaries.length) return;
+  const markers = summaries.map(m => ({
+    ...m,
+    _hiddenFromAI: true,
+    _compressionSummaryMarker: true,
+    _compressionUndoId: ctx.undoId || m._compressionUndoId || ''
+  }));
+  const boundaryIdx = chat.messages.findIndex(m => m && m._compressionBoundaryId === ctx.keepStartBoundaryId);
+  const insertAt = boundaryIdx >= 0
+    ? boundaryIdx
+    : Math.max(0, Math.min(Number(ctx.keepStartIndex || 0) || 0, chat.messages.length));
+  chat.messages.splice(insertAt, 0, ...markers);
+}
+
 function undoCompressionSnapshot(undoId) {
   const c = tokensCurrentChat();
   const snap = undoId ? _compressionUndoSnapshots[undoId] : null;
   if (!c || !snap || (snap.chatId && snap.chatId !== c.id)) {
     TokensUiService.toast('压缩快照已失效，无法撤销');
+    return;
+  }
+  if (c.compressedContext && c.compressedContext.undoId === undoId) {
+    if (!confirm('撤销这次压缩？\n\n聊天记录会保留，后续请求将恢复使用压缩前的上下文状态。')) {
+      return;
+    }
+    if (snap.meta && snap.meta.previousCompressedContext) {
+      c.compressedContext = compressionJsonClone(snap.meta.previousCompressedContext);
+    } else {
+      delete c.compressedContext;
+    }
+    applyCompressionSummaryMarkers(c);
+    delete _compressionUndoSnapshots[undoId];
+
+    const stats = getChatTokenStats(c);
+    stats.lastInputTokens = 0;
+    stats.msgCount = compressedMessagesForApi(c).length;
+    stats.time = 0;
+
+    tokensSaveData();
+    TokensUiService.renderChatList();
+    TokensUiService.renderMessages();
+    updateTokenDisplay();
+    if (typeof scheduleAccurateTokenCount === 'function') scheduleAccurateTokenCount(c.id);
+    TokensUiService.toast('已撤销压缩');
     return;
   }
   const summaryIdx = c.messages.findIndex(m => m && m._isSummary && m._compressionUndoId === undoId);
@@ -903,7 +993,7 @@ function undoCompressionSnapshot(undoId) {
   
   const stats = getChatTokenStats(c);
   stats.lastInputTokens = 0;
-  stats.msgCount = c.messages.length;
+  stats.msgCount = compressedMessagesForApi(c).length;
   stats.time = 0;
   
   tokensSaveData();
@@ -975,76 +1065,6 @@ function compressionExtractCheckpointIds(text) {
   return out;
 }
 
-const COMPRESSION_FILE_EXT_PATTERN = String.raw`(?:js|ts|jsx|tsx|py|java|c|cpp|h|hpp|cs|go|rs|rb|php|html|css|scss|json(?:\.gz)?|md|yml|yaml|toml|ini|sql|sh|bat|ps1|txt|csv|xml|vue|svelte|gz)`;
-const COMPRESSION_FILE_EXT_RE = new RegExp(String.raw`\.${COMPRESSION_FILE_EXT_PATTERN}$`, 'i');
-const COMPRESSION_PATH_COMPONENT = String.raw`[\w\u4e00-\u9fa5.@()+-](?:[\w\u4e00-\u9fa5 .@()+-]*[\w\u4e00-\u9fa5.@()+-])?`;
-const COMPRESSION_PATH_RE = new RegExp(String.raw`(?:^|[\s"'([{])((?:[A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/])?(?:${COMPRESSION_PATH_COMPONENT}[\\/])+${COMPRESSION_PATH_COMPONENT}\.${COMPRESSION_FILE_EXT_PATTERN})`, 'g');
-const COMPRESSION_FILENAME_COMPONENT = String.raw`[\w\u4e00-\u9fa5.@()+-]+`;
-const COMPRESSION_FILENAME_RE = new RegExp(String.raw`(?:^|[\s"'([{,;:：|])(${COMPRESSION_FILENAME_COMPONENT}\.${COMPRESSION_FILE_EXT_PATTERN})(?=$|[\s"')\]},;:：。；!?|]|[\\/])`, 'g');
-const COMPRESSION_TOKEN_PATH_RE = new RegExp(String.raw`(?:^|[\s"'([{,;:：|])([^\s"'(){}\[\],;:：，。；!?|]+[\\/][^\s"'(){}\[\],;:：，。；!?|]*\.${COMPRESSION_FILE_EXT_PATTERN})(?=$|[\s"'(){}\[\],;:：，。；!?|])`, 'g');
-const COMPRESSION_SHELL_COMMAND_PATTERN = String.raw`(?:python(?:3(?:\.\d+)?)?|node|npm|pnpm|yarn|java|gcc|g\+\+|clang|bash|sh|cmd|powershell|pwsh)`;
-const COMPRESSION_COMMAND_WITH_PATH_ARG_RE = new RegExp(String.raw`\b${COMPRESSION_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+[\\/]`, 'i');
-const COMPRESSION_COMMAND_PATH_WITH_FILE_ARG_RE = new RegExp(String.raw`[\\/]${COMPRESSION_SHELL_COMMAND_PATTERN}(?:\.exe)?\s+\S+\.${COMPRESSION_FILE_EXT_PATTERN}$`, 'i');
-const COMPRESSION_ROOTED_PATH_RE = /^(?:[A-Za-z]:[\\/]|[\\/]|\.{1,2}[\\/])/;
-const COMPRESSION_GIT_DIFF_PREFIX_RE = /^[ab][\\/](.+)$/;
-const COMPRESSION_COMMON_ABS_ROOT_RE = /^(?:media|home|mnt|tmp|var|opt|usr|Users|root)\//i;
-
-function trimCompressionPathPrefix(p) {
-  let out = p;
-  if (/\s/.test(out) && !COMPRESSION_ROOTED_PATH_RE.test(out)) {
-    const parts = out.split(/\s+/).filter(Boolean);
-    out = parts[parts.length - 1] || out;
-  }
-  const gitPrefix = out.match(COMPRESSION_GIT_DIFF_PREFIX_RE);
-  if (gitPrefix) {
-    out = COMPRESSION_COMMON_ABS_ROOT_RE.test(gitPrefix[1])
-      ? '/' + gitPrefix[1]
-      : gitPrefix[1];
-  }
-  const duplicateRoot = out.slice(1).search(/\/(?:media|home|mnt|tmp|var|opt|usr|Users|root)\//i);
-  if (out.startsWith('/') && duplicateRoot >= 0) {
-    out = out.slice(duplicateRoot + 1);
-  }
-  return out;
-}
-
-function normalizeCompressionFilePathCandidate(value) {
-  let p = compressionString(value)
-    .trim()
-    .replace(/^[`"'([{<]+/, '')
-    .replace(/[`"')\]}>]+$/, '')
-    .replace(/[),.;:，。；]+$/, '')
-    .trim();
-  p = trimCompressionPathPrefix(p);
-  if (!p) return '';
-  if (p.length < 4 || p.length > 240) return '';
-  if (/[\r\n]/.test(p)) return '';
-  if (/\\[rnt]/i.test(p) && !/^[A-Za-z]:[\\/]/.test(p)) return '';
-  if (/\s[\\/]\s/.test(p)) return '';
-  if (/[\\/]/.test(p) && /\b(?:true|false|none|null|undefined)\b/i.test(p)) return '';
-  if (/[\\/]/.test(p) && COMPRESSION_COMMAND_WITH_PATH_ARG_RE.test(p)) return '';
-  if (/[\\/]/.test(p) && COMPRESSION_COMMAND_PATH_WITH_FILE_ARG_RE.test(p)) return '';
-  if (!COMPRESSION_FILE_EXT_RE.test(p)) return '';
-  return p;
-}
-
-function addCompressionFilePathCandidate(out, value) {
-  for (const part of compressionString(value).split('|')) {
-    const p = normalizeCompressionFilePathCandidate(part);
-    if (p) out.add(p);
-  }
-}
-
-function compressionExtractFilePaths(text) {
-  const out = new Set();
-  const s = compressionString(text);
-  for (const m of s.matchAll(COMPRESSION_PATH_RE)) addCompressionFilePathCandidate(out, m[1]);
-  const plainText = s.replace(/\\[rnt]/g, '\n');
-  for (const m of plainText.matchAll(COMPRESSION_TOKEN_PATH_RE)) addCompressionFilePathCandidate(out, m[1]);
-  for (const m of plainText.matchAll(COMPRESSION_FILENAME_RE)) addCompressionFilePathCandidate(out, m[1]);
-  return out;
-}
-
 function compressionRefsFromMessage(m) {
   const textParts = [];
   textParts.push(m.content || '');
@@ -1058,22 +1078,19 @@ function compressionRefsFromMessage(m) {
   const combined = textParts.map(compressionString).join('\n');
   return {
     artifactIds: compressionExtractArtifactIds(combined),
-    checkpointIds: compressionExtractCheckpointIds(combined),
-    filePaths: compressionExtractFilePaths(combined)
+    checkpointIds: compressionExtractCheckpointIds(combined)
   };
 }
 
 function compressionCollectRequiredRefs(messages) {
   const refs = {
     artifactIds: new Set(),
-    checkpointIds: new Set(),
-    filePaths: new Set()
+    checkpointIds: new Set()
   };
   for (const m of messages || []) {
     const r = compressionRefsFromMessage(m || {});
     for (const id of r.artifactIds) refs.artifactIds.add(id);
     for (const id of r.checkpointIds) refs.checkpointIds.add(id);
-    for (const p of r.filePaths) refs.filePaths.add(p);
   }
   return refs;
 }
@@ -1082,12 +1099,10 @@ function compressionMissingRefs(summary, refs) {
   const s = compressionString(summary);
   const missing = {
     artifactIds: [],
-    checkpointIds: [],
-    filePaths: []
+    checkpointIds: []
   };
   for (const id of refs.artifactIds || []) if (!s.includes(id)) missing.artifactIds.push(id);
   for (const id of refs.checkpointIds || []) if (!s.includes(id)) missing.checkpointIds.push(id);
-  for (const p of refs.filePaths || []) if (!s.includes(p)) missing.filePaths.push(p);
   return missing;
 }
 
@@ -1095,7 +1110,7 @@ function compressionValidateSummary(summary, refs) {
   const headings = compressHeadingSet(summary);
   const missingHeadings = COMPRESSION_REQUIRED_HEADINGS.filter(h => !headings.has(h) && !headings.has(normalizeCompressionHeading(h)));
   const missingRefs = compressionMissingRefs(summary, refs);
-  const missingRefCount = missingRefs.artifactIds.length + missingRefs.checkpointIds.length + missingRefs.filePaths.length;
+  const missingRefCount = missingRefs.artifactIds.length + missingRefs.checkpointIds.length;
   return {
     ok: missingHeadings.length === 0 && missingRefCount === 0,
     missingHeadings,
@@ -1115,63 +1130,14 @@ function compressionValidationFeedback(validation) {
   if (validation.missingRefs.checkpointIds.length) {
     lines.push(`必须保留 checkpoint_id：${validation.missingRefs.checkpointIds.join(', ')}`);
   }
-  if (validation.missingRefs.filePaths.length) {
-    lines.push(`必须保留文件路径：${validation.missingRefs.filePaths.slice(0, 80).join(', ')}`);
-  }
-  return lines.join('\n');
-}
-
-function compressionCanAutoPatchMissingFilePaths(validation) {
-  if (!validation || validation.ok) return false;
-  if (validation.missingHeadings && validation.missingHeadings.length) return false;
-  const refs = validation.missingRefs || {};
-  if (refs.artifactIds && refs.artifactIds.length) return false;
-  if (refs.checkpointIds && refs.checkpointIds.length) return false;
-  return !!(refs.filePaths && refs.filePaths.length);
-}
-
-function compressionAppendMissingFilePaths(summary, filePaths) {
-  const missing = Array.from(new Set(filePaths || []))
-    .map(normalizeCompressionFilePathCandidate)
-    .filter(Boolean)
-    .filter(p => !compressionString(summary).includes(p));
-  if (!missing.length) return summary;
-
-  const lines = compressionString(summary).trimEnd().split(/\r?\n/);
-  const headingRe = /^\s*#{1,4}\s+已查看或修改的文件\s*[：:]?\s*$/;
-  const anyHeadingRe = /^\s*#{1,4}\s+/;
-  const sectionLines = [
-    '',
-    '【自动补全的关键文件路径】',
-    ...missing.map(p => `- ${p}`),
-    ''
-  ];
-  const headingIdx = lines.findIndex(line => headingRe.test(line));
-  if (headingIdx < 0) {
-    return `${lines.join('\n')}\n\n## 已查看或修改的文件\n${sectionLines.slice(1).join('\n')}`;
-  }
-
-  let insertAt = lines.length;
-  for (let i = headingIdx + 1; i < lines.length; i++) {
-    if (anyHeadingRe.test(lines[i])) {
-      insertAt = i;
-      break;
-    }
-  }
-  lines.splice(insertAt, 0, ...sectionLines);
   return lines.join('\n');
 }
 
 function compressionAutoPatchSummary(summary, validation, requiredRefs) {
-  if (!compressionCanAutoPatchMissingFilePaths(validation)) {
-    return { summary, validation, patched: false };
-  }
-  const patchedSummary = compressionAppendMissingFilePaths(summary, validation.missingRefs.filePaths);
-  const patchedValidation = compressionValidateSummary(patchedSummary, requiredRefs);
   return {
-    summary: patchedSummary,
-    validation: patchedValidation,
-    patched: patchedSummary !== summary
+    summary,
+    validation,
+    patched: false
   };
 }
 
@@ -1266,6 +1232,7 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
     chatId: options.chatId || (options.chat && options.chat.id) || '',
     signal: options.signal,
     isStopped: options.isStopped,
+    stream: true,
     timeoutMs: options.timeoutMs || COMPRESSION_HELPER_TIMEOUT_MS,
     retryMaxAttempts: Object.prototype.hasOwnProperty.call(options, 'retryMaxAttempts') ? options.retryMaxAttempts : COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS,
     sourceLabel: `${label} · 内部压缩`
@@ -1479,6 +1446,8 @@ async function ensureContextBeforeAgentRun(chat = null, options = {}) {
   const c = chat || tokensCurrentChat();
   const extraMessages = Array.isArray(options.extraMessages) ? options.extraMessages : [];
   const isConcurrentChat = !!(c && c.concurrent && c.concurrent.type === 'concurrent_requests');
+  const ignoreChatForBudget = !!options.ignoreChat || isConcurrentChat;
+  const skipChatCompression = !!options.skipChatCompression;
   const taskOptions = {
     chat: c || options.chat || null,
     chatId: options.chatId || (c && c.id) || '',
@@ -1487,9 +1456,9 @@ async function ensureContextBeforeAgentRun(chat = null, options = {}) {
   };
   if ((!c || !c.messages || !c.messages.length) && !extraMessages.length) return true;
   if (extraMessages.length) {
-    const budget = compressionBudgetInfo(c, extraMessages, { ignoreChat: isConcurrentChat });
+    let budget = compressionBudgetInfo(c, extraMessages, { ignoreChat: ignoreChatForBudget });
     if (budget.needsCompression && Array.isArray(options.mutableMessages) && typeof compressTransientMessagesForAgent === 'function') {
-      await compressTransientMessagesForAgent(options.mutableMessages, {
+      const didCompress = await compressTransientMessagesForAgent(options.mutableMessages, {
         label: options.label || '内部工具循环',
         chat: c,
         chatId: taskOptions.chatId,
@@ -1497,8 +1466,20 @@ async function ensureContextBeforeAgentRun(chat = null, options = {}) {
         isStopped: taskOptions.isStopped,
         preserveFirstUser: !!options.preserveFirstUser
       });
+      if (didCompress) {
+        budget = compressionBudgetInfo(c, options.mutableMessages, { ignoreChat: ignoreChatForBudget });
+      }
+    }
+    if (skipChatCompression) {
+      if (budget.remaining < budget.reserve) {
+        const label = options.label ? ` (${options.label})` : '';
+        TokensUiService.toast(`自动压缩失败${label}，内部上下文仍然过长`, 4000);
+        return false;
+      }
+      return true;
     }
   }
+  if (skipChatCompression) return true;
   if (isConcurrentChat) return true;
   if (!c || !c.messages || !c.messages.length) return true;
   const result = await autoCompressCheck(c, {
@@ -1518,8 +1499,10 @@ async function ensureContextBeforeAgentRun(chat = null, options = {}) {
 
 async function compressChat(chat, options = {}) {
   const keepLast = Math.max(2, parseInt(tokensState.settings.compressKeepLast) || 4);
-  const sourceMessages = (chat.messages || []).filter(m => !m._isCompressing);
+  const visibleSourceMessages = (chat.messages || []).filter(m => !m._isCompressing);
+  const sourceMessages = compressedMessagesForApi(chat, visibleSourceMessages);
   const estimatedBefore = options.estimatedBefore || estimateChatTokens(chat);
+  const previousCompressedContext = chat.compressedContext ? compressionJsonClone(chat.compressedContext) : null;
   const prevGenerating = !!tokensState.isGenerating;
   const prevAbortCtrl = tokensState.abortCtrl || null;
   const taskChatId = options.chatId || (chat && chat.id) || '';
@@ -1535,6 +1518,7 @@ async function compressChat(chat, options = {}) {
     chatId: taskChatId,
     signal: options.signal || (foregroundAbortCtrl ? foregroundAbortCtrl.signal : undefined),
     isStopped: options.isStopped || (shouldTouchGlobalGenerating ? () => !!tokensState.stopRequested : undefined),
+    stream: true,
     timeoutMs: options.timeoutMs || COMPRESSION_HELPER_TIMEOUT_MS,
     retryMaxAttempts: Object.prototype.hasOwnProperty.call(options, 'retryMaxAttempts') ? options.retryMaxAttempts : COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS,
     sourceLabel: `上下文压缩 · ${options.reason || 'manual'}`
@@ -1614,7 +1598,8 @@ async function compressChat(chat, options = {}) {
     originalCount: compressedCount,
     reason: options.reason || 'manual',
     summaryLayer,
-    estimatedBefore
+    estimatedBefore,
+    previousCompressedContext
   });
   chat.messages.push({
     role: 'assistant',
@@ -1667,7 +1652,7 @@ ${feedback}
 
 请重写摘要。要求：
 - 必须补齐全部固定标题。
-- 必须逐字保留上面列出的 artifact_id / checkpoint_id / 文件路径。
+- 必须逐字保留上面列出的 artifact_id / checkpoint_id。
 - 不要解释校验过程，只输出修正后的结构化摘要。`;
       const retrySummary = await tokensApiCore().callOnceWithRole(
         [{ role: 'user', content: retryPrompt }],
@@ -1703,15 +1688,39 @@ ${feedback}
       _summaryLayer: summaryLayer,
       _estimatedBefore: estimatedBefore
     };
-    chat.messages = summaryLayer === 'delta'
-      ? [...preservedSummaries, summaryMsg, ...toKeep]
-      : [summaryMsg, ...toKeep];
+    const replacementSummaries = summaryLayer === 'delta'
+      ? [...preservedSummaries, summaryMsg]
+      : [summaryMsg];
+    const boundaryMessage = toKeep.find(m => m && !isCompressionSummaryMessage(m) && !m._compressionSummaryMarker) || toKeep[0] || null;
+    if (boundaryMessage && !boundaryMessage._compressionBoundaryId) {
+      boundaryMessage._compressionBoundaryId = `cmp_boundary_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+    const keepStartIndex = boundaryMessage ? Math.max(0, chat.messages.indexOf(boundaryMessage)) : 0;
+    chat.compressedContext = {
+      version: 2,
+      undoId,
+      summaryMessages: replacementSummaries.map(m => {
+        const copy = compressionJsonClone(m) || {};
+        delete copy._hiddenFromAI;
+        delete copy._compressionSummaryMarker;
+        return copy;
+      }),
+      keepStartBoundaryId: boundaryMessage && boundaryMessage._compressionBoundaryId || '',
+      keepStartIndex,
+      updatedAt: Date.now(),
+      originalCount: compressedCount,
+      summaryLayer,
+      reason: options.reason || 'manual',
+      estimatedBefore
+    };
+    applyCompressionSummaryMarkers(chat);
     summaryMsg._estimatedAfter = estimateChatTokens(chat);
+    chat.compressedContext.estimatedAfter = summaryMsg._estimatedAfter;
     
     // 清除精确统计缓存（消息变了）
     const compStats = getChatTokenStats(chat);
     compStats.lastInputTokens = 0;
-    compStats.msgCount = chat.messages.length;
+    compStats.msgCount = compressedMessagesForApi(chat).length;
     compStats.time = 0;
     
     tokensSaveData();
@@ -1750,6 +1759,7 @@ ${feedback}
 
 window.estimateTokens = estimateTokens;
 window.estimateMessageTokens = estimateMessageTokens;
+window.compressedMessagesForApi = compressedMessagesForApi;
 window.estimateChatTokens = estimateChatTokens;
 window.normalizeCompressAutoThreshold = normalizeCompressAutoThreshold;
 window.getChatTokenStats = getChatTokenStats;
@@ -1781,6 +1791,7 @@ window.AgentApp.define('tokens', {
   normalizeCompressAutoThreshold,
   estimateTokens,
   estimateMessageTokens,
+  compressedMessagesForApi,
   estimateChatTokens,
   getChatTokenStats,
   loadTokenUsageLedger,

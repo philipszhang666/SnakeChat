@@ -274,6 +274,7 @@ let state = {
     }
   },
   pendingAttachments: [],
+  pendingAttachmentsByChat: {},
   abortCtrl: null,
   activeTaskChatId: null,
   isGenerating: false,
@@ -585,21 +586,11 @@ function sanitizeMessageAttachmentsForSave(msg) {
   if (!msg || !msg.attachments || msg.attachments.length === 0) return msg;
 
   const cleanAttachments = msg.attachments.map(att => {
-    if (att.text && !att.data) return att;
-    const dataSize = att.data ? att.data.length : 0;
-    if (dataSize < 5 * 1024 * 1024) return att;
-    return {
-      id: att.id,
-      name: att.name,
-      mime: att.mime,
-      size: att.size,
-      type: att.type,
-      _fromAI: att._fromAI,
-      _hidden: att._hidden,
-      _aiDescription: att._aiDescription,
-      _stripped: true,
-      _strippedReason: `附件超大（${(dataSize / 1024 / 1024).toFixed(1)}MB），刷新后将丢失。要保留请重新加载。`
-    };
+    if (!att || typeof att !== 'object') return att;
+    const clean = { ...att };
+    delete clean._pending;
+    delete clean._error;
+    return clean;
   });
 
   return { ...msg, attachments: cleanAttachments };
@@ -820,6 +811,9 @@ function discardTemporaryChat(options = {}) {
   }
   if (state.pendingAIAttachmentsByChat && state.pendingAIAttachmentsByChat[tempId]) {
     delete state.pendingAIAttachmentsByChat[tempId];
+  }
+  if (state.pendingAttachmentsByChat && state.pendingAttachmentsByChat[tempId]) {
+    delete state.pendingAttachmentsByChat[tempId];
   }
   if (wasCurrent) state.currentId = options.nextCurrentId || null;
   state.temporaryChat = null;

@@ -344,6 +344,7 @@
     'togglePlanPanel',
     'debateManualPass',
     'debateManualWin',
+    'debateRegenerateRejectedSpeech',
     'openDebateChat',
     'continueDebate',
     'requestStopDebate',

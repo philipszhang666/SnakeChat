@@ -110,7 +110,18 @@ function createScheduledMessageFromComposer(chat, input, text) {
     ScheduledTasksUiService.toast('请选择定时发送时间', 2500);
     return null;
   }
-  if (!text && !(scheduledTasksState.pendingAttachments && scheduledTasksState.pendingAttachments.length)) return null;
+  const hasDraft = typeof hasComposerDraftForChat === 'function'
+    ? hasComposerDraftForChat(chat.id, text)
+    : (!!text || !!(scheduledTasksState.pendingAttachments && scheduledTasksState.pendingAttachments.length));
+  if (!hasDraft) return null;
+  if (typeof hasPendingAttachmentReads === 'function' && hasPendingAttachmentReads(chat.id)) {
+    ScheduledTasksUiService.toast('附件仍在读取中，请稍等', 2500);
+    return null;
+  }
+  if (typeof hasPendingAttachmentErrors === 'function' && hasPendingAttachmentErrors(chat.id)) {
+    ScheduledTasksUiService.toast('附件读取失败，请移除后重试', 3000);
+    return null;
+  }
   if (!scheduledTasksState.settings.apiKey) {
     alert('请先在「设置」中填写 API Key');
     if (typeof openSettings === 'function') openSettings();
@@ -121,6 +132,7 @@ function createScheduledMessageFromComposer(chat, input, text) {
 
   const mode = (typeof _consumeOneShotMode === 'function') ? _consumeOneShotMode() : 'normal';
   const userMsg = _buildUserMessageFromInput(chat, text);
+  if (!userMsg) return null;
   userMsg._hiddenFromAI = true;
   userMsg._scheduled = {
     id: 'sch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),

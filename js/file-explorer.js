@@ -29,6 +29,7 @@ const FILE_EXPLORER_STATE = {
   editorMarkdownPreview: false,
   editorCodePreview: false,
   editorLoading: false,
+  editorOpenSeq: 0,
   editorPythonMode: false,
   editorCodeMirror: null,
   inlineCodeMirror: null,
@@ -62,6 +63,7 @@ const FILE_EXPLORER_STATE = {
   localDrivePromise: null,
   inlineFilePath: '',
   inlineFileKind: '',
+  inlineFileOpenSeq: 0,
   inlineFileSide: 'right',
   inlineChatWidth: 50
 };
@@ -1149,10 +1151,10 @@ function ensureFileEditorCodeMirror(path = FILE_EXPLORER_STATE.editorPath) {
   return cm;
 }
 
-function destroyFileEditorCodeMirror() {
+function destroyFileEditorCodeMirror(options = {}) {
   const cm = FILE_EXPLORER_STATE.editorCodeMirror;
   if (!cm) return;
-  syncFileEditorTextareaFromCodeMirror();
+  if (!options || options.sync !== false) syncFileEditorTextareaFromCodeMirror();
   cm.toTextArea();
   FILE_EXPLORER_STATE.editorCodeMirror = null;
   const shell = fileEditorCodeShell();
@@ -2941,10 +2943,10 @@ function ensureInlineCodeMirror(path) {
   return cm;
 }
 
-function destroyInlineCodeMirror() {
+function destroyInlineCodeMirror(options = {}) {
   const cm = FILE_EXPLORER_STATE.inlineCodeMirror;
   if (!cm) return;
-  syncInlineTextareaFromCodeMirror();
+  if (!options || options.sync !== false) syncInlineTextareaFromCodeMirror();
   cm.toTextArea();
   FILE_EXPLORER_STATE.inlineCodeMirror = null;
   const shell = inlineFileCodeShell();
@@ -3033,6 +3035,7 @@ function closeInlineFilePanel() {
     mainContent.style.removeProperty('--chat-column-width');
   }
   if (panel) panel.hidden = true;
+  FILE_EXPLORER_STATE.inlineFileOpenSeq = (FILE_EXPLORER_STATE.inlineFileOpenSeq || 0) + 1;
   clearInlineFileContent();
   FILE_EXPLORER_STATE.inlineFilePath = '';
   FILE_EXPLORER_STATE.inlineFileKind = '';
@@ -3188,6 +3191,12 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
   const body = document.getElementById('inlineFileBody');
   const footer = document.getElementById('inlineFileFooter');
   if (!body || !footer) return false;
+  const openSeq = (FILE_EXPLORER_STATE.inlineFileOpenSeq || 0) + 1;
+  FILE_EXPLORER_STATE.inlineFileOpenSeq = openSeq;
+  const isCurrentOpen = () => (
+    FILE_EXPLORER_STATE.inlineFileOpenSeq === openSeq
+    && normalizeExplorerPath(FILE_EXPLORER_STATE.inlineFilePath) === normalizedPath
+  );
   clearInlineFileContent();
   const shell = document.createElement('div');
   const textarea = document.createElement('textarea');
@@ -3236,6 +3245,7 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
     const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    if (!isCurrentOpen()) return false;
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
     setContent(r.content || '', false);
@@ -3243,6 +3253,7 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
     textarea.focus();
     return true;
   } catch (e) {
+    if (!isCurrentOpen()) return false;
     textarea.disabled = true;
     setInlineFileStatus(e.message || String(e), 'error');
   }
@@ -3433,6 +3444,7 @@ function closeFileEditor(force = false) {
     refreshFileEditorCodeMirror();
     if (!confirm('文件有未保存修改，确定关闭？')) return;
   }
+  FILE_EXPLORER_STATE.editorOpenSeq = (FILE_EXPLORER_STATE.editorOpenSeq || 0) + 1;
   setPythonEditorMode(false);
   if (modal) modal.classList.remove('show');
   scheduleInlineFileLayoutRefresh();
@@ -3448,6 +3460,13 @@ async function openFileEditor(path) {
   const pathEl = document.getElementById('fileEditorPath');
   const textarea = fileEditorTextarea();
   if (!modal || !textarea) return;
+  const openSeq = (FILE_EXPLORER_STATE.editorOpenSeq || 0) + 1;
+  FILE_EXPLORER_STATE.editorOpenSeq = openSeq;
+  const isCurrentOpen = () => (
+    FILE_EXPLORER_STATE.editorOpenSeq === openSeq
+    && normalizeExplorerPath(FILE_EXPLORER_STATE.editorPath) === normalizedPath
+  );
+  destroyFileEditorCodeMirror({ sync: false });
   FILE_EXPLORER_STATE.editorPath = normalizedPath;
   FILE_EXPLORER_STATE.editorOriginal = '';
   FILE_EXPLORER_STATE.editorFoldedLines = new Set();
@@ -3465,6 +3484,7 @@ async function openFileEditor(path) {
     const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
+    if (!isCurrentOpen()) return;
     textarea.value = r.content || '';
     textarea.disabled = false;
     if (FILE_EXPLORER_STATE.editorCodeMirror) {
@@ -3480,9 +3500,11 @@ async function openFileEditor(path) {
     setFileEditorStatus(`${formatSize(Number(r.size || 0))} / 已读取`, 'ok');
     textarea.focus();
   } catch (e) {
+    if (!isCurrentOpen()) return;
     if (/文件过大/.test(e.message || String(e))) {
       try {
         const url = await fileExplorerPreviewUrl(normalizedPath);
+        if (!isCurrentOpen()) return;
         textarea.value = `文件较大，已改用浏览器只读预览：\n${url}\n\n如果没有自动打开，请复制上面的链接到浏览器。`;
         window.open(url, '_blank', 'noopener');
         setFileEditorStatus('文件较大 / 已打开只读预览', 'ok');

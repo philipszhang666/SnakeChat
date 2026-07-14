@@ -175,6 +175,9 @@ function saveDialogManagerSettings() {
 function dialogManagerUserAnchors(chat) {
   const anchors = [];
   if (!chat || !Array.isArray(chat.messages)) return anchors;
+  const compressionSummaryIdx = chat.compressedContext
+    ? chat.messages.findIndex(msg => msg && msg._compressionSummaryMarker)
+    : -1;
   chat.messages.forEach((msg, index) => {
     if (!msg || msg._hiddenFromUI || msg.role !== 'user') return;
     const anchorIndex = anchors.length;
@@ -183,7 +186,8 @@ function dialogManagerUserAnchors(chat) {
       index,
       title: dialogManagerMessageTitle(msg, anchorIndex),
       tip: dialogManagerUserQuestionText(msg, anchorIndex),
-      time: dialogManagerMessageTime(msg, anchorIndex)
+      time: dialogManagerMessageTime(msg, anchorIndex),
+      discarded: compressionSummaryIdx > 0 && index < compressionSummaryIdx
     });
   });
   return anchors;
@@ -203,7 +207,7 @@ function renderDialogManagerTimelinePanel() {
     return;
   }
   wrap.innerHTML = anchors.map(anchor => `
-    <button class="dialog-timeline-row" type="button" data-action="valueClick" data-handler="jumpToDialogMessage" data-value="${anchor.index}" data-value-type="number">
+    <button class="dialog-timeline-row ${anchor.discarded ? 'discarded' : ''}" type="button" data-action="valueClick" data-handler="jumpToDialogMessage" data-value="${anchor.index}" data-value-type="number">
       <span class="dialog-timeline-dot"></span>
       <span class="dialog-timeline-text">
         <strong>${escapeHtml(anchor.title)}</strong>
@@ -231,7 +235,7 @@ function updateDialogTimeline() {
   }
   const activeIdx = getNearestDialogTimelineIndex(anchors);
   list.innerHTML = anchors.map((anchor, i) => `
-    <button class="dialog-timeline-point ${i === activeIdx ? 'active' : ''}" type="button" data-action="valueClick" data-handler="jumpToDialogMessage" data-value="${anchor.index}" data-value-type="number" data-tip="${escapeHtml(anchor.tip)}" aria-label="${escapeHtml('跳转到 ' + anchor.title)}">
+    <button class="dialog-timeline-point ${i === activeIdx ? 'active' : ''} ${anchor.discarded ? 'discarded' : ''}" type="button" data-action="valueClick" data-handler="jumpToDialogMessage" data-value="${anchor.index}" data-value-type="number" data-tip="${escapeHtml(anchor.tip)}" aria-label="${escapeHtml('跳转到 ' + anchor.title)}">
       <span class="dialog-timeline-point-dot"></span>
     </button>
   `).join('');

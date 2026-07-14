@@ -314,6 +314,9 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             sandbox.debateManualWin = (chatId, side) => {
               sandbox.debateManualWinArgs = [chatId, side];
             };
+            sandbox.debateRegenerateRejectedSpeech = (chatId) => {
+              sandbox.debateRegenerateChatId = chatId;
+            };
             sandbox.openDebateChat = (chatId) => {
               sandbox.debateOpenedChat = chatId;
             };
@@ -822,6 +825,16 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
               preventDefault() {}
             });
             assert.deepStrictEqual(sandbox.debateManualWinArgs, ['debate-chat', 'pro']);
+
+            listeners.click({
+              target: eventTarget({
+                action: 'valueClick',
+                handler: 'debateRegenerateRejectedSpeech',
+                value: 'debate-chat'
+              }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.debateRegenerateChatId, 'debate-chat');
 
             listeners.click({
               target: eventTarget({
@@ -1957,6 +1970,163 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
         )
 
     @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_chat_attachments_are_chat_scoped_and_wait_for_async_reads(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const root = process.cwd();
+            const elements = {};
+            function makeEl(id) {
+              return elements[id] || (elements[id] = {
+                id,
+                value: '',
+                style: {},
+                innerHTML: '',
+                textContent: '',
+                hidden: false,
+                scrollTop: 0,
+                scrollHeight: 0,
+                clientHeight: 0,
+                classList: {
+                  values: new Set(),
+                  add(v) { this.values.add(v); },
+                  remove(v) { this.values.delete(v); },
+                  toggle(v, force) { const on = force === undefined ? !this.values.has(v) : !!force; on ? this.add(v) : this.remove(v); return on; },
+                  contains(v) { return this.values.has(v); }
+                },
+                addEventListener() {},
+                dispatchEvent() {},
+                focus() {},
+                setSelectionRange() {},
+                querySelectorAll() { return []; }
+              });
+            }
+
+            const state = {
+              settings: {},
+              chats: [
+                { id: 'chat-a', title: 'A', messages: [], createdAt: 1 },
+                { id: 'chat-b', title: 'B', messages: [], createdAt: 2 }
+              ],
+              currentId: 'chat-a',
+              pendingAttachments: [],
+              pendingAttachmentsByChat: {},
+              pendingAIAttachments: []
+            };
+
+            const sandbox = {
+              console,
+              window: null,
+              globalThis: null,
+              document: { getElementById: makeEl, querySelector() { return makeEl('query'); } },
+              Event: function Event(type) { this.type = type; },
+              requestAnimationFrame(cb) { return setTimeout(cb, 0); },
+              btoa(str) { return Buffer.from(str, 'binary').toString('base64'); },
+              toastMessages: [],
+              toast(msg) { sandbox.toastMessages.push(String(msg)); },
+              alert(msg) { sandbox.alertMessage = msg; },
+              escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); },
+              renderChatList() {},
+              renderMessages() {},
+              updateSendBtn() { sandbox.updateSendBtnCount = (sandbox.updateSendBtnCount || 0) + 1; },
+              updateTokenDisplay() {},
+              updateDialogTimeline() {},
+              hidePromptSuggestions() {},
+              takePendingAIAttachments() { return []; }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            vm.createContext(sandbox);
+
+            function run(file) {
+              const code = fs.readFileSync(path.join(root, file), 'utf8');
+              vm.runInContext(code, sandbox, { filename: file });
+            }
+
+            run('js/app-context.js');
+            sandbox.AgentApp.define('state', {
+              state,
+              saveData() {},
+              persistSettings() {},
+              currentChat() { return state.chats.find(c => c.id === state.currentId) || null; },
+              chatById(id) { return state.chats.find(c => c.id === id) || null; },
+              isCurrentChat(id) { return (typeof id === 'string' ? id : id && id.id) === state.currentId; },
+              chatTaskById() { return null; },
+              isChatGenerating() { return false; },
+              syncGlobalTaskState() {},
+              requestStopChatTask() { return false; }
+            });
+            sandbox.AgentApp.define('orchestrationService', {});
+            run('js/chat.js');
+
+            const chat = sandbox.AgentApp.require('chat');
+            const plain = value => JSON.parse(JSON.stringify(value));
+            const resolvers = {};
+            function delayedTextFile(name, text) {
+              return {
+                name,
+                type: 'text/plain',
+                size: text.length,
+                text() {
+                  return new Promise(resolve => { resolvers[name] = () => resolve(text); });
+                }
+              };
+            }
+
+            chat.addAttachment(delayedTextFile('first.txt', 'one'), 'file');
+            chat.addAttachment(delayedTextFile('second.txt', 'two'), 'file');
+            assert.deepStrictEqual(plain(chat.pendingAttachmentsForChat('chat-a').map(a => a.name)), ['first.txt', 'second.txt']);
+            assert.strictEqual(chat.hasPendingAttachmentReads('chat-a'), true);
+            assert.strictEqual(sandbox._buildUserMessageFromInput(state.chats[0], 'send now'), null);
+
+            chat.switchChat('chat-b');
+            assert.deepStrictEqual(plain(chat.currentPendingAttachments().map(a => a.name)), []);
+
+            resolvers['second.txt']();
+            resolvers['first.txt']();
+            setTimeout(() => {
+              try {
+                assert.deepStrictEqual(plain(chat.pendingAttachmentsForChat('chat-a').map(a => a.name)), ['first.txt', 'second.txt']);
+                assert.deepStrictEqual(plain(chat.pendingAttachmentsForChat('chat-a').map(a => a.text)), ['one', 'two']);
+                assert.strictEqual(chat.hasPendingAttachmentReads('chat-a'), false);
+                assert.deepStrictEqual(plain(chat.pendingAttachmentsForChat('chat-b')), []);
+
+                chat.switchChat('chat-a');
+                const msg = sandbox._buildUserMessageFromInput(state.chats[0], 'done');
+                assert.strictEqual(msg.attachments.length, 2);
+                assert.deepStrictEqual(plain(msg.attachments.map(a => a.name)), ['first.txt', 'second.txt']);
+                assert.deepStrictEqual(plain(msg.attachments.map(a => a.text)), ['one', 'two']);
+                assert.ok(!Object.prototype.hasOwnProperty.call(msg.attachments[0], '_pending'));
+                process.exit(0);
+              } catch (err) {
+                console.error(err);
+                process.exit(1);
+              }
+            }, 0);
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / 'chat_attachment_scope_test.js'
+            script_path.write_text(script, encoding='utf-8')
+            completed = subprocess.run(
+                ['node', str(script_path)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f'chat attachment scope runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
+        )
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
     def test_api_adapters_sanitize_malformed_tool_call_arguments(self):
         script = textwrap.dedent(
             r"""
@@ -2305,6 +2475,150 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             completed.returncode,
             0,
             msg=f'file explorer remote link runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
+        )
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_file_editor_ignores_stale_read_file_results(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const root = process.cwd();
+            function makeClassList(el) {
+              const classes = new Set();
+              return {
+                add(...items) { items.forEach(item => classes.add(item)); el.className = Array.from(classes).join(' '); },
+                remove(...items) { items.forEach(item => classes.delete(item)); el.className = Array.from(classes).join(' '); },
+                toggle(item, force) {
+                  const enabled = force === undefined ? !classes.has(item) : !!force;
+                  if (enabled) classes.add(item);
+                  else classes.delete(item);
+                  el.className = Array.from(classes).join(' ');
+                  return enabled;
+                },
+                contains(item) { return classes.has(item); }
+              };
+            }
+            function makeElement(id) {
+              const el = {
+                id,
+                value: '',
+                textContent: '',
+                innerHTML: '',
+                className: '',
+                hidden: false,
+                disabled: false,
+                style: { setProperty() {}, removeProperty() {} },
+                dataset: {},
+                children: [],
+                appendChild(child) { this.children.push(child); child.parentNode = this; return child; },
+                removeAttribute(name) { delete this[name]; },
+                setAttribute(name, value) { this[name] = String(value); },
+                addEventListener() {},
+                removeEventListener() {},
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                focus() { this.focused = true; },
+                getBoundingClientRect() { return { width: 1200, height: 800 }; }
+              };
+              el.classList = makeClassList(el);
+              return el;
+            }
+
+            const elements = new Map();
+            [
+              'fileEditorModal',
+              'fileEditorPath',
+              'fileEditorContent',
+              'fileEditorStatus',
+              'fileEditorCodeShell',
+              'fileEditorMarkdownPreview',
+              'fileEditorMarkdownToggle',
+              'fileEditorCodeToggle',
+              'fileEditorSaveBtn'
+            ].forEach(id => elements.set(id, makeElement(id)));
+
+            const pending = [];
+            const sandbox = {
+              console,
+              setTimeout,
+              clearTimeout,
+              requestAnimationFrame(fn) { return setTimeout(fn, 0); },
+              cancelAnimationFrame(id) { clearTimeout(id); },
+              confirm() { return true; },
+              document: {
+                getElementById(id) { return elements.get(id) || null; },
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                createElement(tag) { return makeElement(tag); },
+                body: makeElement('body'),
+                addEventListener() {},
+                removeEventListener() {}
+              },
+              navigator: { clipboard: { writeText() { return Promise.resolve(); } } },
+              TERMINAL_CONFIG: { serverUrl: 'http://127.0.0.1:18765', workspace: '.' },
+              isRemoteAgentActive() { return false; },
+              toast(message, ms) { sandbox.toastArgs = [message, ms]; },
+              callAgentBackend(action, body) {
+                assert.strictEqual(action, 'read_file');
+                return new Promise(resolve => pending.push({ path: body.path, resolve }));
+              }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            vm.createContext(sandbox);
+
+            function run(file) {
+              const code = fs.readFileSync(path.join(root, file), 'utf8');
+              vm.runInContext(code, sandbox, { filename: file });
+            }
+
+            run('js/app-context.js');
+            run('js/ui-service.js');
+            run('js/file-explorer.js');
+
+            (async () => {
+              const oldOpen = sandbox.openFileEditor('reccode/model/context_aware_recommender/__init__.py');
+              const newOpen = sandbox.openFileEditor('properties/quick_start_config/context-aware_ml-100k.yaml');
+              assert.deepStrictEqual(pending.map(p => p.path), [
+                'reccode/model/context_aware_recommender/__init__.py',
+                'properties/quick_start_config/context-aware_ml-100k.yaml'
+              ]);
+
+              pending[1].resolve({ ok: true, content: "threshold: {'rating': 4}\nload_col:\n", size: 196 });
+              await newOpen;
+              assert.strictEqual(elements.get('fileEditorPath').textContent, 'properties/quick_start_config/context-aware_ml-100k.yaml');
+              assert.strictEqual(elements.get('fileEditorContent').value, "threshold: {'rating': 4}\nload_col:\n");
+
+              pending[0].resolve({ ok: true, content: 'from recbole.model.context_aware_recommender.afm import AFM\n', size: 2048 });
+              await oldOpen;
+              assert.strictEqual(elements.get('fileEditorPath').textContent, 'properties/quick_start_config/context-aware_ml-100k.yaml');
+              assert.strictEqual(elements.get('fileEditorContent').value, "threshold: {'rating': 4}\nload_col:\n");
+            })().catch(err => {
+              console.error(err);
+              process.exit(1);
+            });
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / 'file_editor_stale_read_test.js'
+            script_path.write_text(script, encoding='utf-8')
+            completed = subprocess.run(
+                ['node', str(script_path)],
+                cwd=ROOT,
+                text=True,
+                encoding='utf-8',
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f'file editor stale read runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
         )
 
 
