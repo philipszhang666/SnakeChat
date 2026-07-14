@@ -571,6 +571,36 @@ test.describe('extra settings prompts and safety controls without real services'
     expect(renderedPaths).not.toContain('>- search_54.py</a>');
     expect(renderedPaths).not.toContain('data-explorer-file="../../../conda_envs/nlgcl/bin/python main.py"');
 
+    const wrapMetrics = await page.evaluate(() => {
+      const longPaths = [
+        '/media/inspur/disk1/zhzhang/Ours/NTSSM+/logs/amazon-toys-games_LightGCN_NT_lr0.001_reg0.0001_dim128_nl2_uu1.50_ii1.00_ui0.80/result.json',
+        '/media/inspur/disk1/zhzhang/Ours/NTSSM+/logs/amazon-toys-games_LightGCN_NT_lr0.001_reg0.0001_dim128_nl2_uu1.80_ii0.80_ui0.20/result.json',
+        '/media/inspur/disk1/zhzhang/Ours/NTSSM+/logs/amazon-beauty_LightGCN_NT_lr0.001_reg0.0001_dim128_nl2_uu2.00_ii0.20_ui2.00/result.json'
+      ];
+      const chat = currentChat();
+      chat.messages = [{
+        role: 'assistant',
+        content: ['[Compressed summary]', '', '## Required files', ...longPaths.map(path => `- ${path}`)].join('\n'),
+        _isSummary: true
+      }];
+      renderMessages();
+      const scroller = document.querySelector('.messages');
+      const body = document.querySelector('.msg-body');
+      const links = Array.from(document.querySelectorAll('.msg-content a.file-path-link'));
+      return {
+        scrollerClientWidth: scroller ? scroller.clientWidth : 0,
+        scrollerScrollWidth: scroller ? scroller.scrollWidth : 0,
+        bodyClientWidth: body ? body.clientWidth : 0,
+        bodyScrollWidth: body ? body.scrollWidth : 0,
+        linkCount: links.length,
+        allLinksWrap: links.every(link => getComputedStyle(link).whiteSpace !== 'nowrap')
+      };
+    });
+    expect(wrapMetrics.linkCount).toBe(3);
+    expect(wrapMetrics.allLinksWrap).toBe(true);
+    expect(wrapMetrics.scrollerScrollWidth).toBeLessThanOrEqual(wrapMetrics.scrollerClientWidth + 2);
+    expect(wrapMetrics.bodyScrollWidth).toBeLessThanOrEqual(wrapMetrics.bodyClientWidth + 2);
+
     await page.evaluate(() => {
       const apiCore = window.AgentApp.require('apiCore');
       if (window.__e2eOriginalCompressionCallOnce) {

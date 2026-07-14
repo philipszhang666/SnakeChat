@@ -537,6 +537,74 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     clientErrors.expectNoErrors();
   });
 
+  test('file explorer batch cut and delete failures leave only remaining items retryable', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await installBrowserStubs(page);
+    const { backend, clientErrors } = await gotoApp(page);
+
+    const item = name => page.locator('#fileExplorerList .file-explorer-item').filter({ hasText: name });
+    const backendCallCount = (action, path) => backend.backendCalls.filter(call =>
+      call.action === action && call.body.path === path
+    ).length;
+    const expectCallCount = async (action, path, count) => {
+      await expect.poll(() => backendCallCount(action, path)).toBe(count);
+    };
+
+    await openExplorer(page);
+    await item('sample.py').click({ modifiers: ['Control'] });
+    await item('sample.tex').click({ modifiers: ['Control'] });
+    backend.backendFailures.push({
+      action: 'move_file',
+      path: 'sample.tex',
+      targetDir: 'src',
+      error: 'mock move failed'
+    });
+
+    await openFileContextMenu(page, 'sample.py');
+    await clickContextMenuAction(page, 'cut-item');
+    await openFileContextMenu(page, 'src');
+    await clickContextMenuAction(page, 'paste');
+    await expectCallCount('move_file', 'sample.py', 1);
+    await expectCallCount('move_file', 'sample.tex', 1);
+    await expect.poll(() => page.evaluate(() => (
+      window.AgentApp.require('fileExplorer').FILE_EXPLORER_STATE.clipboard?.items || []
+    ).map(item => item.path))).toEqual(['sample.tex']);
+
+    await openFileContextMenu(page, 'src');
+    await clickContextMenuAction(page, 'paste');
+    await expectCallCount('move_file', 'sample.py', 1);
+    await expectCallCount('move_file', 'sample.tex', 2);
+    await expect.poll(() => page.evaluate(() => (
+      window.AgentApp.require('fileExplorer').FILE_EXPLORER_STATE.clipboard
+    ))).toBeNull();
+
+    await item('sample.pdf').click({ modifiers: ['Control'] });
+    await item('sample.png').click({ modifiers: ['Control'] });
+    backend.backendFailures.push({
+      action: 'delete_file',
+      path: 'sample.png',
+      error: 'mock delete failed'
+    });
+
+    await openFileContextMenu(page, 'sample.pdf');
+    await clickContextMenuAction(page, 'delete');
+    await expectCallCount('delete_file', 'sample.pdf', 1);
+    await expectCallCount('delete_file', 'sample.png', 1);
+    await expect.poll(() => page.evaluate(() =>
+      window.selectedFileExplorerItems().map(item => item.path)
+    )).toEqual(['sample.png']);
+
+    await openFileContextMenu(page, 'sample.png');
+    await clickContextMenuAction(page, 'delete');
+    await expectCallCount('delete_file', 'sample.pdf', 1);
+    await expectCallCount('delete_file', 'sample.png', 2);
+    await expect.poll(() => page.evaluate(() =>
+      window.selectedFileExplorerItems().map(item => item.path)
+    )).toEqual([]);
+
+    clientErrors.expectNoErrors();
+  });
+
   test('file explorer graphical window opens from the blank context menu and reuses existing actions', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await installBrowserStubs(page);

@@ -1036,7 +1036,27 @@ async function mockLlm(route, options, state) {
   await fulfillSafely(route, jsonResponse(makeOpenAiResponse(body, callNumber, options.replyPrefix)));
 }
 
+function mockBackendFailureMatches(failure, action, body = {}) {
+  if (!failure || typeof failure !== 'object') return false;
+  if (failure.action && failure.action !== action) return false;
+  if (failure.path !== undefined && String(failure.path) !== String(body.path || '')) return false;
+  if (failure.targetDir !== undefined && String(failure.targetDir) !== String(body.target_dir || '')) return false;
+  return true;
+}
+
+function takeMockBackendFailure(action, body, state = {}) {
+  const failures = Array.isArray(state.backendFailures) ? state.backendFailures : [];
+  const index = failures.findIndex(failure => mockBackendFailureMatches(failure, action, body));
+  if (index < 0) return null;
+  const [failure] = failures.splice(index, 1);
+  if (failure && failure.response && typeof failure.response === 'object') return failure.response;
+  return { ok: false, error: (failure && failure.error) || `mock ${action} failure` };
+}
+
 function agentBackendPayload(action, body, state = {}) {
+  const failure = takeMockBackendFailure(action, body, state);
+  if (failure) return failure;
+
   if (action === 'remote_status') {
     return {
       ok: true,
@@ -1300,6 +1320,7 @@ async function installMockBackend(page, options = {}) {
     lmsProxyCalls: [],
     lmsServiceCalls: [],
     failedOnce: false,
+    backendFailures: [],
     gitInitialized: options.gitInRepo !== false,
     lmsHasSavedCredential: !!options.lmsHasSavedCredential,
     commandTasks: {},

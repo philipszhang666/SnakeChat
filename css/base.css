@@ -461,7 +461,7 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 .msg-timer .timer-streaming{color:var(--primary);animation:timerPulse 1.2s ease-in-out infinite}
 .msg-timer .timer-done{color:var(--text-secondary);opacity:.7}
 @keyframes timerPulse{0%,100%{opacity:1}50%{opacity:.55}}
-.msg-content{line-height:1.7;font-size:14.5px;word-wrap:break-word}
+.msg-content{line-height:1.7;font-size:14.5px;word-wrap:break-word;overflow-wrap:break-word}
 .msg-content.user-plain-text{white-space:pre-wrap;overflow-wrap:anywhere}
 .msg-content p{margin:6px 0}
 .msg-content ul,.msg-content ol{padding-left:24px;margin:6px 0}
@@ -474,7 +474,8 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 .msg-content h4{font-size:1em}
 .msg-content a{color:var(--primary);text-decoration:none}
 .msg-content a:hover{text-decoration:underline}
-.msg-content a.file-path-link{font-family:'SF Mono',Monaco,Consolas,monospace;white-space:nowrap}
+.msg-content a.file-path-link{font-family:'SF Mono',Monaco,Consolas,monospace;white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.msg-content a.file-path-link code{white-space:normal;overflow-wrap:anywhere;word-break:break-word}
 .msg-content hr{border:none;border-top:1px solid var(--border);margin:14px 0}
 
 /* 代码块 */

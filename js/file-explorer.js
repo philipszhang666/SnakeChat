@@ -1681,6 +1681,22 @@ function clearFileExplorerSelection(options = {}) {
   if (options.render !== false) renderFileExplorer();
 }
 
+function removeFileExplorerSelectionPaths(paths, options = {}) {
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.delete !== 'function') {
+    FILE_EXPLORER_STATE.selectedItems = new Map();
+  }
+  const normalizedPaths = (Array.isArray(paths) ? paths : [paths])
+    .map(normalizeExplorerPath)
+    .filter(Boolean);
+  if (!normalizedPaths.length || !FILE_EXPLORER_STATE.selectedItems.size) return false;
+  let changed = false;
+  for (const path of normalizedPaths) {
+    changed = FILE_EXPLORER_STATE.selectedItems.delete(path) || changed;
+  }
+  if (changed && options.render !== false) renderFileExplorer();
+  return changed;
+}
+
 function toggleFileExplorerSelection(path, type) {
   const normalizedPath = normalizeExplorerPath(path);
   if (!normalizedPath) return;
@@ -4420,6 +4436,33 @@ function setFileExplorerClipboard(path, type, mode = 'copy') {
   return setFileExplorerClipboardItems([{ path, type }], mode);
 }
 
+function removeFileExplorerClipboardPaths(paths) {
+  const clip = FILE_EXPLORER_STATE.clipboard;
+  const normalizedPaths = new Set(
+    (Array.isArray(paths) ? paths : [paths])
+      .map(normalizeExplorerPath)
+      .filter(Boolean)
+  );
+  if (!clip || !normalizedPaths.size) return false;
+  const items = fileExplorerClipboardItems(clip);
+  const remaining = items.filter(item => !normalizedPaths.has(item.path));
+  if (remaining.length === items.length) return false;
+  if (!remaining.length) {
+    FILE_EXPLORER_STATE.clipboard = null;
+  } else {
+    const first = remaining[0];
+    FILE_EXPLORER_STATE.clipboard = {
+      ...clip,
+      path: first.path,
+      type: first.type,
+      name: first.name,
+      items: remaining
+    };
+  }
+  updateGraphicalFileExplorerToolbar();
+  return true;
+}
+
 function copyFileExplorerItem(path = FILE_EXPLORER_STATE.contextPath, type = FILE_EXPLORER_STATE.contextType) {
   const items = fileExplorerOperationItemsFor(path, type);
   if (!setFileExplorerClipboardItems(items, 'copy')) return;
@@ -4489,6 +4532,7 @@ async function moveFileExplorerItemsToDirectory(items, targetDir, options = {}) 
       if (!r || !r.ok) throw new Error((r && r.error) || '移动失败');
       lastResult = r;
       updateMovedExplorerReferences(item.path, r.new_path || r.path || item.path);
+      removeFileExplorerSelectionPaths([item.path], { render: false });
     }
     clearFileExplorerSelection({ render: false });
     const lastItem = moveItems[moveItems.length - 1];
@@ -4500,6 +4544,7 @@ async function moveFileExplorerItemsToDirectory(items, targetDir, options = {}) 
     return true;
   } catch (e) {
     fileExplorerToast(e.message || String(e));
+    await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
     return false;
   }
 }
@@ -4516,8 +4561,13 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
   const pasteItems = isCut
     ? items.filter(item => normalizeExplorerPath(parentExplorerPath(item.path)) !== normalizedTargetDir)
     : items;
+  if (isCut && pasteItems.length !== items.length) {
+    const pastePaths = new Set(pasteItems.map(item => item.path));
+    removeFileExplorerClipboardPaths(items.filter(item => !pastePaths.has(item.path)).map(item => item.path));
+  }
   if (isCut && !pasteItems.length) {
     FILE_EXPLORER_STATE.clipboard = null;
+    updateGraphicalFileExplorerToolbar();
     fileExplorerToast('文件已在当前目录');
     return;
   }
@@ -4538,10 +4588,13 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
       lastResult = r;
       if (isCut) {
         updateMovedExplorerReferences(item.path, r.new_path || r.path || item.path);
+        removeFileExplorerClipboardPaths([item.path]);
+        removeFileExplorerSelectionPaths([item.path], { render: false });
       }
     }
     if (isCut) {
       FILE_EXPLORER_STATE.clipboard = null;
+      updateGraphicalFileExplorerToolbar();
       clearFileExplorerSelection({ render: false });
     }
     const lastItem = pasteItems[pasteItems.length - 1] || items[0];
@@ -4552,6 +4605,7 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
     await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
   } catch (e) {
     fileExplorerToast(e.message || String(e));
+    await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
   }
 }
 
@@ -4629,12 +4683,15 @@ async function deleteFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, ty
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
       closeDeletedExplorerReferences(normalizedPath);
+      removeFileExplorerSelectionPaths([normalizedPath], { render: false });
+      removeFileExplorerClipboardPaths([normalizedPath]);
     }
     clearFileExplorerSelection({ render: false });
     fileExplorerToast(items.length > 1 ? `已删除 ${items.length} 项` : '已删除');
     refreshFileExplorer();
   } catch (e) {
     fileExplorerToast(e.message || String(e));
+    await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
   }
 }
 

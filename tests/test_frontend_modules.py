@@ -720,6 +720,7 @@ class FrontendModuleTests(unittest.TestCase):
     def test_ai_file_links_resolve_bare_filenames_without_guessing(self):
         markdown_js = (ROOT / 'js' / 'markdown.js').read_text(encoding='utf-8')
         file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
 
         self.assertIn('function isBareMarkdownFileLinkPath(path)', markdown_js)
         self.assertIn('function renderMarkdownFilePathAnchor(rawPath, options = {})', markdown_js)
@@ -733,6 +734,8 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn("callAgentBackend(\n    'find_file'", file_explorer_js)
         self.assertIn('if (!type && isBareFileExplorerFileReference(normalizedPath))', file_explorer_js)
         self.assertIn('Multiple files named ${name}; use a more specific relative path', file_explorer_js)
+        self.assertIn(".msg-content a.file-path-link{font-family:'SF Mono',Monaco,Consolas,monospace;white-space:normal;overflow-wrap:anywhere;word-break:break-word}", base_css)
+        self.assertIn('.msg-content a.file-path-link code{white-space:normal;overflow-wrap:anywhere;word-break:break-word}', base_css)
 
     def test_beacon_consumes_state_module(self):
         beacon_js = (ROOT / 'js' / 'beacon.js').read_text(encoding='utf-8')

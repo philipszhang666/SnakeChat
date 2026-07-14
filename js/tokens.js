@@ -766,7 +766,7 @@ function resetTokenStats() {
 
 const COMPRESSION_UNDO_TTL_MS = 30 * 60 * 1000;
 const _compressionUndoSnapshots = {};
-const COMPRESSION_HELPER_TIMEOUT_MS = 90 * 1000;
+const COMPRESSION_HELPER_TIMEOUT_MS = 300 * 1000;
 const COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS = 0;
 const COMPRESSION_MAX_DELTA_SUMMARIES = 3;
 
