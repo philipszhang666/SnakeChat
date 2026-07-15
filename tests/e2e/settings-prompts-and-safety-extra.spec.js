@@ -312,6 +312,105 @@ test.describe('extra settings prompts and safety controls without real services'
     clientErrors.expectNoErrors();
   });
 
+  test('auto compression retries summary validation failures before canceling the request', async ({ page }) => {
+    const { clientErrors } = await gotoApp(page);
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      window.__e2eOriginalAutoValidationCallOnce = apiCore.callOnceWithRole;
+      window.__e2eAutoValidationCalls = [];
+      const validSummary = () => [
+        '## 当前任务',
+        'Verify automatic compression validation repair.',
+        '',
+        '## 用户目标和约束',
+        'Automatic compression should feed validation errors back to the model before failing.',
+        '',
+        '## 已完成事项',
+        'The mocked compressor produced a valid summary after repeated validation feedback.',
+        '',
+        '## 关键决策和事实',
+        'Validation failures are retryable for automatic compression.',
+        '',
+        '## 已查看或修改的文件',
+        '无',
+        '',
+        '## 工具/命令结果',
+        '无',
+        '',
+        '## 计划/大纲状态',
+        '无',
+        '',
+        '## 测试和验证状态',
+        'Playwright verified automatic validation repair.',
+        '',
+        '## 未完成事项',
+        'Continue the original request after compression.',
+        '',
+        '## 风险/阻塞',
+        '无',
+        '',
+        '## 下一步建议',
+        'Use the compressed context for the next model request.',
+        '',
+        '## 可丢弃上下文',
+        'Earlier raw message wording can be discarded.'
+      ].join('\n');
+      apiCore.callOnceWithRole = async (messages, model, systemPrompt, options) => {
+        window.__e2eAutoValidationCalls.push({
+          prompt: String(messages && messages[0] && messages[0].content || ''),
+          sourceLabel: String(options && options.sourceLabel || '')
+        });
+        if (window.__e2eAutoValidationCalls.length < 3) {
+          return [
+            '## 当前任务',
+            'This summary is intentionally incomplete.'
+          ].join('\n');
+        }
+        return validSummary();
+      };
+
+      window.saveContextLimitRules([{ key: 'e2e-auto-validation-model', limit: 8000 }]);
+      state.settings.currentModel = 'e2e-auto-validation-model';
+      state.settings.compressAutoEnabled = true;
+      state.settings.compressAutoThreshold = 50;
+      state.settings.compressKeepLast = 2;
+      state.settings.maxTokens = 0;
+      state.settings.systemPrompt = '';
+      window.AgentApp.require('chat').newChat();
+      const chat = currentChat();
+      const roles = ['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant'];
+      chat.messages = roles.map((role, idx) => ({
+        role,
+        content: `auto validation retry message ${idx} ` + 'x'.repeat(3000)
+      }));
+      renderMessages();
+    });
+
+    const result = await page.evaluate(() => window.autoCompressCheck(currentChat()));
+    expect(result).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__e2eAutoValidationCalls.length)).toBe(3);
+    const callInfo = await page.evaluate(() => ({
+      calls: window.__e2eAutoValidationCalls,
+      hasSummary: currentChat().messages.some(m => !!m._isSummary)
+    }));
+    expect(callInfo.hasSummary).toBe(true);
+    expect(callInfo.calls[1].prompt).toContain('【校验失败】');
+    expect(callInfo.calls[1].prompt).toContain('缺少固定标题');
+    expect(callInfo.calls[1].sourceLabel).toContain('重写 1/3');
+    expect(callInfo.calls[2].sourceLabel).toContain('重写 2/3');
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      if (window.__e2eOriginalAutoValidationCallOnce) {
+        apiCore.callOnceWithRole = window.__e2eOriginalAutoValidationCallOnce;
+        delete window.__e2eOriginalAutoValidationCallOnce;
+      }
+      delete window.__e2eAutoValidationCalls;
+    });
+    clientErrors.expectNoErrors();
+  });
+
   test('context compression keeps stable base summaries and merges bounded deltas', async ({ page }) => {
     const { clientErrors } = await gotoApp(page);
     await page.evaluate(() => {

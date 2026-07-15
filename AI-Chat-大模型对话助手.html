@@ -821,7 +821,11 @@
     <div class="remote-connection-grid">
       <label>
         <span>SSH 命令</span>
-        <input id="remoteSshCommand" type="text" placeholder="ssh user@example.com 或 ssh -p 22 alias">
+        <div class="remote-ssh-command-wrap">
+          <input id="remoteSshCommand" type="text" autocomplete="off" placeholder="ssh user@example.com 或 ssh -p 22 alias">
+          <button id="remoteSshHistoryToggle" class="remote-ssh-history-toggle" type="button" aria-label="展开 SSH 历史记录" aria-expanded="false">▾</button>
+          <div id="remoteSshProfileMenu" class="remote-ssh-profile-menu" hidden></div>
+        </div>
       </label>
       <label>
         <span>SSH 密码 / 口令（可留空使用密钥）</span>

@@ -28,6 +28,45 @@ class CommandWorkspaceViolationTests(unittest.TestCase):
                     self.assertTrue(dangerous, command)
                     self.assertTrue(reason)
 
+    def test_safe_find_exec_rm_cleanup_is_allowed(self):
+        commands = (
+            r"find . -name '*.pyc' -exec rm -f {} \;",
+            "find . -name __pycache__ -type d -exec rm -rf {} +",
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(config, "WORKSPACE_ROOT", root):
+                for command in commands:
+                    dangerous, reason = is_dangerous_command(command, cwd=root)
+                    self.assertFalse(dangerous, f"{command}: {reason}")
+
+    def test_safe_find_xargs_rm_cleanup_is_allowed(self):
+        commands = (
+            "find . -name '*.pyc' -print0 | xargs -0 rm -f",
+            "find . -name node_modules -print0 | xargs -0 rm -rf",
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(config, "WORKSPACE_ROOT", root):
+                for command in commands:
+                    dangerous, reason = is_dangerous_command(command, cwd=root)
+                    self.assertFalse(dangerous, f"{command}: {reason}")
+
+    def test_find_and_xargs_shell_or_broad_recursive_cleanup_still_blocked(self):
+        commands = (
+            r"find . -exec sh -c 'rm -rf {}' \;",
+            "find . -exec rm -rf {} +",
+            "find / -name '*.tmp' -exec rm -f {} +",
+            "printf 'build/a\n' | xargs rm -f",
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            with patch.object(config, "WORKSPACE_ROOT", root):
+                for command in commands:
+                    dangerous, reason = is_dangerous_command(command, cwd=root)
+                    self.assertTrue(dangerous, command)
+                    self.assertTrue(reason)
+
     def test_dev_null_redirection_is_allowed_on_posix_shells(self):
         command = (
             "du -sh bge-large-en-v1.5 Qwen3-Embedding-0.6B "

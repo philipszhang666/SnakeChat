@@ -828,6 +828,8 @@ const _compressionUndoSnapshots = {};
 const COMPRESSION_HELPER_TIMEOUT_MS = 300 * 1000;
 const COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS = 0;
 const COMPRESSION_MAX_DELTA_SUMMARIES = 2;
+const COMPRESSION_VALIDATION_REPAIR_ATTEMPTS = 1;
+const COMPRESSION_AUTO_VALIDATION_REPAIR_ATTEMPTS = 3;
 
 function isCompressionSummaryMessage(m) {
   return !!(m && (m._isSummary || m._isTransientSummary));
@@ -1232,6 +1234,16 @@ function compressionAutoPatchSummary(summary, validation, requiredRefs) {
   };
 }
 
+function compressionValidationRepairAttempts(options = {}) {
+  const hasExplicit = Object.prototype.hasOwnProperty.call(options, 'validationRepairAttempts');
+  const fallback = options && options.reason === 'auto'
+    ? COMPRESSION_AUTO_VALIDATION_REPAIR_ATTEMPTS
+    : COMPRESSION_VALIDATION_REPAIR_ATTEMPTS;
+  const n = parseInt(hasExplicit ? options.validationRepairAttempts : fallback, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(8, n);
+}
+
 function compressionShortErrorMessage(error) {
   const raw = String((error && error.message) || error || '未知错误').trim();
   if (!raw) return '未知错误';
@@ -1342,6 +1354,7 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
     label,
     transient: true
   });
+  const validationRepairAttempts = compressionValidationRepairAttempts(options);
   
   let summary = await tokensApiCore().callOnceWithRole(
     [{ role: 'user', content: compressPrompt }],
@@ -1355,7 +1368,7 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
   let patchedSummary = compressionAutoPatchSummary(finalSummary, validation, requiredRefs);
   finalSummary = patchedSummary.summary;
   validation = patchedSummary.validation;
-  if (!validation.ok) {
+  for (let repairAttempt = 1; !validation.ok && repairAttempt <= validationRepairAttempts; repairAttempt++) {
     const feedback = compressionValidationFeedback(validation);
     const retryPrompt = `${compressPrompt}
 
@@ -1372,7 +1385,7 @@ ${feedback}
       '你正在修复未通过校验的内部上下文摘要，必须保留指定引用。',
       {
         ...helperOptions,
-        sourceLabel: `${label} · 内部压缩 · 重写`
+        sourceLabel: `${label} · 内部压缩 · 重写 ${repairAttempt}/${validationRepairAttempts}`
       }
     );
     if (!summary || !String(summary).trim()) throw new Error(`${label} 内部压缩重写返回空摘要`);
@@ -1524,7 +1537,10 @@ async function autoCompressCheck(chat = null, options = {}) {
       chat: c,
       chatId: c.id,
       signal: options.signal,
-      isStopped: options.isStopped
+      isStopped: options.isStopped,
+      validationRepairAttempts: Object.prototype.hasOwnProperty.call(options, 'validationRepairAttempts')
+        ? options.validationRepairAttempts
+        : COMPRESSION_AUTO_VALIDATION_REPAIR_ATTEMPTS
     });
     return ok ? true : 'failed';
   }
@@ -1680,6 +1696,7 @@ async function compressChat(chat, options = {}) {
     conversationText,
     layer: summaryLayer
   });
+  const validationRepairAttempts = compressionValidationRepairAttempts(options);
 
   const compressedCount = summaryLayer === 'delta' ? realMessages.length : toCompress.length;
   const undoCompressedMessages = summaryLayer === 'delta'
@@ -1731,8 +1748,11 @@ async function compressChat(chat, options = {}) {
     let patchedSummary = compressionAutoPatchSummary(finalSummary, validation, requiredRefs);
     finalSummary = patchedSummary.summary;
     validation = patchedSummary.validation;
-    if (!validation.ok) {
+    for (let repairAttempt = 1; !validation.ok && repairAttempt <= validationRepairAttempts; repairAttempt++) {
       const feedback = compressionValidationFeedback(validation);
+      if (options.reason === 'auto') {
+        TokensUiService.toast(`自动压缩摘要校验未通过，正在把错误反馈给 AI 重写（${repairAttempt}/${validationRepairAttempts}）...`, 2500);
+      }
       const retryPrompt = `${compressPrompt}
 
 【上一次摘要】
@@ -1751,7 +1771,7 @@ ${feedback}
         '你是一个严谨的上下文压缩器。你正在修复一份未通过校验的摘要，必须保留指定引用。',
         {
           ...helperOptions,
-          sourceLabel: `上下文压缩 · ${options.reason || 'manual'} · 重写`
+          sourceLabel: `上下文压缩 · ${options.reason || 'manual'} · 重写 ${repairAttempt}/${validationRepairAttempts}`
         }
       );
       if (!retrySummary || !String(retrySummary).trim()) {

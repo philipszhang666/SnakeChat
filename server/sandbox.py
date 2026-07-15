@@ -18,6 +18,8 @@ from . import config
 # 采用"去空格 + 小写"后的子串匹配 + 正则匹配
 _RM_DANGEROUS_TARGET_RE = re.compile(r'\brm\s+(-[a-zA-Z]*[rRfF][a-zA-Z]*\s+)+(/|~|\$home|\*|\.)', re.IGNORECASE)
 _RM_RECURSIVE_FORCE_RE = re.compile(r'\brm\s+-[a-zA-Z]*[rRfF]', re.IGNORECASE)
+_XARGS_RM_OR_SHELL_RE = re.compile(r'\bxargs\b[^|;]*\b(bash|sh|zsh|rm)\b', re.IGNORECASE)
+_FIND_EXEC_RM_OR_SHELL_RE = re.compile(r'\bfind\b[^;|]*-exec\s+(rm|sh|bash|zsh)\b', re.IGNORECASE)
 
 DANGEROUS_PATTERNS = [
     # 大规模删除
@@ -61,7 +63,7 @@ DANGEROUS_PATTERNS = [
         '反引号命令替换包裹危险命令'),
     (re.compile(r'\beval\b', re.IGNORECASE),
         'eval 间接执行（容易绕过黑名单）'),
-    (re.compile(r'\bexec\s+[^\s]', re.IGNORECASE),
+    (re.compile(r'(^|[\s;|&])exec\s+[^\s]', re.IGNORECASE),
         'exec 替换当前进程'),
     # base64 / hex 解码后管道执行
     (re.compile(r'\bbase64\s+(-d|--decode|-D)\b.*\|\s*(bash|sh|zsh|python|perl)', re.IGNORECASE),
@@ -69,9 +71,9 @@ DANGEROUS_PATTERNS = [
     (re.compile(r'\bxxd\s+-r\b.*\|\s*(bash|sh|zsh)', re.IGNORECASE),
         'xxd 反向解码后管道执行'),
     # xargs / find -exec 调起 shell
-    (re.compile(r'\bxargs\b[^|;]*\b(bash|sh|zsh|rm)\b', re.IGNORECASE),
+    (_XARGS_RM_OR_SHELL_RE,
         'xargs 调起 shell/rm'),
-    (re.compile(r'\bfind\b[^;|]*-exec\s+(rm|sh|bash|zsh)\b', re.IGNORECASE),
+    (_FIND_EXEC_RM_OR_SHELL_RE,
         'find -exec 调起 rm/shell'),
     # /dev/tcp 反弹 shell
     (re.compile(r'/dev/(tcp|udp)/', re.IGNORECASE),
@@ -91,8 +93,19 @@ DANGEROUS_PATTERNS = [
 ]
 
 
-_SHELL_SEGMENT_RE = re.compile(r'&&|\|\||[;&|]')
 _GLOB_OR_EXPANSION_RE = re.compile(r'[*?\[\]{}]')
+_SHELL_META_RE = re.compile(r'[&|;<>]')
+_CONTROL_TOKENS = {'|', '&&', '||', ';'}
+_FIND_NARROWING_PREDICATES = {
+    '-name', '-iname', '-path', '-ipath', '-wholename', '-iwholename',
+    '-regex', '-iregex',
+}
+_SHELL_COMMAND_NAMES = {'sh', 'bash', 'zsh'}
+_XARGS_OPTIONS_WITH_SEPARATE_VALUE = {
+    '-I', '--replace', '-n', '--max-args', '-L', '--max-lines',
+    '-P', '--max-procs', '-s', '--max-chars', '-E', '--eof',
+    '-d', '--delimiter',
+}
 
 
 def _split_shell_tokens(segment):
@@ -107,12 +120,28 @@ def _is_rm_command_token(token):
     return name in ('rm', 'rm.exe')
 
 
+def _command_name(token):
+    return os.path.basename(str(token or '').strip().strip('"').strip("'")).lower()
+
+
+def _is_shell_command_token(token):
+    return _command_name(token) in _SHELL_COMMAND_NAMES
+
+
 def _rm_option_requests_recursive_or_force(option):
     if not isinstance(option, str) or not option.startswith('-') or option == '--':
         return False
     if option.startswith('--'):
         return option in ('--recursive', '--force')
     return bool(re.search(r'[rRfF]', option))
+
+
+def _rm_option_requests_recursive(option):
+    if not isinstance(option, str) or not option.startswith('-') or option == '--':
+        return False
+    if option.startswith('--'):
+        return option == '--recursive'
+    return bool(re.search(r'[rR]', option))
 
 
 def _resolve_rm_target(target, cwd):
@@ -132,6 +161,8 @@ def _is_safe_rm_target(target, cwd=None):
         return False
     if raw.startswith('~') or '$' in raw or '`' in raw or '\n' in raw or '\r' in raw:
         return False
+    if _SHELL_META_RE.search(raw):
+        return False
     if _GLOB_OR_EXPANSION_RE.search(raw):
         return False
     target_abs = _resolve_rm_target(raw, cwd)
@@ -141,31 +172,287 @@ def _is_safe_rm_target(target, cwd=None):
     return is_inside_workspace(target_abs)
 
 
-def _all_rm_delete_targets_are_safe(cmd, cwd=None):
+def _is_safe_find_root(target, cwd=None):
+    raw = str(target or '').strip()
+    if not raw or raw.startswith('-'):
+        return False
+    normalized = raw.replace('\\', '/').rstrip('/')
+    if normalized in ('/', '~', '..') or normalized.startswith('../') or '/../' in normalized:
+        return False
+    if raw.startswith('~') or '$' in raw or '`' in raw or '\n' in raw or '\r' in raw:
+        return False
+    if _SHELL_META_RE.search(raw) or _GLOB_OR_EXPANSION_RE.search(raw):
+        return False
+    return is_inside_workspace(_resolve_rm_target(raw, cwd))
+
+
+def _is_find_expression_token(token):
+    token = str(token or '')
+    return token.startswith('-') or token in ('(', ')', '!')
+
+
+def _find_prefix_is_safe(prefix_tokens, cwd=None):
+    idx = 0
+    while idx < len(prefix_tokens) and prefix_tokens[idx] in ('-H', '-L', '-P'):
+        if prefix_tokens[idx] == '-L':
+            return False, []
+        idx += 1
+
+    roots = []
+    while idx < len(prefix_tokens) and not _is_find_expression_token(prefix_tokens[idx]):
+        roots.append(prefix_tokens[idx])
+        idx += 1
+    if not roots:
+        roots = ['.']
+
+    expr_tokens = prefix_tokens[idx:]
+    if any(str(token).lower() == '-follow' for token in expr_tokens):
+        return False, []
+    if not all(_is_safe_find_root(root, cwd=cwd) for root in roots):
+        return False, []
+    return True, expr_tokens
+
+
+def _find_expression_is_narrowed(expr_tokens):
+    lowered = [str(token or '').lower() for token in expr_tokens]
+    return any(token in _FIND_NARROWING_PREDICATES for token in lowered)
+
+
+def _rm_args_are_safe_for_generated_targets(args, cwd=None, require_placeholder=False, allow_recursive=False):
+    targets = []
+    recursive = False
+    end_options = False
+    for token in args:
+        if token in (';', '+'):
+            break
+        if not end_options and token == '--':
+            end_options = True
+            continue
+        if not end_options and str(token).startswith('-') and token != '-':
+            if _rm_option_requests_recursive(token):
+                recursive = True
+            continue
+        targets.append(token)
+
+    if recursive and not allow_recursive:
+        return False
+    if require_placeholder and '{}' not in targets:
+        return False
+    for target in targets:
+        if target == '{}':
+            continue
+        if not _is_safe_rm_target(target, cwd=cwd):
+            return False
+    return True
+
+
+def _rm_args_are_safe_direct_targets(args, cwd=None):
+    targets = []
+    end_options = False
+    delete_mode = False
+    for token in args:
+        if token in _CONTROL_TOKENS:
+            break
+        if not end_options and token == '--':
+            end_options = True
+            continue
+        if not end_options and str(token).startswith('-') and token != '-':
+            if _rm_option_requests_recursive_or_force(token):
+                delete_mode = True
+            continue
+        targets.append(token)
+    return delete_mode and bool(targets) and all(_is_safe_rm_target(target, cwd=cwd) for target in targets)
+
+
+def _safe_find_exec_rm_at(tokens, rm_index, cwd=None):
+    exec_index = rm_index - 1
+    if exec_index < 0 or tokens[exec_index] != '-exec':
+        return False
+
+    find_index = -1
+    j = exec_index - 1
+    while j >= 0 and tokens[j] not in _CONTROL_TOKENS:
+        if _command_name(tokens[j]) == 'find':
+            find_index = j
+            break
+        j -= 1
+    if find_index < 0:
+        return False
+
+    prefix_safe, expr_tokens = _find_prefix_is_safe(tokens[find_index + 1:exec_index], cwd=cwd)
+    if not prefix_safe:
+        return False
+
+    args = []
+    i = rm_index + 1
+    while i < len(tokens) and tokens[i] not in _CONTROL_TOKENS:
+        if tokens[i] in (';', '+'):
+            break
+        args.append(tokens[i])
+        i += 1
+    return _rm_args_are_safe_for_generated_targets(
+        args,
+        cwd=cwd,
+        require_placeholder=True,
+        allow_recursive=_find_expression_is_narrowed(expr_tokens),
+    )
+
+
+def _xargs_command_index(tokens, xargs_index):
+    i = xargs_index + 1
+    while i < len(tokens) and tokens[i] not in _CONTROL_TOKENS:
+        token = str(tokens[i])
+        if token == '--':
+            return i + 1 if i + 1 < len(tokens) and tokens[i + 1] not in _CONTROL_TOKENS else -1
+        lower = token.lower()
+        if lower.startswith('--'):
+            option = lower.split('=', 1)[0]
+            if option in _XARGS_OPTIONS_WITH_SEPARATE_VALUE and '=' not in lower:
+                i += 2
+            else:
+                i += 1
+            continue
+        if lower.startswith('-') and lower != '-':
+            short_name = lower[:2]
+            if lower in _XARGS_OPTIONS_WITH_SEPARATE_VALUE or (
+                short_name in _XARGS_OPTIONS_WITH_SEPARATE_VALUE and len(lower) == 2
+            ):
+                i += 2
+            else:
+                i += 1
+            continue
+        return i
+    return -1
+
+
+def _safe_find_source_before_xargs(tokens, xargs_index, cwd=None):
+    pipe_index = -1
+    i = xargs_index - 1
+    while i >= 0:
+        if tokens[i] == '|':
+            pipe_index = i
+            break
+        if tokens[i] in ('&&', '||', ';'):
+            return False, []
+        i -= 1
+    if pipe_index < 0:
+        return False, []
+
+    start = pipe_index - 1
+    while start >= 0 and tokens[start] not in _CONTROL_TOKENS:
+        start -= 1
+    start += 1
+
+    find_index = -1
+    for i in range(start, pipe_index):
+        if _command_name(tokens[i]) == 'find':
+            find_index = i
+            break
+    if find_index < 0:
+        return False, []
+
+    return _find_prefix_is_safe(tokens[find_index + 1:pipe_index], cwd=cwd)
+
+
+def _safe_xargs_rm_at(tokens, rm_index, cwd=None):
+    xargs_index = -1
+    j = rm_index - 1
+    while j >= 0 and tokens[j] not in ('&&', '||', ';'):
+        if _command_name(tokens[j]) == 'xargs':
+            xargs_index = j
+            break
+        j -= 1
+    if xargs_index < 0 or _xargs_command_index(tokens, xargs_index) != rm_index:
+        return False
+
+    source_safe, expr_tokens = _safe_find_source_before_xargs(tokens, xargs_index, cwd=cwd)
+    if not source_safe:
+        return False
+
+    args = []
+    i = rm_index + 1
+    while i < len(tokens) and tokens[i] not in _CONTROL_TOKENS:
+        args.append(tokens[i])
+        i += 1
+    return _rm_args_are_safe_for_generated_targets(
+        args,
+        cwd=cwd,
+        require_placeholder=False,
+        allow_recursive=_find_expression_is_narrowed(expr_tokens),
+    )
+
+
+def _all_rm_delete_invocations_are_safe(cmd, cwd=None):
+    tokens = _split_shell_tokens(str(cmd or ''))
+    if not tokens:
+        return False
+
     found = False
-    for segment in _SHELL_SEGMENT_RE.split(str(cmd or '')):
-        tokens = _split_shell_tokens(segment)
-        if not tokens or not _is_rm_command_token(tokens[0]):
+    for i, token in enumerate(tokens):
+        if not _is_rm_command_token(token):
             continue
-        delete_mode = False
-        targets = []
-        end_options = False
-        for token in tokens[1:]:
-            if not end_options and token == '--':
-                end_options = True
-                continue
-            if not end_options and token.startswith('-') and token != '-':
-                if _rm_option_requests_recursive_or_force(token):
-                    delete_mode = True
-                continue
-            targets.append(token)
-        if not delete_mode:
+        args = []
+        j = i + 1
+        while j < len(tokens) and tokens[j] not in _CONTROL_TOKENS:
+            args.append(tokens[j])
+            j += 1
+        if not any(
+            str(arg).startswith('-') and _rm_option_requests_recursive_or_force(arg)
+            for arg in args
+        ):
             continue
+
         found = True
-        if not targets:
+        if _safe_find_exec_rm_at(tokens, i, cwd=cwd):
+            continue
+        if _safe_xargs_rm_at(tokens, i, cwd=cwd):
+            continue
+        previous = tokens[i - 1] if i > 0 else None
+        if (i == 0 or previous in _CONTROL_TOKENS) and _rm_args_are_safe_direct_targets(args, cwd=cwd):
+            continue
+        return False
+
+    return found
+
+
+def _all_find_exec_rm_invocations_are_safe(cmd, cwd=None):
+    tokens = _split_shell_tokens(str(cmd or ''))
+    if not tokens:
+        return False
+
+    found = False
+    for i, token in enumerate(tokens[:-1]):
+        if token != '-exec':
+            continue
+        command = tokens[i + 1]
+        if _is_shell_command_token(command):
             return False
-        if not all(_is_safe_rm_target(target, cwd) for target in targets):
+        if _is_rm_command_token(command):
+            found = True
+            if not _safe_find_exec_rm_at(tokens, i + 1, cwd=cwd):
+                return False
+    return found
+
+
+def _all_xargs_rm_invocations_are_safe(cmd, cwd=None):
+    tokens = _split_shell_tokens(str(cmd or ''))
+    if not tokens:
+        return False
+
+    found = False
+    for i, token in enumerate(tokens):
+        if _command_name(token) != 'xargs':
+            continue
+        command_index = _xargs_command_index(tokens, i)
+        if command_index < 0:
+            continue
+        command = tokens[command_index]
+        if _is_shell_command_token(command):
             return False
+        if _is_rm_command_token(command):
+            found = True
+            if not _safe_xargs_rm_at(tokens, command_index, cwd=cwd):
+                return False
     return found
 
 
@@ -173,7 +460,11 @@ def is_dangerous_command(cmd, cwd=None):
     """返回 (是否危险, 原因)"""
     for pattern, reason in DANGEROUS_PATTERNS:
         if pattern.search(cmd):
-            if pattern in (_RM_DANGEROUS_TARGET_RE, _RM_RECURSIVE_FORCE_RE) and _all_rm_delete_targets_are_safe(cmd, cwd=cwd):
+            if pattern in (_RM_DANGEROUS_TARGET_RE, _RM_RECURSIVE_FORCE_RE) and _all_rm_delete_invocations_are_safe(cmd, cwd=cwd):
+                continue
+            if pattern is _FIND_EXEC_RM_OR_SHELL_RE and _all_find_exec_rm_invocations_are_safe(cmd, cwd=cwd):
+                continue
+            if pattern is _XARGS_RM_OR_SHELL_RE and _all_xargs_rm_invocations_are_safe(cmd, cwd=cwd):
                 continue
             return True, reason
     return False, ''

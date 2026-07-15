@@ -277,6 +277,18 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 .remote-connection-grid label{display:flex;flex-direction:column;gap:6px;color:var(--text);font-size:13px;font-weight:600}
 .remote-connection-grid input[type="text"],.remote-connection-grid input[type="password"],.remote-connection-grid input[type="number"]{width:100%;border:1px solid var(--border);border-radius:10px;background:var(--bg-input);color:var(--text);padding:10px 12px;font-family:var(--font-mono);font-size:13px;outline:none}
 .remote-connection-grid input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+.remote-ssh-command-wrap{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 38px;align-items:stretch}
+.remote-ssh-command-wrap #remoteSshCommand{border-top-right-radius:0;border-bottom-right-radius:0}
+.remote-ssh-history-toggle{border:1px solid var(--border);border-left:0;border-radius:0 10px 10px 0;background:var(--bg-input);color:var(--text-secondary);font-size:14px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.remote-ssh-history-toggle:hover,.remote-ssh-history-toggle[aria-expanded="true"]{color:var(--primary);background:var(--bg-hover)}
+.remote-ssh-command-wrap:focus-within .remote-ssh-history-toggle{border-color:var(--primary);box-shadow:0 0 0 3px rgba(79,70,229,.12)}
+.remote-ssh-profile-menu{position:absolute;left:0;right:0;top:calc(100% + 6px);z-index:2150;max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:10px;background:var(--bg-sidebar);box-shadow:0 12px 30px rgba(15,23,42,.18);padding:6px;display:flex;flex-direction:column;gap:2px}
+.remote-ssh-profile-menu[hidden]{display:none}
+.remote-ssh-profile-item{width:100%;border:0;border-radius:8px;background:transparent;color:var(--text);cursor:pointer;text-align:left;padding:9px 10px;font-family:inherit;display:flex;flex-direction:column;gap:4px}
+.remote-ssh-profile-item:hover,.remote-ssh-profile-item:focus-visible{outline:none;background:var(--bg-hover);color:var(--primary)}
+.remote-ssh-profile-command{font-family:var(--font-mono);font-size:12.5px;font-weight:700;line-height:1.35;overflow-wrap:anywhere}
+.remote-ssh-profile-workspace{font-family:var(--font-mono);font-size:12px;font-weight:500;color:var(--text-secondary);line-height:1.35;overflow-wrap:anywhere}
+.remote-ssh-profile-empty{padding:12px 10px;color:var(--text-secondary);font-size:12.5px;font-weight:500;text-align:center}
 .remote-connection-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .remote-path-picker-row{display:flex;gap:8px;align-items:center}
 .remote-path-picker-row input{flex:1;min-width:0}

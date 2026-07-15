@@ -22,8 +22,84 @@ function remoteDefaultConfig() {
     encryptedPassword: '',
     autoReconnect: false,
     lastConnectedAt: 0,
-    lastServerUrl: ''
+    lastServerUrl: '',
+    profiles: {}
   };
+}
+
+function remoteProfileKey(sshCommand) {
+  return String(sshCommand || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeRemoteProfiles(profiles) {
+  const out = {};
+  if (!profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return out;
+  Object.keys(profiles).forEach(key => {
+    const profile = profiles[key];
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return;
+    const sshCommand = remoteProfileKey(profile.sshCommand || key);
+    if (!sshCommand) return;
+    out[sshCommand] = {
+      sshCommand,
+      remoteWorkspace: profile.remoteWorkspace || '~/',
+      remoteAgentPort: parseInt(profile.remoteAgentPort, 10) || 8765,
+      localPort: parseInt(profile.localPort, 10) || 18765,
+      heartbeatTimeout: Math.max(120, parseInt(profile.heartbeatTimeout, 10) || REMOTE_HEARTBEAT_DEFAULT_SECONDS),
+      installDeps: profile.installDeps !== false,
+      encryptedPassword: profile.encryptedPassword || '',
+      autoReconnect: !!profile.autoReconnect,
+      lastConnectedAt: Number(profile.lastConnectedAt) || 0,
+      lastServerUrl: profile.lastServerUrl || '',
+      updatedAt: Number(profile.updatedAt) || Number(profile.lastConnectedAt) || 0
+    };
+  });
+  return out;
+}
+
+function normalizeRemoteConnectionConfig(raw = {}) {
+  const rawConfig = raw || {};
+  const cfg = { ...remoteDefaultConfig(), ...rawConfig };
+  cfg.profiles = normalizeRemoteProfiles(cfg.profiles);
+  const sshCommand = remoteProfileKey(cfg.sshCommand);
+  const hasSavedSshCommand = Object.prototype.hasOwnProperty.call(rawConfig, 'sshCommand') && !!remoteProfileKey(rawConfig.sshCommand);
+  if (sshCommand && (hasSavedSshCommand || !!cfg.profiles[sshCommand])) {
+    cfg.sshCommand = sshCommand;
+    cfg.profiles[sshCommand] = {
+      ...(cfg.profiles[sshCommand] || {}),
+      sshCommand,
+      remoteWorkspace: cfg.remoteWorkspace || (cfg.profiles[sshCommand] && cfg.profiles[sshCommand].remoteWorkspace) || '~/',
+      remoteAgentPort: parseInt(cfg.remoteAgentPort, 10) || 8765,
+      localPort: parseInt(cfg.localPort, 10) || 18765,
+      heartbeatTimeout: Math.max(120, parseInt(cfg.heartbeatTimeout, 10) || REMOTE_HEARTBEAT_DEFAULT_SECONDS),
+      installDeps: cfg.installDeps !== false,
+      encryptedPassword: cfg.encryptedPassword || (cfg.profiles[sshCommand] && cfg.profiles[sshCommand].encryptedPassword) || '',
+      autoReconnect: !!cfg.autoReconnect,
+      lastConnectedAt: Number(cfg.lastConnectedAt) || 0,
+      lastServerUrl: cfg.lastServerUrl || '',
+      updatedAt: Date.now()
+    };
+  }
+  return cfg;
+}
+
+function remoteProfileForCommand(cfg, sshCommand) {
+  const key = remoteProfileKey(sshCommand);
+  if (!key || !cfg || !cfg.profiles) return null;
+  return cfg.profiles[key] || null;
+}
+
+function upsertRemoteProfile(cfg, sshCommand, patch = {}) {
+  const key = remoteProfileKey(sshCommand || (cfg && cfg.sshCommand));
+  if (!key || !cfg) return cfg;
+  const profiles = { ...(cfg.profiles || {}) };
+  profiles[key] = {
+    ...(profiles[key] || {}),
+    sshCommand: key,
+    ...patch,
+    updatedAt: Date.now()
+  };
+  cfg.profiles = profiles;
+  return cfg;
 }
 
 async function remoteCryptoKey() {
@@ -64,14 +140,14 @@ async function remoteDecryptPassword(cipher) {
 function loadRemoteConnectionConfig() {
   try {
     const raw = storage.get(REMOTE_CONNECTION_KEY);
-    return { ...remoteDefaultConfig(), ...(raw ? JSON.parse(raw) : {}) };
+    return normalizeRemoteConnectionConfig(raw ? JSON.parse(raw) : {});
   } catch (e) {
     return remoteDefaultConfig();
   }
 }
 
 function saveRemoteConnectionConfig(cfg) {
-  storage.set(REMOTE_CONNECTION_KEY, JSON.stringify({ ...remoteDefaultConfig(), ...(cfg || {}) }));
+  storage.set(REMOTE_CONNECTION_KEY, JSON.stringify(normalizeRemoteConnectionConfig(cfg || {})));
 }
 
 function updateRemoteConnectionConfig(patch = {}) {
@@ -98,7 +174,16 @@ function persistActiveRemoteConnection(info = {}) {
     lastServerUrl: (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || ''
   };
   if (workspace) patch.remoteWorkspace = workspace;
-  return updateRemoteConnectionConfig(patch);
+  const cfg = loadRemoteConnectionConfig();
+  const next = { ...cfg, ...patch };
+  upsertRemoteProfile(next, next.sshCommand, {
+    remoteWorkspace: workspace || next.remoteWorkspace,
+    autoReconnect: true,
+    lastConnectedAt: patch.lastConnectedAt,
+    lastServerUrl: patch.lastServerUrl
+  });
+  saveRemoteConnectionConfig(next);
+  return next;
 }
 
 function clearRemoteAutoReconnectFlag() {
@@ -112,12 +197,21 @@ function clearRemoteAutoReconnectFlag() {
 function noteRemoteWorkspaceChanged(path) {
   const workspace = String(path || '').trim();
   if (!workspace || !isRemoteAgentActive()) return;
-  updateRemoteConnectionConfig({
+  const cfg = loadRemoteConnectionConfig();
+  const next = {
+    ...cfg,
     remoteWorkspace: workspace,
     autoReconnect: true,
     lastConnectedAt: Date.now(),
     lastServerUrl: TERMINAL_CONFIG.serverUrl || ''
+  };
+  upsertRemoteProfile(next, next.sshCommand, {
+    remoteWorkspace: workspace,
+    autoReconnect: true,
+    lastConnectedAt: next.lastConnectedAt,
+    lastServerUrl: next.lastServerUrl
   });
+  saveRemoteConnectionConfig(next);
 }
 
 function setRemoteStatus(message, kind = '') {
@@ -142,12 +236,144 @@ function applyRemoteConfigToForm(cfg, password = '') {
   document.getElementById('remoteInstallDeps').checked = config.installDeps !== false;
 }
 
+function remoteSortedProfiles(cfg = loadRemoteConnectionConfig()) {
+  return Object.values((cfg && cfg.profiles) || {})
+    .filter(profile => profile && profile.sshCommand)
+    .sort((a, b) => (Number(b.updatedAt || b.lastConnectedAt) || 0) - (Number(a.updatedAt || a.lastConnectedAt) || 0));
+}
+
+function hideRemoteSshProfileMenu() {
+  const menu = document.getElementById('remoteSshProfileMenu');
+  const toggle = document.getElementById('remoteSshHistoryToggle');
+  if (menu) menu.hidden = true;
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+}
+
+function remoteSshProfileMatches(profile, query) {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return String(profile.sshCommand || '').toLowerCase().includes(q)
+    || String(profile.remoteWorkspace || '').toLowerCase().includes(q);
+}
+
+function renderRemoteSshProfilesDatalist(cfg = loadRemoteConnectionConfig(), options = {}) {
+  const input = document.getElementById('remoteSshCommand');
+  const menu = document.getElementById('remoteSshProfileMenu');
+  const toggle = document.getElementById('remoteSshHistoryToggle');
+  const oldList = document.getElementById('remoteSshCommandHistory');
+  if (input) input.removeAttribute('list');
+  if (oldList) oldList.remove();
+  if (!menu || !input) return;
+
+  const profiles = remoteSortedProfiles(cfg);
+  const query = remoteProfileKey(input.value);
+  const showAll = !!options.showAll;
+  const shouldOpen = !!options.open;
+  const visibleProfiles = showAll ? profiles : profiles.filter(profile => remoteSshProfileMatches(profile, query));
+  if (!shouldOpen) {
+    hideRemoteSshProfileMenu();
+    return;
+  }
+
+  if (!profiles.length) {
+    menu.innerHTML = '<div class="remote-ssh-profile-empty">暂无 SSH 历史记录</div>';
+  } else if (!visibleProfiles.length) {
+    menu.innerHTML = '<div class="remote-ssh-profile-empty">没有匹配的 SSH 历史记录</div>';
+  } else {
+    menu.innerHTML = visibleProfiles.map(profile => `
+      <button class="remote-ssh-profile-item" type="button" data-command="${remoteEscapeHtml(profile.sshCommand)}">
+        <span class="remote-ssh-profile-command">${remoteEscapeHtml(profile.sshCommand)}</span>
+        <span class="remote-ssh-profile-workspace">${remoteEscapeHtml(profile.remoteWorkspace || '~')}</span>
+      </button>
+    `).join('');
+    menu.querySelectorAll('.remote-ssh-profile-item').forEach(btn => {
+      btn.addEventListener('mousedown', e => e.preventDefault());
+      btn.addEventListener('click', () => selectRemoteSshProfile(btn.dataset.command || ''));
+    });
+  }
+  menu.hidden = false;
+  if (toggle) toggle.setAttribute('aria-expanded', 'true');
+}
+
+let remoteProfileApplyTimer = null;
+
+async function applyRemoteProfileForCommand(sshCommand, options = {}) {
+  const command = remoteProfileKey(sshCommand);
+  if (!command) return false;
+  const cfg = loadRemoteConnectionConfig();
+  const profile = remoteProfileForCommand(cfg, command);
+  if (!profile) return false;
+  const password = await remoteDecryptPassword(profile.encryptedPassword || '');
+  applyRemoteConfigToForm({ ...cfg, ...profile, sshCommand: command }, password);
+  if (!options.silent) {
+    setRemoteStatus(`已加载该 SSH 命令上次的远程工作区：${profile.remoteWorkspace || '~'}`, 'ok');
+  }
+  return true;
+}
+
+async function selectRemoteSshProfile(sshCommand) {
+  const input = document.getElementById('remoteSshCommand');
+  const command = remoteProfileKey(sshCommand);
+  if (!command) return;
+  if (input) input.value = command;
+  clearTimeout(remoteProfileApplyTimer);
+  hideRemoteSshProfileMenu();
+  await applyRemoteProfileForCommand(command).catch(e => console.warn('[remote] apply selected profile failed:', e));
+}
+
+function bindRemoteProfileInputs() {
+  const input = document.getElementById('remoteSshCommand');
+  if (!input || input._remoteProfileBound) return;
+  input._remoteProfileBound = true;
+  const wrap = document.querySelector('.remote-ssh-command-wrap');
+  const toggle = document.getElementById('remoteSshHistoryToggle');
+  const schedule = () => {
+    clearTimeout(remoteProfileApplyTimer);
+    remoteProfileApplyTimer = setTimeout(() => {
+      applyRemoteProfileForCommand(input.value, { silent: true }).catch(e => console.warn('[remote] apply profile failed:', e));
+    }, 250);
+  };
+  input.addEventListener('input', () => {
+    schedule();
+    const query = remoteProfileKey(input.value);
+    renderRemoteSshProfilesDatalist(loadRemoteConnectionConfig(), { open: !!query, showAll: false });
+  });
+  input.addEventListener('focus', () => {
+    const query = remoteProfileKey(input.value);
+    if (query) renderRemoteSshProfilesDatalist(loadRemoteConnectionConfig(), { open: true, showAll: false });
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') hideRemoteSshProfileMenu();
+  });
+  input.addEventListener('change', () => {
+    clearTimeout(remoteProfileApplyTimer);
+    hideRemoteSshProfileMenu();
+    applyRemoteProfileForCommand(input.value).catch(e => console.warn('[remote] apply profile failed:', e));
+  });
+  if (toggle) {
+    toggle.addEventListener('mousedown', e => e.preventDefault());
+    toggle.addEventListener('click', () => {
+      const menu = document.getElementById('remoteSshProfileMenu');
+      if (menu && !menu.hidden && toggle.getAttribute('aria-expanded') === 'true') {
+        hideRemoteSshProfileMenu();
+        return;
+      }
+      renderRemoteSshProfilesDatalist(loadRemoteConnectionConfig(), { open: true, showAll: true });
+    });
+  }
+  document.addEventListener('mousedown', e => {
+    if (wrap && !wrap.contains(e.target)) hideRemoteSshProfileMenu();
+  });
+}
+
 async function openRemoteConnection() {
   const modal = document.getElementById('remoteConnectionModal');
   if (!modal) return;
   const cfg = loadRemoteConnectionConfig();
   const password = await remoteDecryptPassword(cfg.encryptedPassword || '');
   applyRemoteConfigToForm(cfg, password);
+  renderRemoteSshProfilesDatalist(cfg);
+  bindRemoteProfileInputs();
   setRemoteStatus('填写 SSH 命令后点击连接；远程工作区留空时默认使用远程用户主目录 ~。');
   modal.classList.add('show');
 }
@@ -173,7 +399,7 @@ async function saveRemoteConnectionFromUi(options = {}) {
   const v = remoteFormValues();
   const encryptedPassword = await remoteEncryptPassword(v.password || '');
   const existing = loadRemoteConnectionConfig();
-  saveRemoteConnectionConfig({
+  const next = {
     ...existing,
     sshCommand: v.sshCommand,
     remoteWorkspace: v.remoteWorkspace,
@@ -182,7 +408,17 @@ async function saveRemoteConnectionFromUi(options = {}) {
     heartbeatTimeout: v.heartbeatTimeout,
     installDeps: v.installDeps,
     encryptedPassword
+  };
+  upsertRemoteProfile(next, v.sshCommand, {
+    remoteWorkspace: v.remoteWorkspace,
+    remoteAgentPort: v.remoteAgentPort,
+    localPort: v.localPort,
+    heartbeatTimeout: v.heartbeatTimeout,
+    installDeps: v.installDeps,
+    encryptedPassword
   });
+  saveRemoteConnectionConfig(next);
+  renderRemoteSshProfilesDatalist(next);
   if (!options.silent) {
     setRemoteStatus('Remote connection config saved locally.', 'ok');
     RemoteConnectionUiService.toast('Remote connection config saved');

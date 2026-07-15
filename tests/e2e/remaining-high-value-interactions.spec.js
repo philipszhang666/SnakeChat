@@ -84,6 +84,23 @@ test.describe('remaining high-value interactions without real services', () => {
       const raw = storage.get('snake_remote_connection_v1') || '{}';
       return JSON.parse(raw).remoteWorkspace;
     })).toBe('~/project');
+    await expect.poll(() => page.evaluate(() => {
+      const raw = storage.get('snake_remote_connection_v1') || '{}';
+      const cfg = JSON.parse(raw);
+      return cfg.profiles && cfg.profiles['ssh e2e@example.test'] && cfg.profiles['ssh e2e@example.test'].remoteWorkspace;
+    })).toBe('~/project');
+
+    await page.fill('#remoteSshCommand', 'ssh other@example.test');
+    await page.fill('#remoteWorkspace', '~/other-project');
+    await page.locator('[data-action="saveRemoteConnectionFromUi"]').click();
+    await page.locator('#remoteSshHistoryToggle').click();
+    await expect(page.locator('#remoteSshProfileMenu')).toBeVisible();
+    await expect(page.locator('#remoteSshProfileMenu .remote-ssh-profile-item')).toHaveCount(2);
+    await page.locator('#remoteSshProfileMenu .remote-ssh-profile-item').filter({ hasText: 'ssh e2e@example.test' }).click();
+    await expect(page.locator('#remoteWorkspace')).toHaveValue('~/project');
+    await page.fill('#remoteSshCommand', 'ssh e2e@example.test');
+    await page.locator('#remoteSshCommand').dispatchEvent('change');
+    await expect(page.locator('#remoteWorkspace')).toHaveValue('~/project');
 
     await page.locator('[data-action="openRemoteDirPicker"]').click();
     await expect(page.locator('#remoteDirPicker')).toHaveClass(/show/);
