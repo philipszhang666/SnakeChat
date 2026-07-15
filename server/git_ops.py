@@ -65,10 +65,10 @@ class GitMixin:
             return self.response.json(200, {'ok': False, 'error': f'未知 git 子命令: {sub}'})
 
         # 工作目录：默认沙箱根
-        cwd_param = body.get('cwd') or config.WORKSPACE_ROOT
+        cwd_param = body.get('cwd') or config.get_current_workspace()
         cwd_abs = resolve_path(cwd_param) if not os.path.isabs(cwd_param) else os.path.expanduser(cwd_param)
         if not is_inside_workspace(cwd_abs):
-            return self.response.json(200, {'ok': False, 'error': f'🚫 cwd 越界：{cwd_abs}\n沙箱根: {config.WORKSPACE_ROOT}'})
+            return self.response.json(200, {'ok': False, 'error': f'🚫 cwd 越界：{cwd_abs}\n沙箱根: {config.get_current_workspace()}'})
         if not os.path.isdir(cwd_abs):
             return self.response.json(200, {'ok': False, 'error': f'目录不存在: {cwd_abs}'})
 

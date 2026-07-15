@@ -78,7 +78,7 @@ def _upload_temp_path(target_path, upload_id):
 
 def _is_workspace_root_path(path):
     try:
-        return os.path.realpath(path) == os.path.realpath(config.WORKSPACE_ROOT)
+        return os.path.realpath(path) == os.path.realpath(config.get_current_workspace())
     except Exception:
         return False
 
@@ -279,7 +279,7 @@ def _apply_file_patch(abs_path, file_patch):
 
 
 def _checkpoint_base_dir():
-    return os.path.join(config.WORKSPACE_ROOT, '.agent', 'checkpoints')
+    return os.path.join(config.get_current_workspace(), '.agent', 'checkpoints')
 
 
 def _normalize_checkpoint_id(checkpoint_id):
@@ -299,7 +299,7 @@ def _new_checkpoint_id():
 def _workspace_rel_path(abs_path):
     try:
         real = os.path.realpath(abs_path)
-        rel = os.path.relpath(real, config.WORKSPACE_ROOT).replace(os.sep, '/')
+        rel = os.path.relpath(real, config.get_current_workspace()).replace(os.sep, '/')
         if rel and rel != '..' and not rel.startswith('../') and '/../' not in rel and not os.path.isabs(rel):
             return rel
     except Exception:
@@ -339,7 +339,7 @@ def _load_checkpoint_manifest(checkpoint_dir, checkpoint_id, session_id, reason)
         'updatedAt': now,
         'reason': reason,
         'sessionId': session_id or '',
-        'workspace': config.WORKSPACE_ROOT,
+        'workspace': config.get_current_workspace(),
         'files': []
     }
 
@@ -501,7 +501,7 @@ def _public_checkpoint_manifest(checkpoint_id, manifest, checkpoint_dir):
         'updatedAt': manifest.get('updatedAt') if isinstance(manifest, dict) else None,
         'reason': manifest.get('reason') if isinstance(manifest, dict) else '',
         'sessionId': manifest.get('sessionId') if isinstance(manifest, dict) else '',
-        'workspace': manifest.get('workspace') if isinstance(manifest, dict) else config.WORKSPACE_ROOT,
+        'workspace': manifest.get('workspace') if isinstance(manifest, dict) else config.get_current_workspace(),
         'dir': checkpoint_dir,
         'manifestPath': _manifest_path(checkpoint_dir),
         'fileCount': len(files),
@@ -1710,7 +1710,7 @@ class FilesMixin:
                 'returncode': proc.returncode
             })
 
-        rel_pdf = os.path.relpath(pdf_abs, config.WORKSPACE_ROOT).replace(os.sep, '/')
+        rel_pdf = os.path.relpath(pdf_abs, config.get_current_workspace()).replace(os.sep, '/')
         self.response.json(200, {'ok': True, 'path': path, 'pdf_path': rel_pdf})
 
     # ============ 使用系统默认应用打开文件 ============

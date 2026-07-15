@@ -41,7 +41,7 @@ class ProxyMixin:
         """公开端点，不含 Token"""
         self.response.json(200, {
             'ok': True,
-            'workspace': config.WORKSPACE_ROOT,
+            'workspace': config.get_current_workspace(),
             'cwd': config.get_current_cwd(),
             'agent_home': config.AGENT_HOME
         })

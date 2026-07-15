@@ -21,6 +21,8 @@ function _taskQueueDefaults() {
     items: [],
     defaultMode: 'normal',
     defaultUseTools: false,
+    sandboxWorkspace: '',
+    sandboxBackend: { type: 'local' },
     running: false,
     paused: false,
     loaded: false,
@@ -40,6 +42,8 @@ function ensureTaskQueue() {
   if (!Array.isArray(q.items)) q.items = [];
   if (!['normal', 'outline', 'reflection'].includes(q.defaultMode)) q.defaultMode = 'normal';
   q.defaultUseTools = !!q.defaultUseTools;
+  q.sandboxWorkspace = String(q.sandboxWorkspace || '');
+  if (!q.sandboxBackend || typeof q.sandboxBackend !== 'object') q.sandboxBackend = { type: 'local' };
   q.running = !!q.running;
   q.paused = !!q.paused;
   q.loaded = !!q.loaded;
@@ -97,6 +101,10 @@ function loadTaskQueue() {
       q.items = Array.isArray(parsed.items) ? parsed.items.map(_taskQueueNormalizeItem).filter(it => it.text) : [];
       q.defaultMode = ['normal', 'outline', 'reflection'].includes(parsed.defaultMode) ? parsed.defaultMode : 'normal';
       q.defaultUseTools = !!parsed.defaultUseTools;
+      q.sandboxWorkspace = String(parsed.sandboxWorkspace || '');
+      q.sandboxBackend = parsed.sandboxBackend && typeof parsed.sandboxBackend === 'object'
+        ? parsed.sandboxBackend
+        : { type: 'local' };
       q.sidebarGroupId = parsed.sidebarGroupId || null;
       q.sidebarGroupStartedAt = parsed.sidebarGroupStartedAt || null;
       q.sidebarGroupFinalizedAt = parsed.sidebarGroupFinalizedAt || null;
@@ -147,6 +155,8 @@ function saveTaskQueue() {
       })),
       defaultMode: q.defaultMode,
       defaultUseTools: !!q.defaultUseTools,
+      sandboxWorkspace: q.sandboxWorkspace || '',
+      sandboxBackend: q.sandboxBackend && typeof q.sandboxBackend === 'object' ? q.sandboxBackend : { type: 'local' },
       sidebarGroupId: q.sidebarGroupId || null,
       sidebarGroupStartedAt: q.sidebarGroupStartedAt || null,
       sidebarGroupFinalizedAt: q.sidebarGroupFinalizedAt || null
@@ -159,6 +169,55 @@ function saveTaskQueue() {
 
 function _taskQueueNewId() {
   return 'q_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function _taskQueueSandboxOptions(q = ensureTaskQueue()) {
+  const workspace = String(q.sandboxWorkspace || '').trim();
+  if (!workspace) return {};
+  const backend = q.sandboxBackend && typeof q.sandboxBackend === 'object' ? q.sandboxBackend : { type: 'local' };
+  return { workspace, backend };
+}
+
+function _taskQueueSandboxBackendLabel(q = ensureTaskQueue()) {
+  const backend = q.sandboxBackend && typeof q.sandboxBackend === 'object' ? q.sandboxBackend : { type: 'local' };
+  return backend.type === 'remote' ? '远程' : '本地';
+}
+
+function taskQueueSandboxWorkspaceChanged(value) {
+  const q = ensureTaskQueue();
+  q.sandboxWorkspace = String(value || '').trim();
+  q.sandboxBackend = q.sandboxWorkspace && typeof captureCurrentBackendBinding === 'function'
+    ? captureCurrentBackendBinding()
+    : { type: 'local' };
+  saveTaskQueue();
+  _taskQueueFillControls();
+}
+
+async function chooseTaskQueueSandboxWorkspace() {
+  const q = ensureTaskQueue();
+  try {
+    const r = await workspaceBackendAction('choose_workspace_directory', {
+      initial_dir: q.sandboxWorkspace || (typeof TERMINAL_CONFIG !== 'undefined' ? (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd || '') : '')
+    });
+    if (r && r.cancelled) return;
+    if (!r || r.ok === false) throw new Error((r && r.error) || '选择沙箱目录失败');
+    q.sandboxWorkspace = r.workspace || r.cwd || '';
+    q.sandboxBackend = typeof captureCurrentBackendBinding === 'function' ? captureCurrentBackendBinding() : { type: 'local' };
+    saveTaskQueue();
+    _taskQueueFillControls();
+    TaskQueueUiService.toast('已设置任务队列沙箱目录');
+  } catch (e) {
+    TaskQueueUiService.toast('选择沙箱目录失败：' + (e.message || e), 4500);
+  }
+}
+
+function resetTaskQueueSandboxWorkspace() {
+  const q = ensureTaskQueue();
+  q.sandboxWorkspace = '';
+  q.sandboxBackend = { type: 'local' };
+  saveTaskQueue();
+  _taskQueueFillControls();
+  TaskQueueUiService.toast('任务队列将使用 Agent 目录');
 }
 
 function _taskQueueCreateItem(options = {}) {
@@ -241,6 +300,13 @@ function _taskQueueEnsureModal() {
           <button class="btn btn-primary" data-action="taskQueueAddTasks">加入队列</button>
           <button class="btn" id="taskQueueScheduleBtn" data-action="taskQueueAutoSchedule">AI 自动调度</button>
         </div>
+        <div class="mode-sandbox-row">
+          <span class="mode-sandbox-label">沙箱目录</span>
+          <span class="mode-sandbox-backend" id="taskQueueSandboxBackend">本地</span>
+          <input id="taskQueueSandboxWorkspace" class="mode-sandbox-input" type="text" placeholder="留空使用 Agent 目录" data-change-action="taskQueueSandboxWorkspaceChanged">
+          <button class="btn" data-action="chooseTaskQueueSandboxWorkspace">选择</button>
+          <button class="btn" data-action="resetTaskQueueSandboxWorkspace">Agent目录</button>
+        </div>
         <div class="task-queue-scheduler-status" id="taskQueueSchedulerStatus"></div>
       </div>
       <div class="task-queue-toolbar">
@@ -314,8 +380,16 @@ function _taskQueueFillControls() {
   const q = ensureTaskQueue();
   const modeEl = document.getElementById('taskQueueDefaultMode');
   const toolsEl = document.getElementById('taskQueueDefaultTools');
+  const sandboxEl = document.getElementById('taskQueueSandboxWorkspace');
+  const sandboxBackendEl = document.getElementById('taskQueueSandboxBackend');
   if (modeEl) modeEl.value = q.defaultMode;
   if (toolsEl) toolsEl.checked = !!q.defaultUseTools;
+  if (sandboxEl && sandboxEl.value !== String(q.sandboxWorkspace || '')) {
+    sandboxEl.value = q.sandboxWorkspace || '';
+  }
+  if (sandboxBackendEl) {
+    sandboxBackendEl.textContent = String(q.sandboxWorkspace || '').trim() ? _taskQueueSandboxBackendLabel(q) : 'Agent目录';
+  }
 }
 
 function taskQueueSaveDefaults() {
@@ -1568,10 +1642,14 @@ async function _taskQueueRunItem(item) {
   try {
     if (typeof callAPI !== 'function') throw new Error('API 函数尚未加载');
     const dependencyContext = await _taskQueueBuildDependencyContext(item);
+    const hadChat = !!(item.chatId && taskQueueChatById(item.chatId));
     const c = _taskQueueEnsureChatForItem(item, dependencyContext);
     item.chatId = c.id;
     saveTaskQueue();
     renderTaskQueueModal();
+    if (!hadChat && typeof initializeAutoCreatedChatWorkspace === 'function') {
+      await initializeAutoCreatedChatWorkspace(c, _taskQueueSandboxOptions());
+    }
 
     if (typeof clearPendingAIAttachments === 'function') clearPendingAIAttachments(c.id);
     const beforeMessageCount = Array.isArray(c.messages) ? c.messages.length : 0;
@@ -1646,7 +1724,8 @@ function _taskQueueEnsureChatForItem(item, dependencyContext = '') {
     id: 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
     title: _taskQueueItemTitle(item).slice(0, 30) || '队列任务',
     messages: [{ role: 'user', content: userContent }],
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    backend: { type: 'local' }
   };
   taskQueueState.chats.unshift(c);
   item.chatId = c.id;
@@ -2123,6 +2202,9 @@ window.AgentApp.define('taskQueue', {
   renderTaskQueueModal,
   renderTaskQueueTree,
   taskQueueSaveDefaults,
+  taskQueueSandboxWorkspaceChanged,
+  chooseTaskQueueSandboxWorkspace,
+  resetTaskQueueSandboxWorkspace,
   taskQueueAddTasks,
   taskQueueAutoSchedule,
   taskQueueUpdateItemText,

@@ -42,7 +42,7 @@ class _McpStdioSession:
         return [command] + args
 
     def _server_cwd(self):
-        cwd = self.server.get('cwd') or config.WORKSPACE_ROOT
+        cwd = self.server.get('cwd') or config.get_current_workspace()
         cwd_abs = resolve_path(cwd) if not os.path.isabs(cwd) else os.path.expanduser(cwd)
         if not is_inside_workspace(cwd_abs):
             raise ValueError(f'MCP cwd is outside workspace: {cwd_abs}')
@@ -249,7 +249,7 @@ def _read_skill_file(path):
     text = raw[:SKILL_MAX_BYTES].decode('utf-8', errors='replace')
     fallback = os.path.basename(os.path.dirname(path)) or 'skill'
     name, description = _parse_skill_frontmatter(text, fallback)
-    rel = os.path.relpath(path, config.WORKSPACE_ROOT).replace('\\', '/')
+    rel = os.path.relpath(path, config.get_current_workspace()).replace('\\', '/')
     return {
         'id': rel,
         'name': name,

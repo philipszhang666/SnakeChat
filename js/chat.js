@@ -301,6 +301,135 @@ function _consumeOneShotModeWithFallback(fallbackMode) {
   return fallbackMode || 'normal';
 }
 
+let _chatWorkspaceSyncSeq = 0;
+
+function chatWorkspaceSessionId(chat) {
+  const chatId = (chat && chat.id) || chatState.currentId || '';
+  if (typeof getAgentSessionId === 'function') return getAgentSessionId({ chatId });
+  if (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.sessionId) {
+    return `${TERMINAL_CONFIG.sessionId}:${chatId || 'default'}`;
+  }
+  return chatId || 'default';
+}
+
+function recordChatWorkspace(chat, info, options = {}) {
+  if (!chat || !info || info.ok === false) return false;
+  const workspace = info.workspace || info.cwd || '';
+  const cwd = info.cwd || info.workspace || workspace;
+  if (!workspace) return false;
+  chat.workspace = workspace;
+  chat.cwd = cwd || workspace;
+  if (info.agent_home) chat.agentHome = info.agent_home;
+  if (!options.preserveBackend && typeof captureCurrentBackendBinding === 'function') {
+    chat.backend = captureCurrentBackendBinding();
+  }
+  if (chat.backend && chat.backend.type === 'remote' && workspace) {
+    chat.backend.remoteWorkspace = workspace;
+    chat.backend.serverUrl = chat.backend.serverUrl || (
+      typeof TERMINAL_CONFIG !== 'undefined' ? TERMINAL_CONFIG.serverUrl : ''
+    );
+  }
+  chat.workspaceUpdatedAt = Date.now();
+  return true;
+}
+
+function recordCurrentChatWorkspace(info) {
+  const chat = chatCurrentChat();
+  if (!recordChatWorkspace(chat, info)) return false;
+  chatSaveData();
+  return true;
+}
+
+function chatDesiredWorkspace(chat) {
+  return (chat && (chat.workspace || chat.cwd)) || '';
+}
+
+function defaultChatBackendBinding(options = {}) {
+  if (options.forceAgentHome || options.forceLocal) return { type: 'local' };
+  return { type: 'local' };
+}
+
+async function restoreBackendForChat(chat, options = {}) {
+  const binding = (chat && chat.backend) || defaultChatBackendBinding(options);
+  const shouldToastRemote = binding && binding.type === 'remote'
+    && typeof isRemoteAgentActive === 'function'
+    && !isRemoteAgentActive();
+  if (shouldToastRemote && typeof toast === 'function') {
+    toast('远程连接中，可能需要几十秒...', 3500);
+  }
+  if (typeof applyBackendBinding === 'function') {
+    return applyBackendBinding(binding, {
+      toast: shouldToastRemote,
+      toastMessage: '远程连接中，可能需要几十秒...'
+    });
+  }
+  return null;
+}
+
+async function restoreWorkspaceForChat(chat, options = {}) {
+  if (!chat || !chat.id || typeof workspaceBackendAction !== 'function') return null;
+  const seq = ++_chatWorkspaceSyncSeq;
+  const session_id = chatWorkspaceSessionId(chat);
+  const forceAgentHome = !!options.forceAgentHome;
+  const desired = forceAgentHome ? '' : String(chatDesiredWorkspace(chat) || '').trim();
+  const action = desired ? 'set_workspace' : 'reset_workspace_to_agent_home';
+  const params = desired ? { path: desired, session_id } : { session_id };
+
+  try {
+    await restoreBackendForChat(chat, options);
+    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) return null;
+    const r = await workspaceBackendAction(action, params);
+    if (!r || r.ok === false) throw new Error((r && r.error) || '切换沙箱目录失败');
+    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) return r;
+    if (typeof updateWorkspaceDisplay === 'function') updateWorkspaceDisplay(r, { persistToChat: false });
+    recordChatWorkspace(chat, r);
+    chatSaveData();
+    if (typeof refreshWorkspaceDependentContext === 'function') refreshWorkspaceDependentContext();
+    if (options.resetFileExplorer !== false && typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
+    return r;
+  } catch (e) {
+    console.warn('[workspace] restore chat workspace failed:', e);
+    if (chatState.currentId === chat.id && typeof refreshWorkspaceInfo === 'function') {
+      try { await refreshWorkspaceInfo(); } catch (_) {}
+    }
+    return null;
+  }
+}
+
+async function initializeAutoCreatedChatWorkspace(chat, options = {}) {
+  if (!chat || !chat.id) return null;
+  const desiredWorkspace = String(options.workspace || options.sandboxWorkspace || '').trim();
+  const desiredBackend = options.backend && typeof options.backend === 'object'
+    ? options.backend
+    : { type: 'local' };
+  chat.backend = desiredBackend.type === 'remote' ? { ...desiredBackend } : { type: 'local' };
+  const session_id = chatWorkspaceSessionId(chat);
+  try {
+    await restoreBackendForChat(chat, {
+      forceAgentHome: !desiredWorkspace,
+      forceLocal: chat.backend.type !== 'remote'
+    });
+    if (typeof workspaceBackendAction !== 'function') return null;
+    const r = desiredWorkspace
+      ? await workspaceBackendAction('set_workspace', { path: desiredWorkspace, session_id })
+      : await workspaceBackendAction('reset_workspace_to_agent_home', { session_id });
+    if (!r || r.ok === false) throw new Error((r && r.error) || '初始化自动新建对话沙箱失败');
+    recordChatWorkspace(chat, r, { preserveBackend: true });
+    if (options.updateUi && chatState.currentId === chat.id && typeof updateWorkspaceDisplay === 'function') {
+      updateWorkspaceDisplay(r, { persistToChat: false });
+    }
+    chatSaveData();
+    return r;
+  } catch (e) {
+    console.warn('[workspace] initialize auto-created chat workspace failed:', e);
+    return null;
+  }
+}
+
+function restoreWorkspaceForCurrentChat(options = {}) {
+  return restoreWorkspaceForChat(chatCurrentChat(), options);
+}
+
 function _setComposerDraft(input, text) {
   if (!input) return;
   input.value = text || '';
@@ -454,7 +583,8 @@ async function submitEditResend(input) {
 function newChat() {
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: null });
   const id = 'c_' + Date.now();
-  chatState.chats.unshift({ id, title: '新对话', messages: [], createdAt: Date.now() });
+  const chat = { id, title: '新对话', messages: [], createdAt: Date.now(), backend: { type: 'local' } };
+  chatState.chats.unshift(chat);
   chatState.currentId = id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(id);
   syncPendingAttachmentMirror(id);
@@ -465,11 +595,13 @@ function newChat() {
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
+  restoreWorkspaceForChat(chat, { forceAgentHome: true });
 }
 
 function switchChat(id) {
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: id });
   chatState.currentId = id;
+  const chat = chatCurrentChat();
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(id);
   syncPendingAttachmentMirror(id);
   chatSaveData();
@@ -479,6 +611,7 @@ function switchChat(id) {
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
+  restoreWorkspaceForChat(chat);
 }
 
 function updateTemporaryChatButton() {
@@ -496,6 +629,7 @@ function startTemporaryChat() {
   chatState.temporaryChat = typeof createTemporaryChat === 'function'
     ? createTemporaryChat()
     : { id: 'tmp_' + Date.now(), title: '临时会话', messages: [], createdAt: Date.now(), temporary: true };
+  chatState.temporaryChat.backend = { type: 'local' };
   chatState.currentId = chatState.temporaryChat.id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(chatState.currentId);
   syncPendingAttachmentMirror(chatState.currentId);
@@ -507,6 +641,7 @@ function startTemporaryChat() {
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   updateTemporaryChatButton();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
+  restoreWorkspaceForChat(chatState.temporaryChat, { forceAgentHome: true });
 }
 
 function isTaskQueueSidebarGroupedChat(chat) {
@@ -2252,6 +2387,10 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     hasComposerDraftForChat,
     hasPendingAttachmentReads,
     hasPendingAttachmentErrors,
+    recordCurrentChatWorkspace,
+    initializeAutoCreatedChatWorkspace,
+    restoreWorkspaceForCurrentChat,
+    restoreWorkspaceForChat,
     deleteMessageTurn,
     _findMessageTurnBounds,
     addAttachment,

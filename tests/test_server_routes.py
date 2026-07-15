@@ -1,6 +1,9 @@
 import base64
+import json
+import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import unittest
 from pathlib import Path
@@ -21,7 +24,13 @@ from server.exec import (
     _windows_remote_terminal_commands,
 )
 from server.handler import Handler
-from server.remote import _remote_login_shell_command, _remote_python_bin_script
+from server.remote import (
+    _deployment_manifest,
+    _make_bundle,
+    _remote_deployment_matches,
+    _remote_login_shell_command,
+    _remote_python_bin_script,
+)
 from server.routes import (
     ACTION_ROUTE_BY_NAME,
     ACTION_ROUTES,
@@ -281,6 +290,31 @@ class ExecGitProxyTests(unittest.TestCase):
         self.assertIn('command -v python3', script)
         self.assertIn('command -v python', script)
         self.assertIn('python3/python not found', script)
+
+    def test_remote_bundle_contains_deployment_manifest(self):
+        manifest = _deployment_manifest()
+        bundle, tmp_dir = _make_bundle(manifest)
+        try:
+            with tarfile.open(bundle, 'r:gz') as tar:
+                names = set(tar.getnames())
+                self.assertIn('local_terminal_server.py', names)
+                self.assertIn('requirements.txt', names)
+                self.assertIn('server/remote.py', names)
+                self.assertIn('.snake-agent-deploy-manifest.json', names)
+                member = tar.extractfile('.snake-agent-deploy-manifest.json')
+                packed_manifest = json.loads(member.read().decode('utf-8'))
+
+            self.assertEqual(manifest['fingerprint'], packed_manifest['fingerprint'])
+            self.assertTrue(manifest['fingerprint'])
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_remote_deployment_match_parses_last_json_line(self):
+        with mock.patch('server.remote._run', return_value='login banner\n{"ok": true, "fingerprint": "abc"}\n'):
+            result = _remote_deployment_matches(['ssh', 'host'], 'abc')
+
+        self.assertTrue(result['ok'])
+        self.assertEqual('abc', result['fingerprint'])
 
     def test_remote_terminal_builds_ssh_cd_command(self):
         args = _remote_terminal_ssh_args('ssh -p 2222 user@example.com', '~/project dir')

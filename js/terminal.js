@@ -933,17 +933,16 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
     }
     // ⭐ 如果响应里带了 workspace/cwd，顺手刷新顶部沙箱栏显示
     if (!usesAlternateBackend && r && (r.workspace || r.cwd)) {
-      if (r.workspace) TERMINAL_CONFIG.workspace = r.workspace;
-      if (r.cwd) TERMINAL_CONFIG.cwd = r.cwd;
-      const pathEl = document.getElementById('workspacePath');
-      const statusEl = document.getElementById('workspaceStatus');
-      if (pathEl && r.workspace) {
-        pathEl.textContent = r.workspace;
-        pathEl.title = `沙箱根：${r.workspace}\n当前 cwd：${r.cwd || r.workspace}`;
-      }
-      if (statusEl) {
-        statusEl.className = 'workspace-status online';
-        statusEl.title = '本地服务在线';
+      if (chatId && terminalState.currentId && chatId !== terminalState.currentId) {
+        const toolChat = terminalChatById(chatId);
+        if (typeof recordChatWorkspace === 'function' && recordChatWorkspace(toolChat, r, { preserveBackend: true })) {
+          terminalSaveData();
+        }
+      } else if (typeof updateWorkspaceDisplay === 'function') {
+        updateWorkspaceDisplay(r);
+      } else {
+        if (r.workspace) TERMINAL_CONFIG.workspace = r.workspace;
+        if (r.cwd) TERMINAL_CONFIG.cwd = r.cwd;
       }
     }
     return r;

@@ -51,6 +51,28 @@ class FullAccessPermissionTests(unittest.TestCase):
             finally:
                 config.reset_request_full_access(token)
 
+    def test_request_workspace_is_bound_by_session(self):
+        with tempfile.TemporaryDirectory() as root_a, tempfile.TemporaryDirectory() as root_b, self._with_workspace(root_a):
+            try:
+                config.set_session_workspace('chat-a', root_a)
+                config.set_session_workspace('chat-b', root_b)
+                token_ws = config.bind_request_workspace(config.get_session_workspace('chat-b'))
+                token_cwd = config.bind_request_cwd(config.get_session_cwd('chat-b'))
+                try:
+                    file_a = os.path.join(root_a, 'a.txt')
+                    file_b = os.path.join(root_b, 'b.txt')
+                    self.assertEqual(os.path.realpath(root_b), config.get_current_workspace())
+                    self.assertFalse(is_inside_workspace(file_a))
+                    self.assertTrue(is_inside_workspace(file_b))
+                    _, err = check_path_or_error(file_b)
+                    self.assertIsNone(err)
+                finally:
+                    config.reset_request_cwd(token_cwd)
+                    config.reset_request_workspace(token_ws)
+            finally:
+                config.SESSION_WORKSPACES.clear()
+                config.SESSION_CWDS.clear()
+
 
 if __name__ == '__main__':
     unittest.main()

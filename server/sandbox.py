@@ -166,7 +166,7 @@ def _is_safe_rm_target(target, cwd=None):
     if _GLOB_OR_EXPANSION_RE.search(raw):
         return False
     target_abs = _resolve_rm_target(raw, cwd)
-    workspace_abs = os.path.realpath(config.WORKSPACE_ROOT)
+    workspace_abs = os.path.realpath(config.get_current_workspace())
     if target_abs == workspace_abs:
         return False
     return is_inside_workspace(target_abs)
@@ -539,7 +539,7 @@ def _command_parent_traversal_escapes_workspace(cmd: str, cwd=None) -> bool:
     try:
         current_dir = os.path.realpath(resolve_path(cwd) if cwd else config.get_current_cwd())
     except Exception:
-        current_dir = os.path.realpath(config.WORKSPACE_ROOT)
+        current_dir = os.path.realpath(config.get_current_workspace())
 
     # Track simple shell sequencing so "cd subdir && ../tool" resolves from subdir.
     for segment in re.split(r'&&|\|\||[;\n]', str(cmd or '')):
@@ -638,10 +638,11 @@ def is_inside_workspace(abs_path):
         return False
     try:
         # commonpath 在 Windows 上跨盘符会抛 ValueError
-        common = os.path.commonpath([real, config.WORKSPACE_ROOT])
+        workspace_root = config.get_current_workspace()
+        common = os.path.commonpath([real, workspace_root])
     except ValueError:
         return False
-    return common == config.WORKSPACE_ROOT
+    return common == config.get_current_workspace()
 
 
 def resolve_path(path):
@@ -662,7 +663,7 @@ def check_path_or_error(path_str, must_exist=False):
     if not is_inside_workspace(abs_path):
         return abs_path, (
             f'🚫 路径越界：{abs_path}\n'
-            f'   沙箱根目录: {config.WORKSPACE_ROOT}\n'
+            f'   沙箱根目录: {config.get_current_workspace()}\n'
             f'   AI 只能在沙箱内操作文件。请使用相对路径或沙箱内的绝对路径。'
         )
     if must_exist and not os.path.exists(abs_path):

@@ -834,13 +834,18 @@ textarea{width:100%;border:none;background:transparent;resize:none;outline:none;
 
 /* 任务队列 */
 .task-queue-modal .modal{width:min(980px,95vw)}
-.task-queue-compose{border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg)}
+.task-queue-compose{border:1px solid var(--border);border-radius:10px;padding:12px;background:var(--bg);display:flex;flex-direction:column;gap:12px}
 .task-queue-compose textarea{width:100%;min-height:120px;resize:vertical;font-family:inherit;line-height:1.5}
-.task-queue-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
+.task-queue-controls{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;margin-top:0}
 .task-queue-controls select,.task-queue-item select{padding:7px 9px;border:1px solid var(--border);border-radius:7px;background:var(--bg-sidebar);color:var(--text);font-size:13px}
 #taskQueueSplitMode,#taskQueueDefaultMode,.task-queue-item-options select{width:150px}
 .task-queue-check{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);user-select:none}
-.task-queue-scheduler-status{min-height:18px;margin-top:6px;font-size:12px;color:var(--text-secondary)}
+.task-queue-compose .mode-sandbox-row{grid-template-columns:72px auto minmax(220px,1fr) auto auto;gap:10px;margin-top:0;padding:0;border:0;background:transparent}
+.task-queue-compose .mode-sandbox-label{font-size:13px;color:var(--text)}
+.task-queue-compose .mode-sandbox-backend{height:30px;background:var(--bg-input)}
+.task-queue-compose .mode-sandbox-input{height:36px;background:var(--bg-sidebar)}
+.task-queue-scheduler-status{min-height:0;margin-top:0;font-size:12px;color:var(--text-secondary)}
+.task-queue-scheduler-status:empty{display:none}
 .task-queue-scheduler-status.error{color:var(--danger)}
 .task-queue-toolbar{display:flex;flex-direction:column;align-items:stretch;gap:12px;margin:14px 0}
 .task-queue-stats{margin-right:0;color:var(--text-secondary);font-size:13px}
@@ -901,6 +906,15 @@ textarea{width:100%;border:none;background:transparent;resize:none;outline:none;
 .task-queue-tree-edges{position:absolute;left:0;top:0;z-index:1;pointer-events:none;overflow:visible}
 .task-queue-tree-edges path{fill:none;stroke:rgba(148,163,184,.58);stroke-width:1.6}
 .task-queue-tree-edges path.dependency{stroke:var(--primary);stroke-width:2}
+@media (max-width:900px){
+  .task-queue-compose .mode-sandbox-row{grid-template-columns:72px auto minmax(0,1fr)}
+  .task-queue-compose .mode-sandbox-row .btn{width:auto}
+}
+@media (max-width:640px){
+  .task-queue-compose .mode-sandbox-row{grid-template-columns:1fr}
+  .task-queue-compose .mode-sandbox-row .btn,.task-queue-compose .mode-sandbox-input{width:100%}
+  .task-queue-compose .mode-sandbox-backend{justify-content:flex-start;border-radius:7px}
+}
 
 .modal.goal-modal{width:min(1100px,96vw)}
 .goal-layout{display:grid;grid-template-columns:minmax(300px,380px) minmax(0,1fr);gap:14px;align-items:start}
@@ -967,6 +981,11 @@ textarea{width:100%;border:none;background:transparent;resize:none;outline:none;
 .concurrent-field .settings-select-trigger,.concurrent-field .settings-select-option{font-weight:400}
 .concurrent-field input{width:92px;min-width:92px}
 .concurrent-check{display:inline-flex;align-items:center;gap:6px;height:34px;font-size:13px;color:var(--text-secondary);user-select:none}
+.mode-sandbox-row{display:grid;grid-template-columns:auto auto minmax(220px,1fr) auto auto;align-items:center;gap:8px;margin-top:2px}
+.mode-sandbox-label{font-size:12px;font-weight:700;color:var(--text-secondary);white-space:nowrap}
+.mode-sandbox-backend{height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:999px;background:var(--bg-input);color:var(--text-secondary);font-size:12px;padding:0 9px;white-space:nowrap}
+.mode-sandbox-input{height:34px;min-width:0;border:1px solid var(--border);border-radius:7px;background:var(--bg-sidebar);color:var(--text);padding:6px 9px;font-size:13px}
+.mode-sandbox-input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(59,130,246,.14)}
 .concurrent-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0;color:var(--text-secondary);font-size:12.5px}
 .concurrent-summary span{padding:4px 8px;border:1px solid var(--border);border-radius:999px;background:var(--bg-input)}
 .concurrent-history{display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow:auto;padding-right:2px}
@@ -992,6 +1011,9 @@ textarea{width:100%;border:none;background:transparent;resize:none;outline:none;
   .concurrent-controls{align-items:stretch}
   .concurrent-field,.concurrent-field select,.concurrent-field input,.concurrent-controls .btn{width:100%;min-width:0}
   .concurrent-check{width:100%}
+  .mode-sandbox-row{grid-template-columns:1fr}
+  .mode-sandbox-row .btn,.mode-sandbox-input{width:100%}
+  .mode-sandbox-backend{justify-content:flex-start;border-radius:7px}
 }
 
 /* 🗂️ API 配置档案 */

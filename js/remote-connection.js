@@ -166,6 +166,152 @@ function isRemoteAgentActive() {
   );
 }
 
+function localBackendServerUrl() {
+  return (REMOTE_CONTROLLER && REMOTE_CONTROLLER.serverUrl) || 'http://localhost:8765';
+}
+
+function captureCurrentBackendBinding() {
+  if (isRemoteAgentActive()) {
+    const cfg = loadRemoteConnectionConfig();
+    const profile = remoteProfileForCommand(cfg, cfg.sshCommand) || {};
+    return {
+      type: 'remote',
+      serverUrl: TERMINAL_CONFIG.serverUrl || '',
+      remoteGitProxyUrl: TERMINAL_CONFIG.remoteGitProxyUrl || '',
+      sshCommand: cfg.sshCommand || profile.sshCommand || '',
+      remoteWorkspace: cfg.remoteWorkspace || profile.remoteWorkspace || '~/',
+      remoteAgentPort: parseInt(cfg.remoteAgentPort || profile.remoteAgentPort, 10) || 8765,
+      localPort: parseInt(cfg.localPort || profile.localPort, 10) || 18765,
+      heartbeatTimeout: Math.max(120, parseInt(cfg.heartbeatTimeout || profile.heartbeatTimeout, 10) || REMOTE_HEARTBEAT_DEFAULT_SECONDS),
+      installDeps: cfg.installDeps !== false,
+      encryptedPassword: cfg.encryptedPassword || profile.encryptedPassword || '',
+      updatedAt: Date.now()
+    };
+  }
+  return {
+    type: 'local',
+    serverUrl: localBackendServerUrl(),
+    updatedAt: Date.now()
+  };
+}
+
+function normalizeBackendBinding(binding = {}) {
+  const raw = binding && typeof binding === 'object' ? binding : {};
+  const type = raw.type === 'remote' ? 'remote' : 'local';
+  if (type === 'local') {
+    return {
+      type: 'local',
+      serverUrl: raw.serverUrl || localBackendServerUrl(),
+      updatedAt: raw.updatedAt || Date.now()
+    };
+  }
+  return {
+    type: 'remote',
+    serverUrl: raw.serverUrl || '',
+    remoteGitProxyUrl: raw.remoteGitProxyUrl || '',
+    sshCommand: remoteProfileKey(raw.sshCommand || ''),
+    remoteWorkspace: raw.remoteWorkspace || raw.workspace || '~/',
+    remoteAgentPort: parseInt(raw.remoteAgentPort, 10) || 8765,
+    localPort: parseInt(raw.localPort, 10) || 18765,
+    heartbeatTimeout: Math.max(120, parseInt(raw.heartbeatTimeout, 10) || REMOTE_HEARTBEAT_DEFAULT_SECONDS),
+    installDeps: raw.installDeps !== false,
+    encryptedPassword: raw.encryptedPassword || '',
+    updatedAt: raw.updatedAt || Date.now()
+  };
+}
+
+function activeRemoteMatchesBinding(binding) {
+  const b = normalizeBackendBinding(binding);
+  if (b.type !== 'remote' || !isRemoteAgentActive()) return false;
+  const cfg = loadRemoteConnectionConfig();
+  return remoteProfileKey(cfg.sshCommand) === remoteProfileKey(b.sshCommand)
+    && String(TERMINAL_CONFIG.serverUrl || '') === String(b.serverUrl || TERMINAL_CONFIG.serverUrl || '')
+    && (parseInt(cfg.localPort, 10) || 18765) === (parseInt(b.localPort, 10) || 18765);
+}
+
+async function applyBackendBinding(binding, options = {}) {
+  const b = normalizeBackendBinding(binding);
+  if (b.type !== 'remote') {
+    if (isRemoteAgentActive()) {
+      await disconnectRemoteAgent({
+        skipConfirm: true,
+        stopRemote: false,
+        silent: true,
+        refreshWorkspace: false
+      });
+    } else if (typeof TERMINAL_CONFIG !== 'undefined') {
+      TERMINAL_CONFIG.serverUrl = localBackendServerUrl();
+      TERMINAL_CONFIG.remoteGitProxyUrl = '';
+    }
+    return { ok: true, type: 'local', serverUrl: localBackendServerUrl() };
+  }
+
+  if (!b.sshCommand) {
+    throw new Error('该对话缺少远程 SSH 命令，无法恢复远程连接');
+  }
+
+  const alreadyMatched = activeRemoteMatchesBinding(b);
+  if (isRemoteAgentActive() && !alreadyMatched) {
+    await disconnectRemoteAgent({
+      skipConfirm: true,
+      stopRemote: false,
+      silent: true,
+      refreshWorkspace: false
+    });
+  }
+
+  const cfg = {
+    ...loadRemoteConnectionConfig(),
+    sshCommand: b.sshCommand,
+    remoteWorkspace: b.remoteWorkspace,
+    remoteAgentPort: b.remoteAgentPort,
+    localPort: b.localPort,
+    heartbeatTimeout: b.heartbeatTimeout,
+    installDeps: b.installDeps,
+    encryptedPassword: b.encryptedPassword,
+    autoReconnect: true,
+    lastServerUrl: b.serverUrl || '',
+    lastConnectedAt: Date.now()
+  };
+  upsertRemoteProfile(cfg, b.sshCommand, {
+    remoteWorkspace: b.remoteWorkspace,
+    remoteAgentPort: b.remoteAgentPort,
+    localPort: b.localPort,
+    heartbeatTimeout: b.heartbeatTimeout,
+    installDeps: b.installDeps,
+    encryptedPassword: b.encryptedPassword,
+    autoReconnect: true,
+    lastServerUrl: b.serverUrl || '',
+    lastConnectedAt: cfg.lastConnectedAt
+  });
+  saveRemoteConnectionConfig(cfg);
+
+  const password = await remoteDecryptPassword(cfg.encryptedPassword || '');
+  applyRemoteConfigToForm(cfg, password);
+
+  if (alreadyMatched || activeRemoteMatchesBinding(b)) {
+    if (b.remoteGitProxyUrl) TERMINAL_CONFIG.remoteGitProxyUrl = b.remoteGitProxyUrl;
+    return { ok: true, type: 'remote', reused: true, serverUrl: TERMINAL_CONFIG.serverUrl };
+  }
+
+  if (options.toast !== false) {
+    RemoteConnectionUiService.toast(options.toastMessage || '远程连接中，可能需要几十秒...');
+  }
+  const result = await connectRemoteAgent({
+    autoReconnect: true,
+    skipConfirm: true,
+    silentSave: true,
+    reuseExisting: true,
+    throwOnError: true
+  });
+  return {
+    ok: true,
+    type: 'remote',
+    reused: false,
+    serverUrl: (result && result.serverUrl) || TERMINAL_CONFIG.serverUrl
+  };
+}
+
 function persistActiveRemoteConnection(info = {}) {
   const workspace = (info && (info.workspace || info.cwd || info.remoteWorkspace)) || '';
   const patch = {
@@ -174,10 +320,14 @@ function persistActiveRemoteConnection(info = {}) {
     lastServerUrl: (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || ''
   };
   if (workspace) patch.remoteWorkspace = workspace;
+  if (info.remoteAgentPort) patch.remoteAgentPort = parseInt(info.remoteAgentPort, 10) || undefined;
+  if (info.localPort) patch.localPort = parseInt(info.localPort, 10) || undefined;
   const cfg = loadRemoteConnectionConfig();
   const next = { ...cfg, ...patch };
   upsertRemoteProfile(next, next.sshCommand, {
     remoteWorkspace: workspace || next.remoteWorkspace,
+    remoteAgentPort: patch.remoteAgentPort || next.remoteAgentPort,
+    localPort: patch.localPort || next.localPort,
     autoReconnect: true,
     lastConnectedAt: patch.lastConnectedAt,
     lastServerUrl: patch.lastServerUrl
@@ -591,6 +741,8 @@ async function connectRemoteAgent(options = {}) {
       local_port: v.localPort,
       heartbeat_timeout: v.heartbeatTimeout,
       install_deps: v.installDeps,
+      reuse_existing: !!opts.reuseExisting || autoReconnect,
+      fallback_on_reuse_failure: true,
       git_proxy: (typeof gitProxyConfigForBackend === 'function') ? gitProxyConfigForBackend() : undefined,
       requestTimeoutMs: 240000
     });
@@ -617,11 +769,20 @@ async function connectRemoteAgent(options = {}) {
     persistActiveRemoteConnection({
       workspace: workspaceInfo.workspace || workspaceInfo.cwd || v.remoteWorkspace,
       cwd: workspaceInfo.cwd,
-      remoteWorkspace: v.remoteWorkspace
+      remoteWorkspace: v.remoteWorkspace,
+      remoteAgentPort: r.remote_agent_port || v.remoteAgentPort,
+      localPort: r.local_port || v.localPort
     });
     if (typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
     setRemoteStatus(`已连接：${r.server_url} → ${workspaceInfo.workspace || v.remoteWorkspace}`, 'ok');
     RemoteConnectionUiService.toast('远程 Agent 已连接');
+    return {
+      ok: true,
+      serverUrl: r.server_url,
+      reusedExisting: !!r.reused_existing,
+      workspace: workspaceInfo.workspace || workspaceInfo.cwd || v.remoteWorkspace,
+      cwd: workspaceInfo.cwd
+    };
   } catch (e) {
     TERMINAL_CONFIG.serverUrl = oldServerUrl;
     TERMINAL_CONFIG.remoteGitProxyUrl = oldRemoteGitProxyUrl;
@@ -634,6 +795,8 @@ async function connectRemoteAgent(options = {}) {
     }
     console.error('[remote] connect failed:', e);
     setRemoteStatus('连接失败：' + e.message, 'error');
+    if (opts.throwOnError) throw e;
+    return { ok: false, error: e.message || String(e) };
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -696,6 +859,8 @@ window.connectRemoteAgent = connectRemoteAgent;
 window.disconnectRemoteAgent = disconnectRemoteAgent;
 window.initRemoteConnection = initRemoteConnection;
 window.noteRemoteWorkspaceChanged = noteRemoteWorkspaceChanged;
+window.captureCurrentBackendBinding = captureCurrentBackendBinding;
+window.applyBackendBinding = applyBackendBinding;
 window.checkRemoteStatus = checkRemoteStatus;
 window.openRemoteDirPicker = openRemoteDirPicker;
 window.refreshRemoteDirPicker = refreshRemoteDirPicker;
@@ -711,6 +876,8 @@ window.AgentApp.define('remoteConnection', {
   disconnectRemoteAgent,
   initRemoteConnection,
   noteRemoteWorkspaceChanged,
+  captureCurrentBackendBinding,
+  applyBackendBinding,
   checkRemoteStatus,
   openRemoteDirPicker,
   refreshRemoteDirPicker,

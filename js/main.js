@@ -131,7 +131,11 @@ async function init() {
   
   // 猸?7.5 鍚姩鏃舵娴嬫矙绠辩洰褰曪紝骞舵瘡 30s 蹇冭烦涓€娆?
   if (typeof refreshWorkspaceInfo === 'function') {
-    refreshWorkspaceInfo();
+    if (typeof restoreWorkspaceForCurrentChat === 'function' && mainState().currentId) {
+      restoreWorkspaceForCurrentChat({ resetFileExplorer: false });
+    } else {
+      refreshWorkspaceInfo();
+    }
     setInterval(refreshWorkspaceInfo, 30000);
   }
 

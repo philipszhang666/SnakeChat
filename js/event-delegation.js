@@ -575,6 +575,18 @@
     taskQueueSkipItem(event, target) {
       return callGlobal('taskQueueSkipItem', [target.dataset.taskId || '']);
     },
+    chooseConcurrentSandboxWorkspace() {
+      return callGlobal('chooseConcurrentSandboxWorkspace');
+    },
+    resetConcurrentSandboxWorkspace() {
+      return callGlobal('resetConcurrentSandboxWorkspace');
+    },
+    chooseTaskQueueSandboxWorkspace() {
+      return callGlobal('chooseTaskQueueSandboxWorkspace');
+    },
+    resetTaskQueueSandboxWorkspace() {
+      return callGlobal('resetTaskQueueSandboxWorkspace');
+    },
     addPresetTool(event, target) {
       return callGlobal('addPresetTool', [dataValue(target)]);
     },
@@ -676,6 +688,9 @@
     concurrentSelectTargetChanged() {
       return callGlobal('concurrentSelectTargetChanged');
     },
+    concurrentSandboxWorkspaceChanged(event, target) {
+      return callGlobal('concurrentSandboxWorkspaceChanged', [target.value]);
+    },
     renderSecurityRecords() {
       return callGlobal('renderSecurityRecords');
     },
@@ -699,6 +714,9 @@
     },
     taskQueueUpdateItemDepends(event, target) {
       return callGlobal('taskQueueUpdateItemDepends', [target.dataset.taskId || '', target.value]);
+    },
+    taskQueueSandboxWorkspaceChanged(event, target) {
+      return callGlobal('taskQueueSandboxWorkspaceChanged', [target.value]);
     },
     importFromFile(event) {
       return callGlobal('importFromFile', [event]);

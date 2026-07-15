@@ -376,7 +376,7 @@ class ExecMixin:
             shell=True,
             shell_kwargs=_shell_kwargs_for_subprocess(),
             max_runtime=max_runtime,
-            workspace=config.WORKSPACE_ROOT,
+            workspace=config.get_current_workspace(),
             kind=kind,
             owner_session_id=self._command_task_owner_session_id(),
         )
@@ -422,7 +422,7 @@ class ExecMixin:
                 'stderr': payload.get('stderr') or '',
                 'returncode': payload.get('returncode'),
                 'cwd': cwd_abs,
-                'workspace': config.WORKSPACE_ROOT,
+                'workspace': config.get_current_workspace(),
                 'status': payload.get('status'),
             }
             if visible_to_ai:
@@ -444,7 +444,7 @@ class ExecMixin:
             'stderr': payload.get('stderr') or '',
             'returncode': payload.get('returncode'),
             'cwd': cwd_abs,
-            'workspace': config.WORKSPACE_ROOT,
+            'workspace': config.get_current_workspace(),
         }
 
     def _run_command_until_foreground_timeout(self, command, cwd_abs, env=None, body=None, timeout=60, kind='execute'):
@@ -459,7 +459,7 @@ class ExecMixin:
             shell=True,
             shell_kwargs=_shell_kwargs_for_subprocess(),
             max_runtime=max_runtime,
-            workspace=config.WORKSPACE_ROOT,
+            workspace=config.get_current_workspace(),
             kind=kind,
             owner_session_id=self._command_task_owner_session_id(),
         )
@@ -517,7 +517,7 @@ class ExecMixin:
         command = body.get('command', '').strip()
         timeout_max = _coerce_execute_timeout_max(body.get('timeout_max'))
         timeout = _coerce_execute_timeout(body.get('timeout'), default=60, maximum=timeout_max)
-        cwd = body.get('cwd') or config.WORKSPACE_ROOT
+        cwd = body.get('cwd') or config.get_current_workspace()
         cwd_abs = os.path.realpath(os.path.expanduser(str(cwd)))
         if not command:
             return self.response.json(400, {'ok': False, 'error': '命令为空'})
@@ -534,7 +534,7 @@ class ExecMixin:
                     kind='remote_execute',
                 ))
             except Exception as e:
-                return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
+                return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.get_current_workspace()})
         try:
             return self.response.json(200, self._run_command_until_foreground_timeout(
                 command,
@@ -544,14 +544,14 @@ class ExecMixin:
                 timeout=timeout,
                 kind='remote_execute',
             ))
-            return self.response.json(200, {'ok': False, 'error': f'命令超时（{timeout}秒）', 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
+            return self.response.json(200, {'ok': False, 'error': f'命令超时（{timeout}秒）', 'cwd': cwd_abs, 'workspace': config.get_current_workspace()})
         except Exception as e:
-            return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.WORKSPACE_ROOT})
+            return self.response.json(200, {'ok': False, 'error': str(e), 'cwd': cwd_abs, 'workspace': config.get_current_workspace()})
 
     def handle_open_terminal(self, body):
         """打开系统终端窗口，工作目录为当前沙箱目录。"""
         try:
-            cwd_abs = os.path.realpath(config.WORKSPACE_ROOT)
+            cwd_abs = os.path.realpath(config.get_current_workspace())
             if not os.path.isdir(cwd_abs):
                 return self.response.json(200, {'ok': False, 'error': f'沙箱目录不存在: {cwd_abs}'})
             if not is_inside_workspace(cwd_abs):
@@ -636,7 +636,7 @@ class ExecMixin:
                     try:
                         proc = subprocess.Popen(
                             cmd,
-                            cwd=os.path.realpath(config.WORKSPACE_ROOT),
+                            cwd=os.path.realpath(config.get_current_workspace()),
                             creationflags=subprocess.CREATE_NEW_CONSOLE,
                         )
                         break
@@ -653,7 +653,7 @@ class ExecMixin:
                 command = shlex.join(ssh_args)
                 escaped = command.replace('\\', '\\\\').replace('"', '\\"')
                 script = f'tell application "Terminal" to do script "{escaped}"'
-                proc = subprocess.Popen(['osascript', '-e', script], cwd=os.path.realpath(config.WORKSPACE_ROOT))
+                proc = subprocess.Popen(['osascript', '-e', script], cwd=os.path.realpath(config.get_current_workspace()))
             else:
                 commands = [
                     ['x-terminal-emulator', '-e'] + ssh_args,
@@ -665,7 +665,7 @@ class ExecMixin:
                 last_error = None
                 for cmd in commands:
                     try:
-                        proc = subprocess.Popen(cmd, cwd=os.path.realpath(config.WORKSPACE_ROOT))
+                        proc = subprocess.Popen(cmd, cwd=os.path.realpath(config.get_current_workspace()))
                         break
                     except Exception as e:
                         last_error = e
@@ -712,7 +712,7 @@ class ExecMixin:
         if not is_inside_workspace(cwd_abs):
             return self.response.json(200, {
                 'ok': False,
-                'error': f'🚫 工作目录越界：{cwd_abs}\n沙箱根: {config.WORKSPACE_ROOT}'
+                'error': f'🚫 工作目录越界：{cwd_abs}\n沙箱根: {config.get_current_workspace()}'
             })
 
         # ⭐ 新终端窗口模式：弹出独立 cmd 窗口运行命令，用户可看到实时输出
@@ -807,7 +807,7 @@ class ExecMixin:
                     'ok': False,
                     'error': (
                         f'🚫 cd 越界被拒绝：{new_cwd}\n'
-                        f'   沙箱根: {config.WORKSPACE_ROOT}\n'
+                        f'   沙箱根: {config.get_current_workspace()}\n'
                         f'   你只能在沙箱内切换目录。'
                     )
                 })

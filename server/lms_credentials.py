@@ -26,7 +26,7 @@ class LmsCredential:
 
 
 def _credential_path() -> str:
-    return os.path.join(config.WORKSPACE_ROOT, ".agent", "lms_credentials.json")
+    return os.path.join(config.get_current_workspace(), ".agent", "lms_credentials.json")
 
 
 def _protect_password(password: str) -> str:

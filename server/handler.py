@@ -2,6 +2,7 @@ import copy
 import json
 import time
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 
 from . import config
 from .exec import ExecMixin
@@ -97,7 +98,7 @@ class Handler(BaseHTTPRequestHandler,
             body_reader=self.rfile,
             session_id=session_id,
             cwd=config.get_current_cwd(),
-            workspace=config.WORKSPACE_ROOT,
+            workspace=config.get_current_workspace(),
         )
         self.response = ResponseWriter(self, self.request_context)
         return self.request_context
@@ -118,7 +119,7 @@ class Handler(BaseHTTPRequestHandler,
         return handler(*args)
 
     def _dispatch_exact_route(self, routes):
-        path = self.request_context.path
+        path = self.request_context.parsed_url.path
         for route in routes:
             if path == route.path:
                 self._invoke_route_handler(route.handler)
@@ -126,7 +127,7 @@ class Handler(BaseHTTPRequestHandler,
         return False
 
     def _dispatch_prefix_route(self, routes):
-        path = self.request_context.path
+        path = self.request_context.parsed_url.path
         for route in routes:
             if path.startswith(route.path):
                 self._invoke_route_handler(route.handler)
@@ -163,7 +164,7 @@ class Handler(BaseHTTPRequestHandler,
         self.response.json(200, {
             'ok': True,
             'cwd': config.get_current_cwd(),
-            'workspace': config.WORKSPACE_ROOT,
+            'workspace': config.get_current_workspace(),
         })
 
     def handle_remote_heartbeat_get(self):
@@ -176,12 +177,22 @@ class Handler(BaseHTTPRequestHandler,
         })
 
     def do_GET(self):
-        self._bind_http_context()
-        if self._dispatch_exact_route(GET_EXACT_ROUTES):
-            return
-        if self._dispatch_prefix_route(GET_PREFIX_ROUTES):
-            return
-        return self.handle_static_file()
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+        session_id = (qs.get('session_id') or [''])[0] or self.headers.get('X-Session-Id', '')
+        session_id = config.normalize_session_id(session_id)
+        workspace_token = config.bind_request_workspace(config.get_session_workspace(session_id))
+        cwd_token = config.bind_request_cwd(config.get_session_cwd(session_id))
+        self._bind_http_context(session_id)
+        try:
+            if self._dispatch_exact_route(GET_EXACT_ROUTES):
+                return
+            if self._dispatch_prefix_route(GET_PREFIX_ROUTES):
+                return
+            return self.handle_static_file()
+        finally:
+            config.reset_request_cwd(cwd_token)
+            config.reset_request_workspace(workspace_token)
 
     def do_POST(self):
         self._bind_http_context()
@@ -197,6 +208,7 @@ class Handler(BaseHTTPRequestHandler,
         action = body.get('action', 'execute')
         session_id = body.get('session_id') or self.headers.get('X-Session-Id', '')
         session_id = config.normalize_session_id(session_id)
+        workspace_token = config.bind_request_workspace(config.get_session_workspace(session_id))
         cwd_token = config.bind_request_cwd(config.get_session_cwd(session_id))
         full_access_token = config.bind_request_full_access(
             _body_flag_enabled(body.get('allow_full_access') or body.get('full_access'))
@@ -211,3 +223,4 @@ class Handler(BaseHTTPRequestHandler,
         finally:
             config.reset_request_full_access(full_access_token)
             config.reset_request_cwd(cwd_token)
+            config.reset_request_workspace(workspace_token)

@@ -15,7 +15,9 @@ function _concurrentDefaultSettings() {
   return {
     agentCount: 3,
     useTools: !!(concurrentRequestsState.settings && concurrentRequestsState.settings.useTools),
-    targetChatId: 'new'
+    targetChatId: 'new',
+    sandboxWorkspace: '',
+    sandboxBackend: { type: 'local' }
   };
 }
 
@@ -36,13 +38,68 @@ function loadConcurrentRequestSettings() {
 
 function saveConcurrentRequestSettings(next) {
   try {
+    const current = loadConcurrentRequestSettings();
     storage.set(CONCURRENT_REQUESTS_SETTINGS_KEY, JSON.stringify({
       ..._concurrentDefaultSettings(),
+      ...current,
       ...(next || {})
     }));
   } catch (e) {
     console.warn('[concurrent] settings save failed:', e);
   }
+}
+
+function _concurrentSandboxOptions(settings = loadConcurrentRequestSettings()) {
+  const workspace = String(settings.sandboxWorkspace || '').trim();
+  if (!workspace) return {};
+  const backend = settings.sandboxBackend && typeof settings.sandboxBackend === 'object'
+    ? settings.sandboxBackend
+    : { type: 'local' };
+  return { workspace, backend };
+}
+
+function _concurrentSandboxBackendLabel(settings = loadConcurrentRequestSettings()) {
+  const backend = settings.sandboxBackend && typeof settings.sandboxBackend === 'object'
+    ? settings.sandboxBackend
+    : { type: 'local' };
+  return backend.type === 'remote' ? '远程' : '本地';
+}
+
+function concurrentSandboxWorkspaceChanged(value) {
+  const workspace = String(value || '').trim();
+  saveConcurrentRequestSettings({
+    sandboxWorkspace: workspace,
+    sandboxBackend: workspace && typeof captureCurrentBackendBinding === 'function'
+      ? captureCurrentBackendBinding()
+      : { type: 'local' }
+  });
+  renderConcurrentRequestsModal();
+}
+
+async function chooseConcurrentSandboxWorkspace() {
+  const settings = loadConcurrentRequestSettings();
+  try {
+    const r = await workspaceBackendAction('choose_workspace_directory', {
+      initial_dir: settings.sandboxWorkspace || (typeof TERMINAL_CONFIG !== 'undefined' ? (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd || '') : '')
+    });
+    if (r && r.cancelled) return;
+    if (!r || r.ok === false) throw new Error((r && r.error) || '选择沙箱目录失败');
+    const workspace = r.workspace || r.cwd || '';
+    saveConcurrentRequestSettings({
+      sandboxWorkspace: workspace,
+      sandboxBackend: typeof captureCurrentBackendBinding === 'function' ? captureCurrentBackendBinding() : { type: 'local' }
+    });
+    renderConcurrentRequestsModal();
+    ConcurrentRequestsUiService.toast('已设置并发请求沙箱目录');
+  } catch (e) {
+    ConcurrentRequestsUiService.toast('选择沙箱目录失败：' + (e.message || e), 4500);
+  }
+}
+
+function resetConcurrentSandboxWorkspace() {
+  saveConcurrentRequestSettings({ sandboxWorkspace: '', sandboxBackend: { type: 'local' } });
+  renderConcurrentRequestsModal();
+  ConcurrentRequestsUiService.toast('并发请求将使用 Agent 目录');
 }
 
 function _concurrentId(prefix = 'cr') {
@@ -136,6 +193,7 @@ function _concurrentCreateChat(agentCount, useTools, prompt) {
     title,
     messages: [],
     createdAt: Date.now(),
+    backend: { type: 'local' },
     concurrent: {
       type: 'concurrent_requests',
       id: _concurrentId('conv'),
@@ -582,6 +640,7 @@ async function startConcurrentRequestFromUi() {
   let useTools = !!(toolsEl && toolsEl.checked);
   let chat = null;
   let agentCount = _concurrentClampAgentCount(countEl ? countEl.value : 3);
+  let createdNewChat = false;
 
   if (target && target !== 'new') {
     chat = concurrentRequestsChatById(target);
@@ -593,6 +652,7 @@ async function startConcurrentRequestFromUi() {
     useTools = !!chat.concurrent.useTools;
   } else {
     chat = _concurrentCreateChat(agentCount, useTools, prompt);
+    createdNewChat = true;
   }
   if (chat && isConcurrentChatRunning(chat.id)) {
     ConcurrentRequestsUiService.toast('该并发对话正在运行，请先等待完成或停止');
@@ -606,6 +666,9 @@ async function startConcurrentRequestFromUi() {
   });
   if (input) input.value = '';
   renderConcurrentRequestsModal();
+  if (createdNewChat && typeof initializeAutoCreatedChatWorkspace === 'function') {
+    await initializeAutoCreatedChatWorkspace(chat, _concurrentSandboxOptions());
+  }
   startConcurrentRound(chat, prompt, useTools).catch(e => {
     console.error('[concurrent] start failed:', e);
     ConcurrentRequestsUiService.toast('并发请求启动失败：' + (e.message || e), 4000);
@@ -694,6 +757,13 @@ function _concurrentEnsureModal() {
           <button class="btn btn-warning" data-action="stopSelectedConcurrentRequest">停止当前对话</button>
           <button class="btn" data-action="stopAllConcurrentRequests">停止全部</button>
         </div>
+        <div class="mode-sandbox-row">
+          <span class="mode-sandbox-label">沙箱目录</span>
+          <span class="mode-sandbox-backend" id="concurrentSandboxBackend">本地</span>
+          <input id="concurrentSandboxWorkspace" class="mode-sandbox-input" type="text" placeholder="留空使用 Agent 目录" data-change-action="concurrentSandboxWorkspaceChanged">
+          <button class="btn" data-action="chooseConcurrentSandboxWorkspace">选择</button>
+          <button class="btn" data-action="resetConcurrentSandboxWorkspace">Agent目录</button>
+        </div>
       </div>
       <div class="concurrent-summary" id="concurrentSummary"></div>
       <div class="concurrent-history" id="concurrentHistoryList"></div>
@@ -713,6 +783,8 @@ function renderConcurrentRequestsModal() {
   const select = document.getElementById('concurrentTargetSelect');
   const countEl = document.getElementById('concurrentAgentCount');
   const toolsEl = document.getElementById('concurrentUseTools');
+  const sandboxEl = document.getElementById('concurrentSandboxWorkspace');
+  const sandboxBackendEl = document.getElementById('concurrentSandboxBackend');
   const summary = document.getElementById('concurrentSummary');
   const history = document.getElementById('concurrentHistoryList');
 
@@ -726,6 +798,13 @@ function renderConcurrentRequestsModal() {
   }
   if (countEl && !countEl.value) countEl.value = _concurrentClampAgentCount(settings.agentCount);
   if (toolsEl) toolsEl.checked = !!settings.useTools;
+  if (sandboxEl && sandboxEl.value !== String(settings.sandboxWorkspace || '')) {
+    sandboxEl.value = settings.sandboxWorkspace || '';
+  }
+  if (sandboxBackendEl) {
+    const hasWorkspace = !!String(settings.sandboxWorkspace || '').trim();
+    sandboxBackendEl.textContent = hasWorkspace ? _concurrentSandboxBackendLabel(settings) : 'Agent目录';
+  }
   concurrentSelectTargetChanged();
 
   const runningCount = Object.keys(CONCURRENT_RUNTIME).length;
@@ -1268,6 +1347,9 @@ window.closeConcurrentRequests = closeConcurrentRequests;
 window.startConcurrentRequestFromUi = startConcurrentRequestFromUi;
 window.continueConcurrentChatFromMainInput = continueConcurrentChatFromMainInput;
 window.concurrentSelectTargetChanged = concurrentSelectTargetChanged;
+window.concurrentSandboxWorkspaceChanged = concurrentSandboxWorkspaceChanged;
+window.chooseConcurrentSandboxWorkspace = chooseConcurrentSandboxWorkspace;
+window.resetConcurrentSandboxWorkspace = resetConcurrentSandboxWorkspace;
 window.stopSelectedConcurrentRequest = stopSelectedConcurrentRequest;
 window.stopAllConcurrentRequests = stopAllConcurrentRequests;
 window.requestStopConcurrentChat = requestStopConcurrentChat;
@@ -1300,6 +1382,9 @@ window.AgentApp.define('concurrentRequests', {
   startConcurrentRequestFromUi,
   continueConcurrentChatFromMainInput,
   concurrentSelectTargetChanged,
+  concurrentSandboxWorkspaceChanged,
+  chooseConcurrentSandboxWorkspace,
+  resetConcurrentSandboxWorkspace,
   openConcurrentChat,
   chooseConcurrentChat,
   openConcurrentRequests,

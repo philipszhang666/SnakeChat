@@ -2498,7 +2498,7 @@ def _html_is_garbled(html_doc):
 
 
 def _rel_path(path):
-    return os.path.relpath(path, config.WORKSPACE_ROOT).replace(os.sep, "/")
+    return os.path.relpath(path, config.get_current_workspace()).replace(os.sep, "/")
 
 
 def _public_html_page(item):

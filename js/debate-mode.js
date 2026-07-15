@@ -495,6 +495,7 @@ function _debateCreateChat(settings) {
     title: `辩论：${topic.slice(0, 24) || '新辩题'}`,
     messages: [],
     createdAt: now,
+    backend: { type: 'local' },
     debate: {
       type: 'debate_mode',
       id: _debateId('debate'),

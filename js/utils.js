@@ -124,7 +124,21 @@ let _wsRefreshTimer = null;
 let _workspaceSelectInFlight = false;
 let _workspaceHomeInFlight = false;
 
-function updateWorkspaceDisplay(info) {
+function currentWorkspaceSessionId() {
+  try {
+    const chat = (typeof currentChat === 'function') ? currentChat() : null;
+    const chatId = (chat && chat.id) || (typeof state !== 'undefined' && state.currentId) || '';
+    if (typeof getAgentSessionId === 'function') return getAgentSessionId({ chatId });
+    if (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.sessionId) {
+      return `${TERMINAL_CONFIG.sessionId}:${chatId || 'default'}`;
+    }
+  } catch (e) {}
+  return (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.sessionId)
+    ? TERMINAL_CONFIG.sessionId
+    : 'workspace-ui';
+}
+
+function updateWorkspaceDisplay(info, options = {}) {
   const pathEl = document.getElementById('workspacePath');
   const statusEl = document.getElementById('workspaceStatus');
   if (!pathEl || !statusEl) return;
@@ -142,6 +156,9 @@ function updateWorkspaceDisplay(info) {
   };
   statusEl.className = 'workspace-status online';
   statusEl.title = '本地服务在线';
+  if (options.persistToChat !== false && typeof recordCurrentChatWorkspace === 'function') {
+    try { recordCurrentChatWorkspace(info); } catch (e) { console.warn('[workspace] persist chat workspace failed:', e); }
+  }
 }
 
 async function workspaceBackendAction(action, params = {}) {
@@ -151,9 +168,7 @@ async function workspaceBackendAction(action, params = {}) {
   const body = {
     action,
     ...params,
-    session_id: (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.sessionId)
-      ? TERMINAL_CONFIG.sessionId
-      : 'workspace-ui'
+    session_id: params.session_id || currentWorkspaceSessionId()
   };
   const doPost = () => fetch(url, {
     method: 'POST',
@@ -277,7 +292,9 @@ async function refreshWorkspaceInfo() {
   try {
     const url = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
       ? TERMINAL_CONFIG.serverUrl : 'http://localhost:8765';
-    const resp = await fetch(url + '/workspace', { method: 'GET' });
+    const sessionId = encodeURIComponent(currentWorkspaceSessionId());
+    const sep = url.includes('?') ? '&' : '?';
+    const resp = await fetch(`${url}/workspace${sep}session_id=${sessionId}`, { method: 'GET' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const j = await resp.json();
     if (pathEl && statusEl) updateWorkspaceDisplay(j);

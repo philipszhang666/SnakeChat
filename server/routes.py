@@ -82,6 +82,7 @@ ACTION_ROUTES = (
     ActionRoute('skill_read', 'handle_skill_read'),
     ActionRoute('music', 'handle_music_action'),
     ActionRoute('select_workspace', 'handle_select_workspace'),
+    ActionRoute('choose_workspace_directory', 'handle_choose_workspace_directory'),
     ActionRoute('set_workspace', 'handle_set_workspace'),
     ActionRoute('reset_workspace_to_agent_home', 'handle_reset_workspace_to_agent_home'),
     ActionRoute('remote_connect', 'handle_remote_connect'),

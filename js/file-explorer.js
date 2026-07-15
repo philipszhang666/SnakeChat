@@ -881,10 +881,21 @@ function isFileExplorerMediaFile(path) {
   return isFileExplorerAudioFile(path) || isFileExplorerVideoFile(path);
 }
 
+function fileExplorerSessionQuery() {
+  try {
+    if (typeof getAgentSessionId === 'function') {
+      const chat = (typeof currentChat === 'function') ? currentChat() : null;
+      const chatId = (chat && chat.id) || (typeof state !== 'undefined' && state.currentId) || '';
+      return `&session_id=${encodeURIComponent(getAgentSessionId({ chatId }))}`;
+    }
+  } catch (e) {}
+  return '';
+}
+
 async function fileExplorerPreviewUrl(path) {
   if (typeof TERMINAL_CONFIG === 'undefined') throw new Error('本地服务配置未加载');
   const base = (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765').replace(/\/+$/, '');
-  return `${base}/preview-file?path=${encodeURIComponent(normalizeExplorerPath(path))}&allow_full_access=1`;
+  return `${base}/preview-file?path=${encodeURIComponent(normalizeExplorerPath(path))}&allow_full_access=1${fileExplorerSessionQuery()}`;
 }
 
 function setFileEditorStatus(message, kind = '') {
@@ -4644,7 +4655,7 @@ function downloadFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, type =
   }
   const base = (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765').replace(/\/+$/, '');
   const archive = type === 'dir' ? '&archive=zip' : '';
-  const url = `${base}/preview-file?path=${encodeURIComponent(normalizedPath)}&download=1${archive}&allow_full_access=1`;
+  const url = `${base}/preview-file?path=${encodeURIComponent(normalizedPath)}&download=1${archive}&allow_full_access=1${fileExplorerSessionQuery()}`;
   const a = document.createElement('a');
   a.href = url;
   a.download = type === 'dir' ? `${fileExplorerBasename(normalizedPath) || 'folder'}.zip` : fileExplorerBasename(normalizedPath);

@@ -193,8 +193,9 @@ class _WechatBridgeManager:
         if not os.path.isfile(script):
             raise FileNotFoundError(f'WeChat bridge script not found: {script}')
 
-        os.makedirs(os.path.join(config.WORKSPACE_ROOT, '.agent'), exist_ok=True)
-        log_path = os.path.join(config.WORKSPACE_ROOT, '.agent', 'wechat_bridge.log')
+        workspace = config.get_current_workspace()
+        os.makedirs(os.path.join(workspace, '.agent'), exist_ok=True)
+        log_path = os.path.join(workspace, '.agent', 'wechat_bridge.log')
         self._close_log_locked()
         self._log_handle = open(log_path, 'a', encoding='utf-8', errors='replace')
 
@@ -206,7 +207,7 @@ class _WechatBridgeManager:
 
         self._proc = subprocess.Popen(
             [sys.executable, '-u', script],
-            cwd=config.WORKSPACE_ROOT,
+            cwd=config.get_current_workspace(),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._log_handle,

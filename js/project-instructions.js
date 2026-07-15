@@ -107,7 +107,10 @@ async function _piWorkspaceInfo() {
   const url = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
     ? TERMINAL_CONFIG.serverUrl
     : 'http://localhost:8765';
-  const resp = await fetch(url + '/workspace', { method: 'GET' });
+  const session = (typeof currentWorkspaceSessionId === 'function')
+    ? `?session_id=${encodeURIComponent(currentWorkspaceSessionId())}`
+    : '';
+  const resp = await fetch(url + '/workspace' + session, { method: 'GET' });
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
   const j = await resp.json();
   return {

@@ -19,7 +19,7 @@ def _choose_directory_tk(initial_dir):
         return filedialog.askdirectory(
             parent=root,
             title='Select sandbox folder',
-            initialdir=initial_dir if os.path.isdir(initial_dir) else config.WORKSPACE_ROOT,
+            initialdir=initial_dir if os.path.isdir(initial_dir) else config.get_current_workspace(),
             mustexist=True
         ) or ''
     finally:
@@ -63,7 +63,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 
 def choose_directory(initial_dir=''):
-    initial = os.path.realpath(os.path.expanduser(initial_dir or config.WORKSPACE_ROOT))
+    initial = os.path.realpath(os.path.expanduser(initial_dir or config.get_current_workspace()))
     errors = []
     try:
         return _choose_directory_tk(initial)
@@ -85,18 +85,17 @@ class WorkspaceMixin:
                 'ok': False,
                 'cancelled': True,
                 'error': 'No folder selected.',
-                'workspace': config.WORKSPACE_ROOT,
+                'workspace': config.get_current_workspace(),
                 'cwd': config.get_current_cwd()
             })
 
         try:
-            config.set_workspace(raw)
+            workspace = config.set_session_workspace(self.request_context.session_id, raw)
         except FileNotFoundError as e:
             return self.response.json(200, {'ok': False, 'error': str(e)})
         except Exception as e:
             return self.response.json(500, {'ok': False, 'error': f'Failed to set workspace: {e}'})
 
-        workspace = config.WORKSPACE_ROOT
         return self.response.json(200, {
             'ok': True,
             'workspace': workspace,
@@ -111,7 +110,7 @@ class WorkspaceMixin:
         return self._apply_workspace(config.AGENT_HOME)
 
     def handle_select_workspace(self, body):
-        initial = body.get('initial_dir') or config.WORKSPACE_ROOT
+        initial = body.get('initial_dir') or config.get_current_workspace()
         try:
             selected = choose_directory(initial)
         except Exception as e:
@@ -125,7 +124,32 @@ class WorkspaceMixin:
                 'ok': False,
                 'cancelled': True,
                 'error': 'Folder selection cancelled.',
-                'workspace': config.WORKSPACE_ROOT,
+                'workspace': config.get_current_workspace(),
                 'cwd': config.get_current_cwd()
             })
         return self._apply_workspace(selected)
+
+    def handle_choose_workspace_directory(self, body):
+        initial = body.get('initial_dir') or config.get_current_workspace()
+        try:
+            selected = choose_directory(initial)
+        except Exception as e:
+            return self.response.json(500, {
+                'ok': False,
+                'error': str(e),
+                'platform': sys.platform
+            })
+        if not selected:
+            return self.response.json(200, {
+                'ok': False,
+                'cancelled': True,
+                'error': 'Folder selection cancelled.',
+                'workspace': config.get_current_workspace(),
+                'cwd': config.get_current_cwd()
+            })
+        return self.response.json(200, {
+            'ok': True,
+            'workspace': selected,
+            'cwd': selected,
+            'agent_home': config.AGENT_HOME
+        })

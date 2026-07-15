@@ -9,6 +9,7 @@
 # ============================================================
 
 import os
+import hashlib
 import shlex
 import shutil
 import socket
@@ -52,6 +53,51 @@ def _now_stamp():
 
 def _project_root():
     return Path(__file__).resolve().parent.parent
+
+
+def _iter_deployment_files():
+    root = _project_root()
+    files = [
+        root / 'local_terminal_server.py',
+        root / 'requirements.txt',
+    ]
+    server_dir = root / 'server'
+    if server_dir.is_dir():
+        files.extend(sorted(server_dir.rglob('*')))
+    for p in files:
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root)
+        parts = set(rel.parts)
+        if '__pycache__' in parts or p.suffix in ('.pyc', '.pyo'):
+            continue
+        yield rel.as_posix(), p
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _deployment_manifest():
+    files = []
+    fingerprint_source = []
+    for rel, path in _iter_deployment_files():
+        size = path.stat().st_size
+        digest = _sha256_file(path)
+        files.append({'path': rel, 'size': size, 'sha256': digest})
+        fingerprint_source.append(f'{rel}\0{size}\0{digest}')
+    fingerprint_source.sort()
+    fingerprint = hashlib.sha256('\n'.join(fingerprint_source).encode('utf-8')).hexdigest()
+    return {
+        'schema': 1,
+        'name': 'snake-agent-backend',
+        'fingerprint': fingerprint,
+        'files': files,
+    }
 
 
 def _split_cmd(command):
@@ -167,27 +213,20 @@ def _normalize_reverse_git_proxy(raw):
     }, ''
 
 
-def _make_bundle():
+def _make_bundle(manifest=None):
     root = _project_root()
     tmp_dir = Path(tempfile.mkdtemp(prefix='snake_remote_bundle_'))
     bundle = tmp_dir / 'snake-agent-backend.tar.gz'
-    include_files = [
-        root / 'local_terminal_server.py',
-        root / 'requirements.txt',
-    ]
+    manifest = manifest or _deployment_manifest()
+    manifest_path = tmp_dir / '.snake-agent-deploy-manifest.json'
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(',', ':')),
+        encoding='utf-8',
+    )
     with tarfile.open(bundle, 'w:gz') as tar:
-        for f in include_files:
-            if f.exists():
-                tar.add(f, arcname=f.name)
-        server_dir = root / 'server'
-        for p in server_dir.rglob('*'):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(root)
-            parts = set(rel.parts)
-            if '__pycache__' in parts or p.suffix in ('.pyc', '.pyo'):
-                continue
-            tar.add(p, arcname=str(rel).replace(os.sep, '/'))
+        for rel, p in _iter_deployment_files():
+            tar.add(p, arcname=rel)
+        tar.add(manifest_path, arcname='.snake-agent-deploy-manifest.json')
     return str(bundle), str(tmp_dir)
 
 
@@ -377,6 +416,57 @@ PY
     return _run(ssh_parts + [cmd], password=password, timeout=30).strip()
 
 
+def _remote_deployment_matches(ssh_parts, expected_fingerprint, password=''):
+    q_expected = _remote_q(expected_fingerprint)
+    cmd = _remote_login_shell_command(f'''
+        set -e
+        {_remote_python_bin_script()}
+        "$PY_BIN" - {q_expected} <<'PY'
+import json, os, sys
+
+expected = sys.argv[1] if len(sys.argv) > 1 else ''
+base = os.path.expanduser('~/.snake-agent/current')
+manifest_path = os.path.join(base, '.snake-agent-deploy-manifest.json')
+data = {{}}
+error = ''
+try:
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+except Exception as e:
+    error = str(e)
+
+fingerprint = data.get('fingerprint') if isinstance(data, dict) else ''
+main_ok = os.path.isfile(os.path.join(base, 'local_terminal_server.py'))
+server_ok = os.path.isdir(os.path.join(base, 'server'))
+ok = bool(expected and fingerprint == expected and main_ok and server_ok)
+print(json.dumps({{
+    'ok': ok,
+    'fingerprint': fingerprint or '',
+    'expected': expected,
+    'manifest': manifest_path,
+    'main_ok': main_ok,
+    'server_ok': server_ok,
+    'error': error,
+}}, ensure_ascii=False))
+PY
+    ''')
+    out = _run(ssh_parts + [cmd], password=password, timeout=30).strip()
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith('{') and line.endswith('}'):
+            try:
+                return json.loads(line)
+            except Exception:
+                break
+    return {
+        'ok': False,
+        'fingerprint': '',
+        'expected': expected_fingerprint,
+        'error': f'remote manifest check returned non-JSON output: {out[-1000:]}',
+    }
+
+
 def _pick_remote_port(ssh_parts, preferred_port, password='', span=100):
     """Pick an available port on the remote host by attempting to bind 127.0.0.1."""
     start = int(preferred_port or 8765)
@@ -532,6 +622,8 @@ class RemoteMixin:
         local_port = _pick_local_port(int(body.get('local_port') or 18765))
         heartbeat_timeout = max(120, int(body.get('heartbeat_timeout') or 300))
         install_deps = body.get('install_deps', True) is not False
+        reuse_existing = bool(body.get('reuse_existing'))
+        fallback_on_reuse_failure = body.get('fallback_on_reuse_failure', True) is not False
         logs = []
         bundle = tmp_dir = ''
         try:
@@ -541,8 +633,87 @@ class RemoteMixin:
             if git_proxy_error:
                 raise RuntimeError(git_proxy_error)
 
-            logs.append('1/5 打包最小后端...')
-            bundle, tmp_dir = _make_bundle()
+            if reuse_existing:
+                tunnel = None
+                try:
+                    logs.append('快速连接：尝试复用远程已运行的 Agent...')
+                    reverse_forwards = []
+                    reverse_git_proxy_url = ''
+                    reverse_git_proxy_port = 0
+                    local_git_proxy_url = ''
+                    if git_proxy_cfg:
+                        local_git_proxy_url = git_proxy_cfg['local_url']
+                        reverse_git_proxy_port = _pick_remote_port(
+                            ssh_parts,
+                            git_proxy_cfg['local_port'],
+                            password=password,
+                            span=100,
+                        )
+                        reverse_git_proxy_url = f"{git_proxy_cfg['scheme']}://127.0.0.1:{reverse_git_proxy_port}"
+                        reverse_forwards.append({
+                            'remote_port': reverse_git_proxy_port,
+                            'local_port': git_proxy_cfg['local_port'],
+                        })
+                        logs.append(
+                            f'Git proxy reverse tunnel: remote {reverse_git_proxy_url} -> local {local_git_proxy_url}'
+                        )
+
+                    tunnel = _start_tunnel(
+                        ssh_parts,
+                        local_port,
+                        remote_port,
+                        password=password,
+                        reverse_forwards=reverse_forwards,
+                    )
+                    server_url = f'http://127.0.0.1:{local_port}'
+                    _wait_for_remote_agent(server_url, timeout=8)
+                    workspace_info = _read_remote_workspace_info(server_url, timeout=6)
+                    _start_heartbeat(server_url, interval=max(5, min(20, heartbeat_timeout // 4 or 15)))
+                    _REMOTE_STATE.update({
+                        'connected': True,
+                        'ssh_command': ssh_command,
+                        'remote_workspace': remote_workspace,
+                        'remote_agent_port': remote_port,
+                        'local_port': local_port,
+                        'server_url': server_url,
+                        'heartbeat_timeout': heartbeat_timeout,
+                        'tunnel_pid': tunnel.pid,
+                        'tunnel_process': tunnel,
+                        'reverse_git_proxy_enabled': bool(reverse_git_proxy_url),
+                        'reverse_git_proxy_url': reverse_git_proxy_url,
+                        'reverse_git_proxy_port': reverse_git_proxy_port,
+                        'local_git_proxy_url': local_git_proxy_url,
+                        'started_at': _now_stamp(),
+                        'last_error': '',
+                    })
+                    logs.append('快速连接成功：已复用远程 Agent。')
+                    return self.response.json(200, {
+                        'ok': True,
+                        'reused_existing': True,
+                        'server_url': server_url,
+                        'local_port': local_port,
+                        'remote_agent_port': remote_port,
+                        'remote_workspace': remote_workspace,
+                        'tunnel_pid': tunnel.pid,
+                        'heartbeat_timeout': heartbeat_timeout,
+                        'reverse_git_proxy_enabled': bool(reverse_git_proxy_url),
+                        'reverse_git_proxy_url': reverse_git_proxy_url,
+                        'reverse_git_proxy_port': reverse_git_proxy_port,
+                        'local_git_proxy_url': local_git_proxy_url,
+                        'workspace_info': workspace_info,
+                        'logs': logs,
+                    })
+                except Exception as e:
+                    if tunnel:
+                        try:
+                            tunnel.terminate()
+                        except Exception:
+                            pass
+                    logs.append(f'快速连接失败，{"降级完整启动流程" if fallback_on_reuse_failure else "不再重试"}：{e}')
+                    if not fallback_on_reuse_failure:
+                        return self.response.json(200, {'ok': False, 'error': str(e), 'reused_existing': False, 'logs': logs})
+
+            deployment_manifest = _deployment_manifest()
 
             logs.append('检查远程工作区目录...')
             try:
@@ -560,18 +731,42 @@ class RemoteMixin:
             logs.append('2/5 创建远程目录...')
             _run(ssh_parts + ['mkdir -p ~/.snake-agent/current ~/.snake-agent/logs ~/.snake-agent/run'], password=password, timeout=60)
 
-            logs.append('3/5 上传后端包...')
-            _run(scp_base + [bundle, f'{target}:~/.snake-agent/agent_bundle.tar.gz'], password=password, timeout=180)
+            logs.append('3/5 检查远程部署缓存...')
+            remote_deploy = _remote_deployment_matches(
+                ssh_parts,
+                deployment_manifest.get('fingerprint') or '',
+                password=password,
+            )
+            deployment_cache_hit = bool(remote_deploy.get('ok'))
+            if deployment_cache_hit:
+                logs.append(
+                    '远程部署缓存命中：'
+                    f"{str(remote_deploy.get('fingerprint') or '')[:12]}，跳过打包上传。"
+                )
+            else:
+                logs.append(
+                    '远程部署缓存未命中，开始打包上传。'
+                    f" remote={str(remote_deploy.get('fingerprint') or '')[:12]}"
+                    f" expected={str(deployment_manifest.get('fingerprint') or '')[:12]}"
+                    f" error={remote_deploy.get('error') or ''}"
+                )
+                bundle, tmp_dir = _make_bundle(deployment_manifest)
+                _run(scp_base + [bundle, f'{target}:~/.snake-agent/agent_bundle.tar.gz'], password=password, timeout=180)
 
-            logs.append('4/5 解包并启动远程 Agent...')
+            logs.append('4/5 启动远程 Agent...')
             install_cmd = '"$PY_BIN" -m pip install --user -r ~/.snake-agent/current/requirements.txt >/tmp/snake-agent-pip.log 2>&1 || true' if install_deps else 'true'
+            deploy_cmd = 'true'
+            if not deployment_cache_hit:
+                deploy_cmd = f'''
+                tar -xzf ~/.snake-agent/agent_bundle.tar.gz -C ~/.snake-agent/current
+                {install_cmd}
+                '''
             start_cmd = _remote_login_shell_command(f'''
                 set -e
                 {_remote_python_bin_script()}
                 echo "login_shell=${{SNAKE_AGENT_LOGIN_SHELL:-${{SHELL:-unknown}}}}"
                 echo "python=$PY_BIN"
-                tar -xzf ~/.snake-agent/agent_bundle.tar.gz -C ~/.snake-agent/current
-                {install_cmd}
+                {deploy_cmd}
                 # 先停掉旧 Agent。只 kill pidfile 可能不够：pidfile 可能丢失/过期，或旧进程不是当前 pid。
                 if [ -f ~/.snake-agent/run/agent.pid ]; then
                     oldpid=$(cat ~/.snake-agent/run/agent.pid 2>/dev/null || true)
@@ -697,6 +892,7 @@ class RemoteMixin:
                 'reverse_git_proxy_port': reverse_git_proxy_port,
                 'local_git_proxy_url': local_git_proxy_url,
                 'workspace_info': workspace_info,
+                'deployment_cache_hit': deployment_cache_hit,
                 'logs': logs,
             })
         except Exception as e:

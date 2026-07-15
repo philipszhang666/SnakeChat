@@ -1,7 +1,7 @@
 # ============================================================
 # server/config.py - 全局配置 & 启动时初始化
 # ============================================================
-# 这里持有所有"进程级单例"：监听端口、沙箱根目录、当前 cwd。
+# 这里持有所有"进程级单例"：监听端口、默认沙箱根目录、当前 cwd。
 # 其他模块通过 from server import config 然后 config.WORKSPACE_ROOT 访问。
 #
 # 注意 current_cwd 是会被 cd 命令修改的可变状态，必须通过模块属性访问
@@ -39,8 +39,9 @@ if sys.platform == 'win32':
 PORT = 8765
 HOST = '127.0.0.1'
 
-# ---------- 沙箱根目录（启动后锁定） ----------
-# WORKSPACE_ROOT 在启动后不再变化，所有文件操作必须在此目录内。
+# ---------- 默认沙箱根目录 ----------
+# WORKSPACE_ROOT 保留为进程默认 workspace，旧前端/无 session 请求仍使用它。
+# 新前端会通过 session_id 绑定每个对话自己的 workspace。
 # 用 realpath 解析以防 symlink 越狱。
 # 默认值 = 启动时的 cwd，可通过 set_workspace() 在启动早期覆盖（CLI --workspace 参数）。
 WORKSPACE_ROOT = os.path.realpath(os.getcwd())
@@ -53,8 +54,10 @@ REMOTE_HEARTBEAT_LAST = time.time()
 # current_cwd 保留为默认会话的 cwd，兼容旧前端和公开状态接口。
 # 真正的工具请求通过 session_id 绑定到 SESSION_CWDS，避免多标签/多任务互相串目录。
 current_cwd = os.getcwd()
+_request_workspace = contextvars.ContextVar('request_workspace', default=None)
 _request_cwd = contextvars.ContextVar('request_cwd', default=None)
 _request_full_access = contextvars.ContextVar('request_full_access', default=False)
+SESSION_WORKSPACES = {}
 SESSION_CWDS = {}
 SESSION_LOCK = threading.Lock()
 DEFAULT_SESSION_ID = 'default'
@@ -123,6 +126,13 @@ def set_workspace(path: str, persist: bool = True) -> None:
         save_last_workspace(p)
 
 
+def _resolve_workspace_path(path: str) -> str:
+    p = os.path.realpath(os.path.expanduser(str(path or '').strip()))
+    if not os.path.isdir(p):
+        raise FileNotFoundError(f'workspace 目录不存在: {p}')
+    return p
+
+
 def normalize_session_id(session_id: str) -> str:
     """把浏览器传来的 session_id 收敛成短的本地键名。"""
     sid = str(session_id or '').strip()
@@ -137,23 +147,60 @@ def get_session_cwd(session_id: str = '') -> str:
     if sid == DEFAULT_SESSION_ID:
         return current_cwd
     with SESSION_LOCK:
-        return SESSION_CWDS.get(sid, WORKSPACE_ROOT)
+        return SESSION_CWDS.get(sid, SESSION_WORKSPACES.get(sid, WORKSPACE_ROOT))
+
+
+def get_session_workspace(session_id: str = '') -> str:
+    sid = normalize_session_id(session_id)
+    if sid == DEFAULT_SESSION_ID:
+        return WORKSPACE_ROOT
+    with SESSION_LOCK:
+        return SESSION_WORKSPACES.get(sid, WORKSPACE_ROOT)
+
+
+def set_session_workspace(session_id: str, workspace: str, cwd: str = '', persist: bool = False) -> str:
+    """更新指定 session 的 workspace；默认 session 走旧全局逻辑以保持兼容。"""
+    sid = normalize_session_id(session_id)
+    p = _resolve_workspace_path(workspace)
+    if sid == DEFAULT_SESSION_ID:
+        set_workspace(p, persist=persist)
+        return p
+    with SESSION_LOCK:
+        SESSION_WORKSPACES[sid] = p
+        SESSION_CWDS[sid] = os.path.realpath(os.path.expanduser(cwd or p))
+    if persist:
+        save_last_workspace(p)
+    return p
 
 
 def set_session_cwd(session_id: str, cwd: str) -> None:
     """更新指定会话 cwd；默认会话同步到旧的 current_cwd。"""
     global current_cwd
     sid = normalize_session_id(session_id)
+    workspace = get_session_workspace(sid)
+    resolved_cwd = os.path.realpath(os.path.expanduser(cwd or workspace))
     if sid == DEFAULT_SESSION_ID:
-        current_cwd = cwd
+        current_cwd = resolved_cwd
         return
     with SESSION_LOCK:
-        SESSION_CWDS[sid] = cwd
+        SESSION_CWDS[sid] = resolved_cwd
+
+
+def bind_request_workspace(workspace: str):
+    """给当前请求线程/上下文绑定 workspace。"""
+    return _request_workspace.set(workspace or WORKSPACE_ROOT)
+
+
+def reset_request_workspace(token) -> None:
+    try:
+        _request_workspace.reset(token)
+    except Exception:
+        pass
 
 
 def bind_request_cwd(cwd: str):
     """给当前请求线程/上下文绑定 cwd，供 sandbox.resolve_path 使用。"""
-    return _request_cwd.set(cwd or WORKSPACE_ROOT)
+    return _request_cwd.set(cwd or get_current_workspace())
 
 
 def reset_request_cwd(token) -> None:
@@ -181,6 +228,10 @@ def is_full_access_enabled() -> bool:
 
 def get_current_cwd() -> str:
     return _request_cwd.get() or current_cwd
+
+
+def get_current_workspace() -> str:
+    return _request_workspace.get() or WORKSPACE_ROOT
 
 
 # ---------- CORS 策略 ----------
