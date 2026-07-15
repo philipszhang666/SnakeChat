@@ -297,13 +297,13 @@ const BUILTIN_TOOLS = [
   },
   {
     name: 'apply_patch',
-    description: '按 unified diff / patch 修改代码文件。适合代码任务和多文件小范围修改：先生成带 --- / +++ / @@ 的补丁，可 dry_run 预检，确认能应用后再 dry_run=false 真正写入。相比 save_note/edit_note 更适合代码修改、重构和测试失败后的迭代。当前不支持删除文件，删除请用 delete_note。',
+    description: '按严格 unified diff 修改代码文件。适合代码任务和多文件小范围修改：必须先 dry_run=true 预检，预检通过后再 dry_run=false 应用。patch 必须按顺序写成：--- a/path、+++ b/path、@@ hunk，且每个文件都必须有自己的 ---/+++ 文件头；@@ 绝不能出现在文件头之前，否则会报“hunk 出现在文件头之前”。禁止使用 diff --git/index 普通 git diff 头、Markdown 代码块、JSON 包裹、Codex 的 *** Begin Patch 格式。当前不支持删除文件，删除请用 delete_note。',
     parameters: {
       type: 'object',
       properties: {
         patch: {
           type: 'string',
-          description: 'unified diff 文本，必须包含文件头 --- a/path、+++ b/path 和 @@ hunk。路径必须在工作区内。'
+          description: '严格 unified diff 文本。必须以文件头开头，例如：--- a/js/app.js\n+++ b/js/app.js\n@@ -1,2 +1,2 @@\n-old\n+new。多文件时每个文件重复 --- a/path、+++ b/path、@@。不要包含 ```、diff --git、index、*** Begin Patch、JSON 或说明文字。路径必须在工作区内。'
         },
         dry_run: {
           type: 'boolean',

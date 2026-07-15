@@ -199,9 +199,12 @@ function compressionTailMessages(chat, sourceMessages = null) {
     : (Array.isArray(chat && chat.messages) ? chat.messages : []);
   const visibleMessages = messages.filter(m => !(m && m._compressionSummaryMarker));
   const ctx = chat && chat.compressedContext;
-  if (!ctx || !ctx.keepStartBoundaryId) return visibleMessages;
+  if (!ctx) return visibleMessages;
 
-  let startIdx = visibleMessages.findIndex(m => m && m._compressionBoundaryId === ctx.keepStartBoundaryId);
+  let startIdx = -1;
+  if (ctx.keepStartBoundaryId) {
+    startIdx = visibleMessages.findIndex(m => m && m._compressionBoundaryId === ctx.keepStartBoundaryId);
+  }
   if (startIdx < 0) {
     startIdx = Math.max(0, Math.min(Number(ctx.keepStartIndex || 0) || 0, visibleMessages.length));
   }
@@ -217,6 +220,23 @@ function compressedMessagesForApi(chat, sourceMessages = null) {
     return messages.filter(m => !(m && m._compressionSummaryMarker));
   }
   return [...summaries, ...compressionTailMessages(chat, sourceMessages)];
+}
+
+function compressionBoundaryIndexForChat(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return -1;
+  const markerIdx = chat.messages.findIndex(m => m && m._compressionSummaryMarker);
+  if (markerIdx >= 0) return markerIdx;
+  const ctx = chat.compressedContext;
+  if (!ctx) return -1;
+  if (ctx.keepStartBoundaryId) {
+    const boundaryIdx = chat.messages.findIndex(m => m && m._compressionBoundaryId === ctx.keepStartBoundaryId);
+    if (boundaryIdx >= 0) return boundaryIdx;
+  }
+  const fallbackIdx = Number(ctx.keepStartIndex);
+  if (Number.isFinite(fallbackIdx) && fallbackIdx > 0) {
+    return Math.max(0, Math.min(fallbackIdx, chat.messages.length));
+  }
+  return -1;
 }
 
 function estimateChatTokens(chat) {
@@ -807,7 +827,7 @@ const COMPRESSION_UNDO_TTL_MS = 30 * 60 * 1000;
 const _compressionUndoSnapshots = {};
 const COMPRESSION_HELPER_TIMEOUT_MS = 300 * 1000;
 const COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS = 0;
-const COMPRESSION_MAX_DELTA_SUMMARIES = 3;
+const COMPRESSION_MAX_DELTA_SUMMARIES = 2;
 
 function isCompressionSummaryMessage(m) {
   return !!(m && (m._isSummary || m._isTransientSummary));
@@ -945,6 +965,77 @@ function applyCompressionSummaryMarkers(chat) {
     ? boundaryIdx
     : Math.max(0, Math.min(Number(ctx.keepStartIndex || 0) || 0, chat.messages.length));
   chat.messages.splice(insertAt, 0, ...markers);
+}
+
+function compressionStableBoundaryId(chat, index) {
+  const chatId = String((chat && chat.id) || 'chat').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 48) || 'chat';
+  const ctx = chat && chat.compressedContext;
+  const stamp = String((ctx && (ctx.updatedAt || ctx.undoId)) || index || 0).replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 40) || '0';
+  return `cmp_boundary_${chatId}_${stamp}_${index}`;
+}
+
+function compressionFindBoundaryMessage(chat, insertAt) {
+  if (!chat || !Array.isArray(chat.messages)) return null;
+  const start = Math.max(0, Math.min(Number(insertAt) || 0, chat.messages.length));
+  for (let i = start; i < chat.messages.length; i++) {
+    const msg = chat.messages[i];
+    if (msg && !msg._compressionSummaryMarker && !isCompressionSummaryMessage(msg)) return msg;
+  }
+  for (let i = start - 1; i >= 0; i--) {
+    const msg = chat.messages[i];
+    if (msg && !msg._compressionSummaryMarker && !isCompressionSummaryMessage(msg)) return msg;
+  }
+  return null;
+}
+
+function rehydrateCompressionMarkersForChat(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return false;
+  const ctx = chat.compressedContext;
+  const markerCount = chat.messages.filter(m => m && m._compressionSummaryMarker).length;
+  const summaries = compressionContextSummaries(chat);
+  if (!ctx || !summaries.length) {
+    if (markerCount) {
+      removeCompressionSummaryMarkers(chat);
+      return true;
+    }
+    return false;
+  }
+
+  let changed = false;
+  let insertAt = compressionBoundaryIndexForChat(chat);
+  if (insertAt < 0) insertAt = Math.max(0, Math.min(Number(ctx.keepStartIndex || 0) || 0, chat.messages.length));
+  if (!Number.isFinite(Number(ctx.keepStartIndex)) || Number(ctx.keepStartIndex) !== insertAt) {
+    ctx.keepStartIndex = insertAt;
+    changed = true;
+  }
+
+  removeCompressionSummaryMarkers(chat);
+  const boundaryMessage = compressionFindBoundaryMessage(chat, insertAt);
+  if (boundaryMessage) {
+    if (!boundaryMessage._compressionBoundaryId) {
+      boundaryMessage._compressionBoundaryId = compressionStableBoundaryId(chat, insertAt);
+      changed = true;
+    }
+    if (ctx.keepStartBoundaryId !== boundaryMessage._compressionBoundaryId) {
+      ctx.keepStartBoundaryId = boundaryMessage._compressionBoundaryId;
+      changed = true;
+    }
+  }
+
+  applyCompressionSummaryMarkers(chat);
+  const nextMarkerCount = chat.messages.filter(m => m && m._compressionSummaryMarker).length;
+  return changed || markerCount !== nextMarkerCount;
+}
+
+function rehydrateCompressionMarkersForAllChats(chats = null) {
+  const list = Array.isArray(chats)
+    ? chats
+    : [...((tokensState && tokensState.chats) || []), tokensState && tokensState.temporaryChat].filter(Boolean);
+  let changed = false;
+  for (const chat of list) {
+    if (rehydrateCompressionMarkersForChat(chat)) changed = true;
+  }
+  return changed;
 }
 
 function undoCompressionSnapshot(undoId) {
@@ -1724,6 +1815,9 @@ ${feedback}
     compStats.time = 0;
     
     tokensSaveData();
+    if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+      try { await storage.flush(); } catch (e) { console.warn('[compression] flush failed:', e); }
+    }
     renderCompressionView();
     if (isVisible && typeof updateTokenDisplay === 'function') updateTokenDisplay();
     scheduleAccurateTokenCount(chat.id);
@@ -1772,6 +1866,10 @@ window.formatNumber = formatNumber;
 window.showTokenDetails = showTokenDetails;
 window.resetTokenStats = resetTokenStats;
 window.compressionBudgetInfo = compressionBudgetInfo;
+window.compressionBoundaryIndexForChat = compressionBoundaryIndexForChat;
+window.applyCompressionSummaryMarkers = applyCompressionSummaryMarkers;
+window.rehydrateCompressionMarkersForChat = rehydrateCompressionMarkersForChat;
+window.rehydrateCompressionMarkersForAllChats = rehydrateCompressionMarkersForAllChats;
 window.compressTransientMessagesForAgent = compressTransientMessagesForAgent;
 window.archiveLongToolMessagesForCompression = archiveLongToolMessagesForCompression;
 window.manualCompress = manualCompress;
@@ -1807,6 +1905,10 @@ window.AgentApp.define('tokens', {
   showTokenDetails,
   resetTokenStats,
   compressionBudgetInfo,
+  compressionBoundaryIndexForChat,
+  applyCompressionSummaryMarkers,
+  rehydrateCompressionMarkersForChat,
+  rehydrateCompressionMarkersForAllChats,
   compressTransientMessagesForAgent,
   archiveLongToolMessagesForCompression,
   manualCompress,

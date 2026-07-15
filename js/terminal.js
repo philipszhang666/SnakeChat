@@ -1661,7 +1661,7 @@ async function applyPatch(patch, dryRun, context) {
     `[apply_patch ${dryRun ? 'dry-run' : 'apply'}]\n\n${preview}${String(patch || '').length > 1200 ? '\n...(已截断)' : ''}`,
     context);
   if (typeof r === 'string') return r;
-  if (!r.ok) return `❌ ${r.error}`;
+  if (!r.ok) return { ok: false, error: r.error || 'Patch 处理失败' };
   const files = (r.files || []).map(f =>
     `- ${f.action || '修改'} ${f.path}（+${f.added || 0}/-${f.removed || 0}，${f.hunks || 0} hunks）`
   ).join('\n') || '- （无文件）';

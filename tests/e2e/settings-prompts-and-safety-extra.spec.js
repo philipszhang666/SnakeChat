@@ -193,6 +193,17 @@ test.describe('extra settings prompts and safety controls without real services'
     await expect(page.locator('.message').filter({ hasText: 'compress seed one' }).first()).not.toHaveClass(/discarded-context-msg/);
     await expect(page.locator('.message').filter({ hasText: 'compress seed one' }).first()).not.toContainText('已从上下文丢弃');
     await expect.poll(() => page.locator('.dialog-timeline-point.discarded').count()).toBeGreaterThan(0);
+    await page.evaluate(async () => {
+      const chat = currentChat();
+      chat.messages = chat.messages.filter(m => !(m && m._compressionSummaryMarker));
+      window.AgentApp.require('state').saveData();
+      if (window.storage && typeof window.storage.flush === 'function') await window.storage.flush();
+    });
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.locator('#input')).toBeVisible();
+    await page.waitForFunction(() => typeof window.onSend === 'function');
+    await expect.poll(() => page.evaluate(() => currentChat().messages.some(m => !!m._compressionSummaryMarker))).toBe(true);
+    await expect.poll(() => page.locator('.dialog-timeline-point.discarded').count()).toBeGreaterThan(0);
     await page.locator('.compression-summary-head').first().click();
     await expect(page.locator('.compression-summary-card')).toHaveAttribute('open', '');
     await expect(page.locator('.compression-summary-content')).toContainText('E2E');
@@ -431,15 +442,15 @@ test.describe('extra settings prompts and safety controls without real services'
     expect(afterUndo.baseContent).toBe(firstBaseContent);
     expect(afterUndo.allText).toContain('delta-one compressible user detail');
 
-    for (const label of ['delta-two', 'delta-three', 'delta-four']) {
+    for (const label of ['delta-two', 'delta-three']) {
       await expect.poll(() => page.evaluate(value => window.__e2eRunCompression(value), label)).toBe(true);
     }
     const beforeMerge = await page.evaluate(() =>
       currentChat().messages.filter(m => m && m._isSummary).map(m => m._summaryLayer)
     );
-    expect(beforeMerge).toEqual(['base', 'delta', 'delta', 'delta']);
+    expect(beforeMerge).toEqual(['base', 'delta', 'delta']);
 
-    await expect.poll(() => page.evaluate(() => window.__e2eRunCompression('merge-after-three-deltas'))).toBe(true);
+    await expect.poll(() => page.evaluate(() => window.__e2eRunCompression('merge-after-two-deltas'))).toBe(true);
     const afterMerge = await page.evaluate(() => {
       const summaries = currentChat().messages.filter(m => m && m._isSummary);
       return {

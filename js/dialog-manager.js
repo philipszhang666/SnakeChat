@@ -175,9 +175,7 @@ function saveDialogManagerSettings() {
 function dialogManagerUserAnchors(chat) {
   const anchors = [];
   if (!chat || !Array.isArray(chat.messages)) return anchors;
-  const compressionSummaryIdx = chat.compressedContext
-    ? chat.messages.findIndex(msg => msg && msg._compressionSummaryMarker)
-    : -1;
+  const compressionSummaryIdx = dialogManagerCompressionBoundaryIndex(chat);
   chat.messages.forEach((msg, index) => {
     if (!msg || msg._hiddenFromUI || msg.role !== 'user') return;
     const anchorIndex = anchors.length;
@@ -191,6 +189,23 @@ function dialogManagerUserAnchors(chat) {
     });
   });
   return anchors;
+}
+
+function dialogManagerCompressionBoundaryIndex(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return -1;
+  const markerIdx = chat.messages.findIndex(msg => msg && msg._compressionSummaryMarker);
+  if (markerIdx >= 0) return markerIdx;
+  const ctx = chat.compressedContext;
+  if (!ctx) return -1;
+  if (ctx.keepStartBoundaryId) {
+    const boundaryIdx = chat.messages.findIndex(msg => msg && msg._compressionBoundaryId === ctx.keepStartBoundaryId);
+    if (boundaryIdx >= 0) return boundaryIdx;
+  }
+  const fallbackIdx = Number(ctx.keepStartIndex);
+  if (Number.isFinite(fallbackIdx) && fallbackIdx > 0) {
+    return Math.max(0, Math.min(fallbackIdx, chat.messages.length));
+  }
+  return -1;
 }
 
 function renderDialogManagerTimelinePanel() {

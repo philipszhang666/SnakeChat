@@ -452,6 +452,22 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('.sort(compareToolSchemaOrder)', tools_js)
         self.assertIn('compareToolSchemaOrder,', tools_js[tools_js.index("window.AgentApp.define('tools'"):])
 
+    def test_apply_patch_tool_prompt_requires_strict_unified_diff(self):
+        config_js = (ROOT / 'js' / 'config.js').read_text(encoding='utf-8')
+        apply_patch_block = config_js[config_js.index("name: 'apply_patch'"):config_js.index("code: 'return await applyPatch", config_js.index("name: 'apply_patch'"))]
+
+        self.assertIn('必须按顺序写成：--- a/path、+++ b/path、@@ hunk', apply_patch_block)
+        self.assertIn('@@ 绝不能出现在文件头之前', apply_patch_block)
+        self.assertIn('禁止使用 diff --git/index 普通 git diff 头', apply_patch_block)
+        self.assertIn('不要包含 ```、diff --git、index、*** Begin Patch、JSON 或说明文字', apply_patch_block)
+
+    def test_apply_patch_failure_returns_structured_tool_error(self):
+        terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
+        apply_patch_fn = terminal_js[terminal_js.index('async function applyPatch'):terminal_js.index('async function deleteFile')]
+
+        self.assertIn("if (!r.ok) return { ok: false, error: r.error || 'Patch 处理失败' };", apply_patch_fn)
+        self.assertNotIn("if (!r.ok) return `❌ ${r.error}`;", apply_patch_fn)
+
     def test_api_modules_consume_state_module(self):
         api_adapters_js = (ROOT / 'js' / 'api-adapters.js').read_text(encoding='utf-8')
         api_profiles_js = (ROOT / 'js' / 'api-profiles.js').read_text(encoding='utf-8')
@@ -1010,7 +1026,7 @@ class FrontendModuleTests(unittest.TestCase):
     def test_tokens_compression_uses_two_layer_summaries(self):
         tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
 
-        self.assertIn('const COMPRESSION_MAX_DELTA_SUMMARIES = 3;', tokens_js)
+        self.assertIn('const COMPRESSION_MAX_DELTA_SUMMARIES = 2;', tokens_js)
         self.assertIn("function compressionWrapSummaryContent(summary, layer = 'base', transientLabel = '')", tokens_js)
         self.assertIn("const summaryLayer = preservedSummaries.length && !shouldMergeSummaries ? 'delta' : 'base';", tokens_js)
         self.assertIn("const undoCompressedMessages = summaryLayer === 'delta'", tokens_js)
@@ -1018,6 +1034,12 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('chat.compressedContext = {', tokens_js)
         self.assertIn('summaryMessages: replacementSummaries.map', tokens_js)
         self.assertIn('applyCompressionSummaryMarkers(chat)', tokens_js)
+        self.assertIn('function rehydrateCompressionMarkersForChat(chat)', tokens_js)
+        self.assertIn('function rehydrateCompressionMarkersForAllChats(chats = null)', tokens_js)
+        self.assertIn('window.rehydrateCompressionMarkersForAllChats = rehydrateCompressionMarkersForAllChats;', tokens_js)
+        self.assertIn('await storage.flush()', tokens_js)
+        self.assertIn('if (!ctx) return visibleMessages;', tokens_js)
+        self.assertNotIn('if (!ctx || !ctx.keepStartBoundaryId) return visibleMessages;', tokens_js)
         self.assertNotIn("chat.messages = summaryLayer === 'delta'", tokens_js)
         self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer)", tokens_js)
         self.assertIn("compressionWrapSummaryContent(finalSummary, summaryLayer, label)", tokens_js)
@@ -1032,8 +1054,11 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertNotIn('.discarded-context-badge{', base_css)
         dialog_manager_js = (ROOT / 'js' / 'dialog-manager.js').read_text(encoding='utf-8')
         self.assertIn('discarded: compressionSummaryIdx > 0 && index < compressionSummaryIdx', dialog_manager_js)
+        self.assertIn('function dialogManagerCompressionBoundaryIndex(chat)', dialog_manager_js)
         self.assertIn("dialog-timeline-point ${i === activeIdx ? 'active' : ''} ${anchor.discarded ? 'discarded' : ''}", dialog_manager_js)
         self.assertIn('.dialog-timeline-point.discarded .dialog-timeline-point-dot', base_css)
+        main_js = (ROOT / 'js' / 'main.js').read_text(encoding='utf-8')
+        self.assertIn('rehydrateCompressionMarkersForAllChats()', main_js)
         self.assertNotIn('【对话历史摘要】（由 AI', tokens_js)
         self.assertNotIn('历史摘要】（自动压缩', tokens_js)
 

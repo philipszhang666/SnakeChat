@@ -58,11 +58,14 @@ async function init() {
 
   // 1. 鍔犺浇鏈湴鏁版嵁
   mainLoadData();
+  const rehydratedCompression = (typeof rehydrateCompressionMarkersForAllChats === 'function')
+    ? rehydrateCompressionMarkersForAllChats()
+    : false;
   const recoveredTimers = (typeof recoverInterruptedMsgTimers === 'function') ? recoverInterruptedMsgTimers() : false;
   const recoveredConcurrent = (typeof recoverInterruptedConcurrentRequests === 'function') ? recoverInterruptedConcurrentRequests() : false;
   const recoveredDebates = (typeof recoverInterruptedDebates === 'function') ? recoverInterruptedDebates() : false;
   if (typeof registerMsgTimerExitRecovery === 'function') registerMsgTimerExitRecovery();
-  if (recoveredTimers || recoveredConcurrent || recoveredDebates) mainSaveData();
+  if (rehydratedCompression || recoveredTimers || recoveredConcurrent || recoveredDebates) mainSaveData();
   if (typeof loadTaskQueue === 'function') {
     loadTaskQueue();
   }
