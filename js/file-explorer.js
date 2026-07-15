@@ -1997,11 +1997,22 @@ function fileExplorerGraphAddressCrumbs() {
   });
 }
 
-function renderGraphicalFileExplorerAddress(pathEl) {
-  if (!pathEl) return;
-  const address = fileExplorerGraphAddressText();
-  const crumbs = fileExplorerGraphAddressCrumbs();
+function fileExplorerGraphEllipsisTarget(hiddenCrumbs = []) {
+  return hiddenCrumbs.length ? hiddenCrumbs[hiddenCrumbs.length - 1] : null;
+}
+
+function fileExplorerGraphAddressHtml(crumbs, hiddenCrumbs = []) {
   const parts = [];
+  if (hiddenCrumbs.length) {
+    const target = fileExplorerGraphEllipsisTarget(hiddenCrumbs);
+    const hiddenTitle = hiddenCrumbs.map(crumb => crumb.label || crumb.path).join(' / ');
+    parts.push(`
+      <button class="file-explorer-graph-address-segment file-explorer-graph-address-ellipsis" type="button" data-graph-address-path="${escapeHtml(target.path)}" title="${escapeHtml(hiddenTitle)}">
+        ...
+      </button>
+    `);
+    if (crumbs.length) parts.push('<span class="file-explorer-graph-address-separator" aria-hidden="true">›</span>');
+  }
   crumbs.forEach((crumb, index) => {
     if (index > 0) parts.push('<span class="file-explorer-graph-address-separator" aria-hidden="true">›</span>');
     parts.push(`
@@ -2013,12 +2024,36 @@ function renderGraphicalFileExplorerAddress(pathEl) {
       parts.push('<span class="file-explorer-graph-address-tail" aria-hidden="true"></span>');
     }
   });
-  pathEl.innerHTML = parts.join('');
+  return parts.join('');
+}
+
+function collapseGraphicalFileExplorerAddress(pathEl) {
+  if (!pathEl) return;
+  const crumbs = pathEl._fileExplorerAddressCrumbs || [];
+  if (crumbs.length <= 2 || pathEl.scrollWidth <= pathEl.clientWidth + 1) return;
+  for (let hiddenCount = 1; hiddenCount < crumbs.length - 1; hiddenCount++) {
+    const hiddenCrumbs = crumbs.slice(0, hiddenCount);
+    const visibleCrumbs = crumbs.slice(hiddenCount);
+    pathEl.innerHTML = fileExplorerGraphAddressHtml(visibleCrumbs, hiddenCrumbs);
+    if (pathEl.scrollWidth <= pathEl.clientWidth + 1) return;
+  }
+  pathEl.innerHTML = fileExplorerGraphAddressHtml(crumbs.slice(-1), crumbs.slice(0, -1));
+}
+
+function renderGraphicalFileExplorerAddress(pathEl) {
+  if (!pathEl) return;
+  const address = fileExplorerGraphAddressText();
+  const crumbs = fileExplorerGraphAddressCrumbs();
+  pathEl._fileExplorerAddressCrumbs = crumbs;
+  pathEl.innerHTML = fileExplorerGraphAddressHtml(crumbs);
   pathEl.title = address;
   pathEl.setAttribute('aria-label', `路径：${address}`);
-  requestAnimationFrame(() => {
-    pathEl.scrollLeft = pathEl.scrollWidth;
-  });
+  requestAnimationFrame(() => collapseGraphicalFileExplorerAddress(pathEl));
+}
+
+function refreshGraphicalFileExplorerAddress() {
+  const pathEl = document.getElementById('fileExplorerGraphAddress');
+  if (pathEl) renderGraphicalFileExplorerAddress(pathEl);
 }
 
 function fileExplorerGraphToolbarSelection() {
@@ -4788,6 +4823,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   document.addEventListener('keydown', handleFileExplorerSaveShortcut, true);
   window.addEventListener('resize', enforceInlineFileResponsive);
+  window.addEventListener('resize', refreshGraphicalFileExplorerAddress);
   bindInlineFileResizer();
   setSidebarExplorerMode(false);
 });

@@ -91,10 +91,11 @@ body{font-family:var(--font-ui);font-size:14px;letter-spacing:.01em;-webkit-font
 .file-explorer-graph-nav{width:36px;height:34px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--text);cursor:pointer;font-size:17px;line-height:1;display:flex;align-items:center;justify-content:center}
 .file-explorer-graph-nav:hover:not(:disabled),.file-explorer-graph-nav:focus-visible{background:var(--bg-hover);outline:none}
 .file-explorer-graph-nav:disabled{opacity:.38;cursor:not-allowed}
-.file-explorer-graph-address{height:34px;display:flex;align-items:center;min-width:0;padding:0 8px;border:1px solid var(--border);border-radius:7px;background:var(--bg-input);color:var(--text);font-size:13px;white-space:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.file-explorer-graph-address{height:34px;display:flex;align-items:center;min-width:0;padding:0 8px;border:1px solid var(--border);border-radius:7px;background:var(--bg-input);color:var(--text);font-size:13px;white-space:nowrap;overflow:hidden;scrollbar-width:none}
 .file-explorer-graph-address::-webkit-scrollbar{display:none}
 .file-explorer-graph-address-separator{flex:0 0 auto;color:var(--text-secondary);font-size:17px;line-height:1;padding:0 4px}
-.file-explorer-graph-address-segment{height:26px;max-width:180px;min-width:0;border:0;border-radius:6px;background:transparent;color:var(--text);cursor:pointer;display:inline-flex;align-items:center;padding:0 8px;font:inherit;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-explorer-graph-address-segment{height:26px;max-width:180px;min-width:0;flex:0 0 auto;border:0;border-radius:6px;background:transparent;color:var(--text);cursor:pointer;display:inline-flex;align-items:center;padding:0 8px;font:inherit;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.file-explorer-graph-address-ellipsis{max-width:none;min-width:34px;justify-content:center;color:var(--text-secondary);font-weight:700}
 .file-explorer-graph-address-segment:hover,.file-explorer-graph-address-segment:focus-visible{background:var(--bg-hover);outline:none}
 .file-explorer-graph-address-segment.is-current{font-weight:500}
 .file-explorer-graph-address-tail{flex:1 1 auto;min-width:10px}

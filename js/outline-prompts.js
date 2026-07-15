@@ -69,7 +69,7 @@ const OUTLINE_TOOL_NAMES = new Set(['save_outline', 'append_outline', 'update_ou
 
 const DEFAULT_OUTLINE_SYSTEM_PROMPT = `你正在协助用户完成一项工作任务。请按以下流程进行：
 
-1. **开始时**：先调用 save_outline 工具列出工作大纲（3-{{maxOutlineItems}} 个条目）。每个条目包含 id（如 a1、a2）、title（简洁标题）、status（初始都设为 pending）。
+1. **开始时**：先调用 save_outline 工具列出工作大纲（3-{{maxOutlineItems}} 个条目；{{maxOutlineItems}} 是允许的最大条目数，复杂任务应拆到接近该上限，简单任务可少一些）。每个条目包含 id（如 a1、a2）、title（简洁标题）、status（初始都设为 pending）。
 2. **执行过程中**：每开始处理一个新条目前，调用 update_outline 把它标记为 active；完成后调用 update_outline 标记为 done 并在 note 里写一句完成摘要。可自由使用其他工具收集信息、操作文件等。
 3. **动态调整**：如发现需要补充新内容，调用 append_outline 追加；某条不再需要时，update_outline 标记为 skipped。
 4. **完成时**：所有条目都标为 done 或 skipped 后，**停止调用任何工具**，直接给出最终的综合回答。
@@ -84,7 +84,7 @@ const CODE_TASK_OUTLINE_PROFILE_PROMPT = `
 【代码任务工程闭环（Codex 风格验证策略）】
 当任务涉及代码、测试、构建、运行、调试、报错、bug 修复、功能实现、重构、依赖、脚本或项目配置时，必须采用下面的工程闭环：
 
-1. 初始大纲必须在不超过 {{maxOutlineItems}} 项的前提下覆盖这些阶段，可把相近阶段合并到同一条：明确完成标准、探索项目结构和相关文件、定位实现/问题点、修改代码、运行最小相关验证、根据错误继续修复、最终总结。
+1. 初始大纲必须在不超过 {{maxOutlineItems}} 项的前提下覆盖这些阶段；下面不是固定 7 项，复杂任务可以把探索、实现、验证、修复、收尾等继续细分到接近上限，简单任务可合并相近阶段：明确完成标准、探索项目结构和相关文件、定位实现/问题点、修改代码、运行最小相关验证、根据错误继续修复、最终总结。
 2. 开始修改前，先用 list_notes / find_in_notes / read_note 或必要的只读命令了解相关代码、项目约定和可用验证命令，不要直接猜。
 3. 明确“Done when”：用一句话记录本任务的验收标准，例如 bug 不再复现、目标功能可用、指定测试通过、或用户要求的行为已满足。
 4. 修改代码优先使用 apply_patch：先 dry_run=true 预检，预检通过后 dry_run=false 应用。仅在新建完整小文件或 patch 不适合时才用 save_note / edit_note。
@@ -136,7 +136,7 @@ const DEFAULT_OUTLINE_FRESH_TASK_PROMPT = `【系统提示·全新大纲任务�
 
 请不要继承、继续或复用本对话中任何旧的大纲、旧执行过程、旧 pending/active 条目、旧门禁状态或旧恢复状态。旧内容只能作为历史背景参考。
 本次任务必须重新从 save_outline 开始，为用户最新请求创建新的工作大纲。`;
-const DEFAULT_OUTLINE_REQUIRE_START_PROMPT = '【系统提示】本次是新的大纲模式任务，但你还没有创建本次任务的大纲。不要直接最终回答。请立即调用 save_outline，为用户最新请求创建 3-{{maxOutlineItems}} 个 pending 条目，然后按大纲继续执行。';
+const DEFAULT_OUTLINE_REQUIRE_START_PROMPT = '【系统提示】本次是新的大纲模式任务，但你还没有创建本次任务的大纲。不要直接最终回答。请立即调用 save_outline，为用户最新请求创建 3-{{maxOutlineItems}} 个 pending 条目；{{maxOutlineItems}} 是最大条目数，复杂任务可以拆到接近上限。然后按大纲继续执行。';
 const DEFAULT_OUTLINE_TOOL_REJECT_STOP_PROMPT = '【系统提示】用户拒绝了该工具操作，并要求停止所有后续工具调用。请不要再调用工具，基于已完成内容直接给出简短说明。';
 const DEFAULT_OUTLINE_TOOL_REJECT_ONCE_PROMPT = '【系统提示】用户拒绝了该工具操作。请不要重复同一操作；如任务还能继续，请改用无需该权限的路径，否则直接说明受限情况。';
 const DEFAULT_OUTLINE_STALLED_PROMPT = '【系统提示】你似乎在原地踏步，请重新评估当前进展。如果信息已足够，请直接给出最终答案并停止调用工具；如果仍需推进，请明确下一步行动。';

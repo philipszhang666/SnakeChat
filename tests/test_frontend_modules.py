@@ -428,6 +428,22 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn("ActionRoute('choose_workspace_directory', 'handle_choose_workspace_directory')", routes_py)
         self.assertIn('def handle_choose_workspace_directory(self, body):', workspace_py)
 
+    def test_file_explorer_address_collapses_from_front(self):
+        file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
+        base_css = (ROOT / 'css' / 'base.css').read_text(encoding='utf-8')
+
+        self.assertIn('function collapseGraphicalFileExplorerAddress(pathEl)', file_explorer_js)
+        self.assertIn('function fileExplorerGraphEllipsisTarget(hiddenCrumbs = [])', file_explorer_js)
+        self.assertIn('return hiddenCrumbs.length ? hiddenCrumbs[hiddenCrumbs.length - 1] : null;', file_explorer_js)
+        self.assertIn('const target = fileExplorerGraphEllipsisTarget(hiddenCrumbs);', file_explorer_js)
+        self.assertIn('file-explorer-graph-address-ellipsis', file_explorer_js)
+        self.assertIn('const hiddenCrumbs = crumbs.slice(0, hiddenCount);', file_explorer_js)
+        self.assertIn('const visibleCrumbs = crumbs.slice(hiddenCount);', file_explorer_js)
+        self.assertIn("window.addEventListener('resize', refreshGraphicalFileExplorerAddress);", file_explorer_js)
+        self.assertIn('overflow:hidden', base_css)
+        self.assertIn('flex:0 0 auto', base_css)
+        self.assertIn('.file-explorer-graph-address-ellipsis', base_css)
+
     def test_state_consumes_config_module_for_storage_keys(self):
         state_js = (ROOT / 'js' / 'state.js').read_text(encoding='utf-8')
 
@@ -979,6 +995,14 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('outlinePromptsState.settings', outline_prompts_js)
         self.assertNotIn('state.', outline_prompts_code)
         self.assertNotIn('typeof state', outline_prompts_code)
+
+    def test_outline_max_items_prompt_is_a_real_upper_bound(self):
+        outline_prompts_js = (ROOT / 'js' / 'outline-prompts.js').read_text(encoding='utf-8')
+
+        self.assertIn('{{maxOutlineItems}} 是允许的最大条目数', outline_prompts_js)
+        self.assertIn('下面不是固定 7 项', outline_prompts_js)
+        self.assertIn('复杂任务可以把探索、实现、验证、修复、收尾等继续细分到接近上限', outline_prompts_js)
+        self.assertIn('{{maxOutlineItems}} 是最大条目数，复杂任务可以拆到接近上限', outline_prompts_js)
 
     def test_pricing_consumes_state_module(self):
         pricing_js = (ROOT / 'js' / 'pricing.js').read_text(encoding='utf-8')
@@ -2313,9 +2337,11 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('aspect-ratio:16 / 9', base_css)
         self.assertIn('.modal.file-explorer-graph-modal .file-explorer-graph-titlebar h2', base_css)
         self.assertIn('.file-explorer-graph-list', base_css)
-        self.assertIn('overflow-x:auto;overflow-y:hidden;scrollbar-width:none', base_css)
+        self.assertIn('white-space:nowrap;overflow:hidden;scrollbar-width:none', base_css)
         self.assertIn('.file-explorer-graph-address::-webkit-scrollbar{display:none}', base_css)
         self.assertIn('.file-explorer-graph-address-segment{height:26px', base_css)
+        self.assertIn('flex:0 0 auto', base_css)
+        self.assertIn('.file-explorer-graph-address-ellipsis', base_css)
         self.assertIn('border:0;border-radius:6px;background:transparent', base_css)
         self.assertIn('.file-explorer-graph-address-segment:hover,.file-explorer-graph-address-segment:focus-visible{background:var(--bg-hover)', base_css)
         self.assertIn('.file-explorer-graph-list .file-explorer-item.is-dir.is-drop-target', base_css)
