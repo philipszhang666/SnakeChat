@@ -142,6 +142,7 @@ function updateWorkspaceDisplay(info, options = {}) {
   const pathEl = document.getElementById('workspacePath');
   const statusEl = document.getElementById('workspaceStatus');
   if (!pathEl || !statusEl) return;
+  if (info && info.action && !options.allowActionResponse) return;
   const ws = (info && (info.workspace || info.cwd)) || '(未知)';
   const cwd = (info && (info.cwd || info.workspace)) || ws;
   if (typeof TERMINAL_CONFIG !== 'undefined') {
@@ -283,6 +284,29 @@ async function returnToAgentWorkspace() {
 async function refreshWorkspaceInfo() {
   const pathEl = document.getElementById('workspacePath');
   const statusEl = document.getElementById('workspaceStatus');
+  const expectedChatId = (() => {
+    try {
+      const chat = (typeof currentChat === 'function') ? currentChat() : null;
+      return (chat && chat.id) || (typeof state !== 'undefined' && state.currentId) || '';
+    } catch (e) {
+      return '';
+    }
+  })();
+  const expectedSessionId = currentWorkspaceSessionId();
+  const expectedServerUrl = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
+    ? TERMINAL_CONFIG.serverUrl : 'http://localhost:8765';
+  const stillCurrentWorkspaceRequest = () => {
+    const currentServerUrl = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
+      ? TERMINAL_CONFIG.serverUrl : 'http://localhost:8765';
+    let currentChatId = '';
+    try {
+      const chat = (typeof currentChat === 'function') ? currentChat() : null;
+      currentChatId = (chat && chat.id) || (typeof state !== 'undefined' && state.currentId) || '';
+    } catch (e) {}
+    return currentServerUrl === expectedServerUrl
+      && currentWorkspaceSessionId() === expectedSessionId
+      && currentChatId === expectedChatId;
+  };
   
   if (statusEl) {
     statusEl.className = 'workspace-status checking';
@@ -290,20 +314,20 @@ async function refreshWorkspaceInfo() {
   }
   
   try {
-    const url = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
-      ? TERMINAL_CONFIG.serverUrl : 'http://localhost:8765';
-    const sessionId = encodeURIComponent(currentWorkspaceSessionId());
+    const url = expectedServerUrl;
+    const sessionId = encodeURIComponent(expectedSessionId);
     const sep = url.includes('?') ? '&' : '?';
     const resp = await fetch(`${url}/workspace${sep}session_id=${sessionId}`, { method: 'GET' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const j = await resp.json();
-    if (pathEl && statusEl) updateWorkspaceDisplay(j);
+    if (pathEl && statusEl && stillCurrentWorkspaceRequest()) updateWorkspaceDisplay(j);
     return j;
   } catch (e) {
     console.warn('[workspace] failed to read workspace:', e);
     if (!pathEl || !statusEl) {
       return { ok: false, error: e.message };
     }
+    if (!stillCurrentWorkspaceRequest()) return { ok: false, stale: true, error: e.message };
     pathEl.textContent = '⚠️ 未连接到本地服务（python local_terminal_server.py）';
     pathEl.title = e.message;
     pathEl.onclick = null;

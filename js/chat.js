@@ -302,6 +302,7 @@ function _consumeOneShotModeWithFallback(fallbackMode) {
 }
 
 let _chatWorkspaceSyncSeq = 0;
+let _chatWorkspaceRestoreToken = null;
 
 function chatWorkspaceSessionId(chat) {
   const chatId = (chat && chat.id) || chatState.currentId || '';
@@ -344,6 +345,44 @@ function chatDesiredWorkspace(chat) {
   return (chat && (chat.workspace || chat.cwd)) || '';
 }
 
+function currentWorkspaceSnapshotForNewChat() {
+  const current = chatCurrentChat();
+  let backend = null;
+  if (typeof captureCurrentBackendBinding === 'function') {
+    backend = captureCurrentBackendBinding();
+  } else if (current && current.backend && typeof current.backend === 'object') {
+    backend = current.backend;
+  }
+  const workspace = String(
+    (current && (current.workspace || current.cwd))
+    || (typeof TERMINAL_CONFIG !== 'undefined' && (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd))
+    || (backend && backend.remoteWorkspace)
+    || ''
+  ).trim();
+  backend = backend && typeof backend === 'object' ? { ...backend } : { type: 'local' };
+  if (backend.type === 'remote' && workspace) backend.remoteWorkspace = workspace;
+  return {
+    workspace,
+    cwd: workspace,
+    backend
+  };
+}
+
+function applyWorkspaceSnapshotToChat(chat, snapshot) {
+  if (!chat || !snapshot) return chat;
+  chat.backend = snapshot.backend && typeof snapshot.backend === 'object'
+    ? { ...snapshot.backend }
+    : { type: 'local' };
+  const workspace = String(snapshot.workspace || snapshot.cwd || '').trim();
+  if (workspace) {
+    chat.workspace = workspace;
+    chat.cwd = String(snapshot.cwd || workspace).trim() || workspace;
+    if (chat.backend && chat.backend.type === 'remote') chat.backend.remoteWorkspace = workspace;
+    chat.workspaceUpdatedAt = Date.now();
+  }
+  return chat;
+}
+
 function defaultChatBackendBinding(options = {}) {
   if (options.forceAgentHome || options.forceLocal) return { type: 'local' };
   return { type: 'local' };
@@ -351,9 +390,12 @@ function defaultChatBackendBinding(options = {}) {
 
 async function restoreBackendForChat(chat, options = {}) {
   const binding = (chat && chat.backend) || defaultChatBackendBinding(options);
+  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
   const shouldToastRemote = binding && binding.type === 'remote'
-    && typeof isRemoteAgentActive === 'function'
-    && !isRemoteAgentActive();
+    && (
+      (typeof remoteBindingNeedsConnection === 'function' && remoteBindingNeedsConnection(binding))
+      || (typeof isRemoteAgentActive === 'function' && !isRemoteAgentActive())
+    );
   if (shouldToastRemote && typeof toast === 'function') {
     toast('远程连接中，可能需要几十秒...', 3500);
   }
@@ -361,7 +403,9 @@ async function restoreBackendForChat(chat, options = {}) {
     return applyBackendBinding(binding, {
       toast: shouldToastRemote,
       toastMessage: '远程连接中，可能需要几十秒...',
-      suppressWorkspaceUi: true
+      suppressWorkspaceUi: true,
+      suppressStatusUi: true,
+      isCurrent
     });
   }
   return null;
@@ -370,6 +414,9 @@ async function restoreBackendForChat(chat, options = {}) {
 async function restoreWorkspaceForChat(chat, options = {}) {
   if (!chat || !chat.id || typeof workspaceBackendAction !== 'function') return null;
   const seq = ++_chatWorkspaceSyncSeq;
+  const token = { chatId: chat.id, seq };
+  _chatWorkspaceRestoreToken = token;
+  const isCurrentRestore = () => _chatWorkspaceRestoreToken === token && chatState.currentId === chat.id;
   const session_id = chatWorkspaceSessionId(chat);
   const forceAgentHome = !!options.forceAgentHome;
   const desired = forceAgentHome ? '' : String(chatDesiredWorkspace(chat) || '').trim();
@@ -377,8 +424,9 @@ async function restoreWorkspaceForChat(chat, options = {}) {
   const params = desired ? { path: desired, session_id } : { session_id };
 
   try {
-    await restoreBackendForChat(chat, options);
-    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) {
+    const backendResult = await restoreBackendForChat(chat, { ...options, isCurrent: isCurrentRestore });
+    if (backendResult && backendResult.stale) return null;
+    if (!isCurrentRestore()) {
       const latest = chatCurrentChat();
       if (latest && latest.id !== chat.id) {
         setTimeout(() => {
@@ -391,7 +439,7 @@ async function restoreWorkspaceForChat(chat, options = {}) {
     }
     const r = await workspaceBackendAction(action, params);
     if (!r || r.ok === false) throw new Error((r && r.error) || '切换沙箱目录失败');
-    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) return r;
+    if (!isCurrentRestore()) return r;
     if (typeof updateWorkspaceDisplay === 'function') updateWorkspaceDisplay(r, { persistToChat: false });
     recordChatWorkspace(chat, r);
     chatSaveData();
@@ -399,6 +447,7 @@ async function restoreWorkspaceForChat(chat, options = {}) {
     if (options.resetFileExplorer !== false && typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
     return r;
   } catch (e) {
+    if (e && /stale/i.test(String(e.message || e))) return null;
     console.warn('[workspace] restore chat workspace failed:', e);
     if (chatState.currentId === chat.id && typeof refreshWorkspaceInfo === 'function') {
       try { await refreshWorkspaceInfo(); } catch (_) {}
@@ -592,9 +641,11 @@ async function submitEditResend(input) {
 }
 
 function newChat() {
+  const workspaceSnapshot = currentWorkspaceSnapshotForNewChat();
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: null });
   const id = 'c_' + Date.now();
-  const chat = { id, title: '新对话', messages: [], createdAt: Date.now(), backend: { type: 'local' } };
+  const chat = { id, title: '新对话', messages: [], createdAt: Date.now() };
+  applyWorkspaceSnapshotToChat(chat, workspaceSnapshot);
   chatState.chats.unshift(chat);
   chatState.currentId = id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(id);
@@ -606,7 +657,7 @@ function newChat() {
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
-  restoreWorkspaceForChat(chat, { forceAgentHome: true });
+  restoreWorkspaceForChat(chat);
 }
 
 function switchChat(id) {
@@ -637,10 +688,11 @@ function startTemporaryChat() {
     updateTemporaryChatButton();
     return;
   }
+  const workspaceSnapshot = currentWorkspaceSnapshotForNewChat();
   chatState.temporaryChat = typeof createTemporaryChat === 'function'
     ? createTemporaryChat()
     : { id: 'tmp_' + Date.now(), title: '临时会话', messages: [], createdAt: Date.now(), temporary: true };
-  chatState.temporaryChat.backend = { type: 'local' };
+  applyWorkspaceSnapshotToChat(chatState.temporaryChat, workspaceSnapshot);
   chatState.currentId = chatState.temporaryChat.id;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(chatState.currentId);
   syncPendingAttachmentMirror(chatState.currentId);
@@ -652,7 +704,7 @@ function startTemporaryChat() {
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   updateTemporaryChatButton();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
-  restoreWorkspaceForChat(chatState.temporaryChat, { forceAgentHome: true });
+  restoreWorkspaceForChat(chatState.temporaryChat);
 }
 
 function isTaskQueueSidebarGroupedChat(chat) {

@@ -1168,8 +1168,15 @@ function agentBackendPayload(action, body, state = {}) {
     };
   }
   if (action === 'workspace_info' || action === 'set_workspace' || action === 'reset_workspace_to_agent_home') {
-    const workspace = action === 'reset_workspace_to_agent_home' ? MOCK_WORKSPACE : (body.path || MOCK_WORKSPACE);
-    if (action === 'reset_workspace_to_agent_home') state.remoteWorkspace = '';
+    const sessionId = body.session_id || 'default';
+    state.workspaceBySession = state.workspaceBySession || {};
+    if (action === 'reset_workspace_to_agent_home') {
+      state.workspaceBySession[sessionId] = MOCK_WORKSPACE;
+      state.remoteWorkspace = '';
+    } else if (action === 'set_workspace') {
+      state.workspaceBySession[sessionId] = body.path || MOCK_WORKSPACE;
+    }
+    const workspace = state.workspaceBySession[sessionId] || MOCK_WORKSPACE;
     return { ok: true, workspace, cwd: workspace, agent_home: MOCK_WORKSPACE };
   }
   if (action === 'skill_list') {
@@ -1324,7 +1331,8 @@ async function installMockBackend(page, options = {}) {
     gitInitialized: options.gitInRepo !== false,
     lmsHasSavedCredential: !!options.lmsHasSavedCredential,
     commandTasks: {},
-    commandTaskListSnapshots: []
+    commandTaskListSnapshots: [],
+    workspaceBySession: {}
   };
 
   await page.route('**/*', async route => {
@@ -1368,7 +1376,8 @@ async function installMockBackend(page, options = {}) {
 
     const isLocalBackend = ['localhost', '127.0.0.1'].includes(url.hostname) && ['8765', '18765'].includes(url.port);
     if (isLocalBackend && url.pathname === '/workspace' && request.method() === 'GET') {
-      const workspace = state.remoteWorkspace || MOCK_WORKSPACE;
+      const sessionId = url.searchParams.get('session_id') || 'default';
+      const workspace = state.remoteWorkspace || state.workspaceBySession[sessionId] || MOCK_WORKSPACE;
       await fulfillSafely(route, jsonResponse({ ok: true, workspace, cwd: workspace, agent_home: MOCK_WORKSPACE }));
       return;
     }
@@ -1392,6 +1401,10 @@ async function installMockBackend(page, options = {}) {
       const body = await requestJson(request);
       const action = body.action || '';
       state.backendCalls.push({ action, body });
+      const delayMs = typeof options.delayForBackend === 'function'
+        ? options.delayForBackend(action, body, state)
+        : 0;
+      if (delayMs > 0) await sleep(delayMs);
       await fulfillSafely(route, jsonResponse(agentBackendPayload(action, body, state)));
       return;
     }

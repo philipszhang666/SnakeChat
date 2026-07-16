@@ -588,6 +588,21 @@ class RemoteMixin:
     def handle_remote_disconnect(self, body):
         stop_remote = bool(body.get('stop_remote'))
         password = body.get('password') or ''
+        target_server_url = (body.get('server_url') or '').strip()
+        target_ssh_command = (body.get('ssh_command') or '').strip()
+        target_remote_workspace = (body.get('remote_workspace') or '').strip()
+        try:
+            target_local_port = int(body.get('local_port') or 0)
+        except Exception:
+            target_local_port = 0
+        if target_server_url and target_server_url != (_REMOTE_STATE.get('server_url') or ''):
+            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote connection changed'})
+        if target_ssh_command and target_ssh_command != (_REMOTE_STATE.get('ssh_command') or ''):
+            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote ssh changed'})
+        if target_remote_workspace and target_remote_workspace != (_REMOTE_STATE.get('remote_workspace') or ''):
+            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote workspace changed'})
+        if target_local_port and target_local_port != int(_REMOTE_STATE.get('local_port') or 0):
+            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote local port changed'})
         proc = _REMOTE_STATE.get('tunnel_process')
         if proc and proc.poll() is None:
             try:

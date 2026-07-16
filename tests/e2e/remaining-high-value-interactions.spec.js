@@ -61,6 +61,64 @@ async function terminalConfirmResult(page, clickAction) {
 }
 
 test.describe('remaining high-value interactions without real services', () => {
+  test('stale remote workspace restore does not override a later chat switch', async ({ page }) => {
+    const { backend, clientErrors } = await gotoApp(page, {
+      delayForBackend(action) {
+        return action === 'remote_connect' ? 800 : 0;
+      }
+    });
+
+    await page.evaluate(() => {
+      const now = Date.now();
+      const remoteChat = {
+        id: 'e2e-remote-chat',
+        title: 'E2E Remote Chat',
+        messages: [],
+        createdAt: now,
+        workspace: '~/remote-a',
+        cwd: '~/remote-a',
+        backend: {
+          type: 'remote',
+          serverUrl: 'http://127.0.0.1:18765',
+          sshCommand: 'ssh remote-a@example.test',
+          remoteWorkspace: '~/remote-a',
+          remoteAgentPort: 8765,
+          localPort: 18765,
+          heartbeatTimeout: 300,
+          installDeps: true,
+          encryptedPassword: ''
+        }
+      };
+      const localChat = {
+        id: 'e2e-local-chat',
+        title: 'E2E Local Chat',
+        messages: [],
+        createdAt: now + 1,
+        workspace: 'C:/e2e-local-chat',
+        cwd: 'C:/e2e-local-chat',
+        backend: { type: 'local', serverUrl: 'http://localhost:8765' }
+      };
+      state.chats.unshift(localChat, remoteChat);
+      saveData();
+      renderChatList();
+    });
+
+    await page.evaluate(() => switchChat('e2e-remote-chat'));
+    await expect.poll(() => backend.backendCalls.some(call => call.action === 'remote_connect')).toBe(true);
+    await page.evaluate(() => switchChat('e2e-local-chat'));
+
+    await expect.poll(() => page.evaluate(() => state.currentId)).toBe('e2e-local-chat');
+    await expect.poll(() => page.evaluate(() => TERMINAL_CONFIG.serverUrl)).toContain('8765');
+    await expect.poll(() => backend.backendCalls.some(call => call.action === 'set_workspace' && call.body.path === 'C:/e2e-local-chat')).toBe(true);
+    await expect(page.locator('#workspacePath')).toHaveText('C:/e2e-local-chat');
+    await page.waitForTimeout(1000);
+    await expect.poll(() => page.evaluate(() => state.currentId)).toBe('e2e-local-chat');
+    await expect.poll(() => page.evaluate(() => TERMINAL_CONFIG.serverUrl)).toContain('8765');
+    await expect(page.locator('#workspacePath')).toHaveText('C:/e2e-local-chat');
+    expect(backend.backendCalls.some(call => call.action === 'remote_disconnect' && call.body.server_url)).toBe(true);
+    clientErrors.expectNoErrors();
+  });
+
   test('remote connection, directory picker, workspace refresh, and terminal launcher use the mocked backend', async ({ page }) => {
     const { backend, clientErrors } = await gotoApp(page);
     await configureMockProvider(page);
