@@ -7,6 +7,66 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FrontendModuleTests(unittest.TestCase):
+    def test_tool_editor_rejects_duplicate_name_when_renaming(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        duplicate_guard = (
+            "toolsState.tools.some((t, i) => "
+            "i !== editingIdx && t && t.name === name)"
+        )
+        self.assertIn(
+            "const editingIdx = Number.isInteger(toolsState.editingToolIdx)",
+            tools_js,
+        )
+        self.assertIn(duplicate_guard, tools_js)
+        self.assertLess(tools_js.index(duplicate_guard), tools_js.index("const tool = { name, description: desc, parameters: params, code };"))
+
+    def test_tool_parameter_schemas_are_validated_before_save_and_request(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        helper_start = tools_js.index('function isValidToolParametersSchema(schema)')
+        save_start = tools_js.index('function saveToolEdit()')
+        build_start = tools_js.index('function buildToolsArray(options = {})')
+        self.assertLess(helper_start, save_start)
+        self.assertIn("!Array.isArray(schema)", tools_js[helper_start:save_start])
+        self.assertIn("schema.type === undefined || schema.type === 'object'", tools_js[helper_start:save_start])
+        self.assertIn(
+            "if (!isValidToolParametersSchema(params))",
+            tools_js[save_start:build_start],
+        )
+        self.assertIn(
+            "toolVisibleForContext(t, options) && isValidToolParametersSchema(t.parameters)",
+            tools_js[build_start:],
+        )
+
+    def test_custom_tool_return_values_are_normalized_before_agent_loop(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        helper_start = tools_js.index('function normalizeToolReturnValue(value)')
+        execute_start = tools_js.index('async function executeTool(name, args, context = {})')
+        self.assertLess(helper_start, execute_start)
+        self.assertIn("if (value === undefined) return { ok: true, value: '' };", tools_js[helper_start:execute_start])
+        self.assertIn('JSON.stringify(value);', tools_js[helper_start:execute_start])
+        self.assertIn('工具返回值无法序列化', tools_js[helper_start:execute_start])
+        self.assertIn('const normalized = normalizeToolReturnValue(value);', tools_js[execute_start:])
+        self.assertIn('return normalized;', tools_js[execute_start:])
+
+    def test_custom_tool_execution_has_abort_and_timeout_limits(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+
+        self.assertIn('const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 5 * 60 * 1000;', tools_js)
+        self.assertIn('async function runToolCodeWithLimits(run, context, timeoutMs)', tools_js)
+        self.assertIn('return await Promise.race(racers);', tools_js)
+        self.assertIn("parentSignal.addEventListener('abort', abortHandler, { once: true });", tools_js)
+        self.assertIn("parentSignal.removeEventListener('abort', abortHandler);", tools_js)
+        self.assertIn('try { controller.abort(); } catch (e) {}', tools_js)
+        self.assertIn('Promise.resolve().then(() => run(controller.signal))', tools_js)
+        self.assertIn('const timeoutMs = toolExecutionTimeoutMs(name, args, toolContext);', tools_js)
+        self.assertIn('const value = await runToolCodeWithLimits(', tools_js)
+        self.assertIn('const executionContext = { ...toolContext, signal };', tools_js)
+        self.assertNotIn('window.__currentToolContext', tools_js)
+        self.assertNotIn('__currentToolContext', (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8'))
+
     def test_app_context_loads_before_config_and_state(self):
         html = (ROOT / 'AI-Chat-大模型对话助手.html').read_text(encoding='utf-8')
 
@@ -376,16 +436,27 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('async function restoreBackendForChat(chat, options = {})', chat_js)
         self.assertIn('toast(\'远程连接中，可能需要几十秒...\'', chat_js)
         self.assertIn('applyBackendBinding(binding, {', chat_js)
+        self.assertIn('suppressWorkspaceUi: true', chat_js)
+        self.assertIn('restoreWorkspaceForChat(latest, { resetFileExplorer: false });', chat_js)
         self.assertIn('restoreWorkspaceForChat(chat, { forceAgentHome: true });', chat_js)
         self.assertIn('restoreWorkspaceForChat(chat);', chat_js)
         self.assertIn('restoreWorkspaceForChat(chatState.temporaryChat, { forceAgentHome: true });', chat_js)
         self.assertIn("backend: { type: 'local' }", chat_js)
         self.assertIn('restoreWorkspaceForCurrentChat({ resetFileExplorer: false });', main_js)
+        self.assertIn('function backendBindingForToolChat(chatId, context)', terminal_js)
+        self.assertIn('function workspaceForToolChat(chatId, context)', terminal_js)
+        self.assertIn('const auditWorkspace = workspaceForToolChat(chatId, context);', terminal_js)
+        self.assertIn('const backendServerUrl = resolveAgentBackendServerUrl(action, context, chatId);', terminal_js)
         self.assertIn('recordChatWorkspace(toolChat, r, { preserveBackend: true })', terminal_js)
+        self.assertIn('async function callGit(subcommand, params, context)', terminal_js)
+        self.assertIn('session_id: getAgentSessionId({ chatId })', terminal_js)
+        self.assertIn('gitProxyConfigForBackend(context, chatId)', terminal_js)
         self.assertIn('function fileExplorerSessionQuery()', file_explorer_js)
         self.assertIn('session_id=${encodeURIComponent(getAgentSessionId({ chatId }))}', file_explorer_js)
         self.assertIn('function captureCurrentBackendBinding()', remote_connection_js)
         self.assertIn('async function applyBackendBinding(binding, options = {})', remote_connection_js)
+        self.assertIn('suppressWorkspaceUi: !!options.suppressWorkspaceUi', remote_connection_js)
+        self.assertIn("if (!opts.suppressWorkspaceUi && typeof updateWorkspaceDisplay === 'function')", remote_connection_js)
         self.assertIn("RemoteConnectionUiService.toast(options.toastMessage || '远程连接中", remote_connection_js)
         self.assertIn('throwOnError: true', remote_connection_js)
         self.assertIn('reuseExisting: true', remote_connection_js)
@@ -571,6 +642,39 @@ class FrontendModuleTests(unittest.TestCase):
 
         self.assertIn("if (!r.ok) return { ok: false, error: r.error || 'Patch 处理失败' };", apply_patch_fn)
         self.assertNotIn("if (!r.ok) return `❌ ${r.error}`;", apply_patch_fn)
+
+    def test_invalid_tool_arguments_do_not_execute_tools(self):
+        api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
+        plan_core_js = (ROOT / 'js' / 'plan-core.js').read_text(encoding='utf-8')
+        outline_core_js = (ROOT / 'js' / 'outline-core.js').read_text(encoding='utf-8')
+
+        self.assertIn('function parseToolCallArguments(rawArguments)', api_core_js)
+        self.assertIn("return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };", api_core_js)
+        self.assertIn('const parsedArgs = parseToolCallArguments(tc.function?.arguments);', api_core_js)
+        self.assertIn('const parsedArgs = parseToolCallArguments(tc.arguments);', api_core_js)
+        main_loop = api_core_js[api_core_js.index('const parsedArgs = parseToolCallArguments(tc.function?.arguments);'):]
+        agent_loop = api_core_js[api_core_js.index('const parsedArgs = parseToolCallArguments(tc.arguments);'):]
+        self.assertIn('const result = parsedArgs.ok', main_loop[:1200])
+        self.assertIn('ApiCoreOrchestrationService.executeTool(fname, args', main_loop[:1200])
+        self.assertIn('const result = parsedArgs.ok', agent_loop[:1200])
+        self.assertIn('ApiCoreOrchestrationService.executeTool(tc.name, args', agent_loop[:1200])
+        self.assertNotIn("try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}", api_core_js)
+        self.assertNotIn("try { args = JSON.parse(tc.arguments || '{}'); } catch (e) {}", api_core_js)
+        self.assertIn('function parsePlanToolCallArguments(rawArguments)', plan_core_js)
+        self.assertIn('const parsedArgs = parsePlanToolCallArguments(tc.function?.arguments);', plan_core_js)
+        self.assertIn("return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };", plan_core_js)
+        plan_loop = plan_core_js[plan_core_js.index('const parsedArgs = parsePlanToolCallArguments(tc.function?.arguments);'):]
+        self.assertIn('const result = parsedArgs.ok', plan_loop[:1600])
+        self.assertIn('PlanCoreOrchestrationService.executeTool(fname, args', plan_loop[:1600])
+        self.assertNotIn("try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}", plan_core_js)
+        self.assertIn('function parseOutlineToolCallArguments(rawArguments)', outline_core_js)
+        self.assertIn('const parsedArgs = parseOutlineToolCallArguments(tc.function?.arguments);', outline_core_js)
+        self.assertIn("return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };", outline_core_js)
+        outline_loop = outline_core_js[outline_core_js.index('const parsedArgs = parseOutlineToolCallArguments(tc.function?.arguments);'):]
+        self.assertIn('if (!parsedArgs.ok)', outline_loop[:1000])
+        self.assertIn('} else if (isOutlineTool) {', outline_loop[:1000])
+        self.assertIn('executeOutlineToolWithTimeout(fname, args', outline_loop[:3000])
+        self.assertNotIn("try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}", outline_loop[:1000])
 
     def test_api_modules_consume_state_module(self):
         api_adapters_js = (ROOT / 'js' / 'api-adapters.js').read_text(encoding='utf-8')
@@ -1212,8 +1316,11 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('const ignoreChatForBudget = !!options.ignoreChat || isConcurrentChat;', ensure_fn)
         self.assertIn('const skipChatCompression = !!options.skipChatCompression;', ensure_fn)
         self.assertIn('compressionBudgetInfo(c, extraMessages, { ignoreChat: ignoreChatForBudget })', ensure_fn)
+        self.assertIn('const extraMessages = Array.isArray(options.extraMessages) ? options.extraMessages : [];', ensure_fn)
         self.assertIn('if (skipChatCompression) {', ensure_fn)
         self.assertIn('if (skipChatCompression) return true;', ensure_fn)
+        self.assertIn('extraMessages: ignoreChatForBudget ? [] : extraMessages', ensure_fn)
+        self.assertIn('for (const m of extraMessages) tokens += estimateMessageTokens(m || {});', tokens_js)
 
         run_loop_guard = api_core_js[api_core_js.index("label: '师生/隔离工具循环'"):api_core_js.index('if (!ok) throw new Error', api_core_js.index("label: '师生/隔离工具循环'"))]
         self.assertIn('ignoreChat: true', run_loop_guard)
@@ -1221,6 +1328,9 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn("if (options.chat && typeof compressedMessagesForApi === 'function')", api_core_js)
         self.assertIn('history = compressedMessagesForApi(options.chat, history);', api_core_js)
         self.assertIn('chat: c', api_core_js)
+        self.assertIn('if (systemPrompt && !options.omitEffectiveSystemPrompt) out.push({ role: \'system\', content: systemPrompt });', (ROOT / 'js' / 'api-adapters.js').read_text(encoding='utf-8'))
+        self.assertIn('omitEffectiveSystemPrompt: true', api_core_js)
+        self.assertIn('for (const m of apiMessages) msgs.push(m);', api_core_js)
 
         outline_guard = outline_core_js[outline_core_js.index("label: '大纲模式'"):outline_core_js.index('if (!ok) throw new Error', outline_core_js.index("label: '大纲模式'"))]
         self.assertIn('skipChatCompression: true', outline_guard)
@@ -1879,10 +1989,19 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('const turnPrompt = buildGoalTurnPrompt(freshGoal, turnGuidance)', goal_core_js)
         self.assertIn('turn: String(Math.max(1, Number(goal.turnCount || 0) || 0))', goal_core_js)
         self.assertNotIn('turn: String(goal.turnCount + 1)', goal_core_js)
-        self.assertIn('const contextMessages = buildGoalConversationContext(chat, userMsgIdx)', goal_core_js)
+        self.assertIn('const goalTurnMessage = {', goal_core_js)
+        self.assertIn('chat.messages.push(goalTurnMessage);', goal_core_js)
+        self.assertIn('const currentGoalTurnIdx = chat.messages.indexOf(goalTurnMessage);', goal_core_js)
+        self.assertIn('const contextMessages = buildGoalConversationContext(chat, currentGoalTurnIdx >= 0 ? currentGoalTurnIdx : userMsgIdx);', goal_core_js)
+        self.assertIn('compressedMessagesForApi(chat, sourceMessages)', goal_core_js)
+        self.assertIn('const sourceMessages = messages.slice(0, end);', goal_core_js)
+        self.assertIn('if (message._isSummary) out._isSummary = true;', goal_core_js)
+        self.assertIn('if (message._isTransientSummary) out._isTransientSummary = true;', goal_core_js)
+        self.assertNotIn('slice(-Math.max(0, Number(limit || 30) || 30))', goal_core_js)
         self.assertIn("initialMessages: [...contextMessages, { role: 'user', content: turnPrompt }]", goal_core_js)
         self.assertIn('const tokenStatsBefore = goalChatRecordedTokenTotal(chat)', goal_core_js)
-        self.assertIn('Math.max(0, goalChatRecordedTokenTotal(chat) - tokenStatsBefore)', goal_core_js)
+        self.assertIn('const recordedTokenDelta = Math.max(0, goalChatRecordedTokenTotal(chat) - tokenStatsBefore);', goal_core_js)
+        self.assertIn('Math.max(usageTokenCount(result && result.usage), recordedTokenDelta)', goal_core_js)
         self.assertIn('goalEstimateTurnTokens(systemPrompt, turnPrompt, chat, messageCountBeforeRun)', goal_core_js)
         self.assertIn('syncGoalTokenUsageFromChat(latestGoal)', goal_core_js)
         protocol_audit_fn = goal_core_js[goal_core_js.index('function applyGoalProtocolAudit'):goal_core_js.index('async function continueGoal')]
@@ -1990,6 +2109,17 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('const cardTitle = goalCardTitle(goal);', goal_core_js)
         self.assertNotIn('goal-item-title">${escapeGoalHtml(clipGoalText(goal.objective, 76))}</span>', goal_core_js)
         self.assertIn('function goalElapsedText(goal, now = Date.now())', goal_core_js)
+        self.assertIn('elapsedMs: Math.max(0, Number(goal.elapsedMs || 0) || 0),', goal_core_js)
+        self.assertIn('runningSince: Math.max(0, Number(goal.runningSince || 0) || 0),', goal_core_js)
+        self.assertIn('function goalStartRunClock(goal, now = Date.now())', goal_core_js)
+        self.assertIn('function goalStopRunClock(goal, now = Date.now())', goal_core_js)
+        self.assertIn('goalStartRunClock(goal);', goal_core_js)
+        self.assertIn('goalStopRunClock(goal);', goal_core_js)
+        self.assertIn("const runStarts = new Set(['continued', 'turn_start']);", goal_core_js)
+        self.assertIn("const runStops = new Set(['paused', 'budget_pause', 'complete', 'blocked', 'cancelled', 'error']);", goal_core_js)
+        self.assertIn("return persisted + (goal.status === 'active' && runningSince ? Math.max(0, now - runningSince) : 0);", goal_core_js)
+        self.assertIn("if (eventRunningSince && goal.status === 'active')", goal_core_js)
+        self.assertIn('goalElapsedMs,', goal_core_js)
         self.assertIn('function startGoalElapsedTimer()', goal_core_js)
         self.assertIn('goalElapsedTimer = setInterval(refreshGoalElapsedStat, 1000);', goal_core_js)
         self.assertIn('stopGoalElapsedTimer();', goal_core_js)

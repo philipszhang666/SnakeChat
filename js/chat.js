@@ -360,7 +360,8 @@ async function restoreBackendForChat(chat, options = {}) {
   if (typeof applyBackendBinding === 'function') {
     return applyBackendBinding(binding, {
       toast: shouldToastRemote,
-      toastMessage: '远程连接中，可能需要几十秒...'
+      toastMessage: '远程连接中，可能需要几十秒...',
+      suppressWorkspaceUi: true
     });
   }
   return null;
@@ -377,7 +378,17 @@ async function restoreWorkspaceForChat(chat, options = {}) {
 
   try {
     await restoreBackendForChat(chat, options);
-    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) return null;
+    if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) {
+      const latest = chatCurrentChat();
+      if (latest && latest.id !== chat.id) {
+        setTimeout(() => {
+          if (chatState.currentId === latest.id) {
+            restoreWorkspaceForChat(latest, { resetFileExplorer: false });
+          }
+        }, 0);
+      }
+      return null;
+    }
     const r = await workspaceBackendAction(action, params);
     if (!r || r.ok === false) throw new Error((r && r.error) || '切换沙箱目录失败');
     if (seq !== _chatWorkspaceSyncSeq || chatState.currentId !== chat.id) return r;

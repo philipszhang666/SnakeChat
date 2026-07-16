@@ -140,11 +140,26 @@ const COMMAND_TASK_OUTPUT_WAIT_SEC = 8;
 const COMMAND_TASK_OUTPUT_REQUEST_GRACE_MS = 15 * 1000;
 const LOCAL_ONLY_BACKEND_ACTIONS = new Set(['web_search', 'fetch_url']);
 
-function resolveAgentBackendServerUrl(action) {
+function backendBindingForToolChat(chatId, context) {
+  const ctxChat = context && typeof context === 'object' ? context.chat : null;
+  const chat = (ctxChat && (!chatId || ctxChat.id === chatId))
+    ? ctxChat
+    : (chatId ? terminalChatById(chatId) : terminalCurrentChat());
+  return chat && chat.backend && typeof chat.backend === 'object' ? chat.backend : null;
+}
+
+function resolveAgentBackendServerUrl(action, context, chatId) {
   const defaultUrl = TERMINAL_CONFIG.serverUrl || 'http://localhost:8765';
-  if (!LOCAL_ONLY_BACKEND_ACTIONS.has(action)) return defaultUrl;
   if (typeof REMOTE_CONTROLLER !== 'undefined' && REMOTE_CONTROLLER.serverUrl) {
-    return REMOTE_CONTROLLER.serverUrl;
+    if (LOCAL_ONLY_BACKEND_ACTIONS.has(action)) return REMOTE_CONTROLLER.serverUrl;
+    const binding = backendBindingForToolChat(chatId, context);
+    if (binding && binding.type === 'local') return binding.serverUrl || REMOTE_CONTROLLER.serverUrl;
+    if (binding && binding.type === 'remote') return binding.serverUrl || defaultUrl;
+  }
+  if (!LOCAL_ONLY_BACKEND_ACTIONS.has(action)) {
+    const binding = backendBindingForToolChat(chatId, context);
+    if (binding && binding.serverUrl) return binding.serverUrl;
+    return defaultUrl;
   }
   return defaultUrl;
 }
@@ -337,11 +352,6 @@ function resolveToolChatId(context) {
   if (typeof context === 'string') return context;
   if (context && context.chatId) return context.chatId;
   if (context && context.chat && context.chat.id) return context.chat.id;
-  if (typeof window !== 'undefined' && window.__currentToolContext) {
-    const ctx = window.__currentToolContext;
-    if (ctx.chatId) return ctx.chatId;
-    if (ctx.chat && ctx.chat.id) return ctx.chat.id;
-  }
   return (terminalState && (terminalState.currentId || terminalState.activeTaskChatId)) || '';
 }
 
@@ -357,6 +367,15 @@ function getTaskAllowForChat(chatId) {
 function getAgentSessionId(context) {
   const chatId = resolveToolChatId(context) || 'default';
   return `${TERMINAL_CONFIG.sessionId}:${chatId}`;
+}
+
+function workspaceForToolChat(chatId, context) {
+  const ctxChat = context && typeof context === 'object' ? context.chat : null;
+  const chat = (ctxChat && ctxChat.id === chatId)
+    ? ctxChat
+    : (chatId ? terminalChatById(chatId) : terminalCurrentChat());
+  const workspace = chat && (chat.workspace || chat.cwd);
+  return String(workspace || TERMINAL_CONFIG.workspace || '').trim();
 }
 
 function ensurePendingAIAttachmentBuckets() {
@@ -823,10 +842,11 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
   if (action === 'execute' && !skipShellAudit && typeof reviewShellCommandWithAI === 'function') {
     const auditCommand = requestParams.command || params.command || confirmCommand || '';
     const auditCwd = requestParams.cwd || params.cwd || '';
+    const auditWorkspace = workspaceForToolChat(chatId, context);
     const auditContext = {
       ...(context && typeof context === 'object' ? context : {}),
       chatId,
-      workspace: TERMINAL_CONFIG.workspace || '',
+      workspace: auditWorkspace,
       fullAccess: fullAccessAllowed
     };
     const audit = await reviewShellCommandWithAI({
@@ -841,7 +861,7 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
           cwd: auditCwd,
           context: auditContext,
           chatId,
-          workspace: TERMINAL_CONFIG.workspace || '',
+          workspace: auditWorkspace,
           finalAction: 'aborted'
         });
       }
@@ -867,7 +887,7 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
           cwd: auditCwd,
           context: auditContext,
           chatId,
-          workspace: TERMINAL_CONFIG.workspace || '',
+          workspace: auditWorkspace,
           finalAction: confirmAudit.allowed ? 'manual_allow' : (confirmAudit.aborted ? 'aborted' : (audit.localBlock ? 'local_block' : 'manual_reject'))
         });
       }
@@ -889,7 +909,7 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
         cwd: auditCwd,
         context: auditContext,
         chatId,
-        workspace: TERMINAL_CONFIG.workspace || '',
+        workspace: auditWorkspace,
         finalAction: 'auto_allow'
       });
     }
@@ -897,7 +917,7 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
   
   // ⭐ 实际请求，封装为函数以便 403 后自动重试一次
   const requestTimeoutMs = agentBackendRequestTimeoutMs(action, requestParams);
-  const backendServerUrl = resolveAgentBackendServerUrl(action);
+  const backendServerUrl = resolveAgentBackendServerUrl(action, context, chatId);
   const usesAlternateBackend = backendServerUrl !== (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765');
   const doFetch = async () => {
     const backendParams = { ...requestParams };
@@ -911,7 +931,7 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
         ...backendParams,
         session_id: getAgentSessionId({ chatId }),
         allow_full_access: fullAccessAllowed,
-        git_proxy: gitProxyConfigForBackend()
+        git_proxy: gitProxyConfigForBackend(context, chatId)
       })
     }, context && context.signal ? context.signal : undefined, requestTimeoutMs);
   };
@@ -932,7 +952,12 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
       claimConcurrentFileOwnership(action, requestParams, r, context);
     }
     // ⭐ 如果响应里带了 workspace/cwd，顺手刷新顶部沙箱栏显示
-    if (!usesAlternateBackend && r && (r.workspace || r.cwd)) {
+    if (r && (r.workspace || r.cwd) && usesAlternateBackend) {
+      const toolChat = chatId ? terminalChatById(chatId) : null;
+      if (typeof recordChatWorkspace === 'function' && recordChatWorkspace(toolChat, r, { preserveBackend: true })) {
+        terminalSaveData();
+      }
+    } else if (!usesAlternateBackend && r && (r.workspace || r.cwd)) {
       if (chatId && terminalState.currentId && chatId !== terminalState.currentId) {
         const toolChat = terminalChatById(chatId);
         if (typeof recordChatWorkspace === 'function' && recordChatWorkspace(toolChat, r, { preserveBackend: true })) {
@@ -1156,7 +1181,7 @@ async function listCommandTasks(includeFinished, limit, context) {
 }
 
 function getToolCheckpointId(context) {
-  const ctx = context || (typeof window !== 'undefined' ? window.__currentToolContext : null) || {};
+  const ctx = context || {};
   if (ctx.checkpointId) return ctx.checkpointId;
   if (ctx.outline && ctx.outline.checkpointId) return ctx.outline.checkpointId;
   if (ctx.chat && ctx.chat.outline && ctx.chat.outline.checkpointId) return ctx.chat.outline.checkpointId;
@@ -1187,7 +1212,7 @@ function countTextLinesForDiff(text) {
 function bindCheckpointToToolContext(response, context) {
   const checkpointId = response && (response.checkpoint_id || (response.checkpoint && response.checkpoint.id));
   if (!checkpointId) return;
-  const ctx = context || (typeof window !== 'undefined' ? window.__currentToolContext : null) || {};
+  const ctx = context || {};
   ctx.checkpointId = checkpointId;
   if (ctx.outline && typeof ctx.outline === 'object') {
     if (!ctx.outline.checkpointId) ctx.outline.checkpointId = checkpointId;
@@ -1994,30 +2019,35 @@ function isRemoteAgentBackendActive() {
   );
 }
 
-function gitProxyConfigForBackend() {
+function gitProxyConfigForBackend(context, chatId) {
   const s = (terminalState && terminalState.settings) || {};
   const url = String(s.gitProxyUrl || '').trim();
   const cfg = {
     enabled: !!s.gitProxyEnabled,
     url: url || 'http://127.0.0.1:7890'
   };
-  if (isRemoteAgentBackendActive()) {
+  const binding = backendBindingForToolChat(chatId || resolveToolChatId(context), context);
+  const remoteTarget = (binding && binding.type === 'remote') || isRemoteAgentBackendActive();
+  if (remoteTarget) {
     cfg.remote = true;
-    cfg.remote_url = String(TERMINAL_CONFIG.remoteGitProxyUrl || '').trim();
+    cfg.remote_url = String((binding && binding.remoteGitProxyUrl) || TERMINAL_CONFIG.remoteGitProxyUrl || '').trim();
   }
   return cfg;
 }
 window.gitProxyConfigForBackend = gitProxyConfigForBackend;
 
-async function callGit(subcommand, params) {
-  const doFetch = async () => fetch(TERMINAL_CONFIG.serverUrl, {
+async function callGit(subcommand, params, context) {
+  const chatId = resolveToolChatId(context);
+  const backendUrl = resolveAgentBackendServerUrl('git', context, chatId);
+  const doFetch = async () => fetch(backendUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       action: 'git',
       subcommand,
       ...(params || {}),
-      git_proxy: gitProxyConfigForBackend()
+      session_id: getAgentSessionId({ chatId }),
+      git_proxy: gitProxyConfigForBackend(context, chatId)
     })
   });
   try {
@@ -2052,8 +2082,8 @@ async function _aiGitCheckPermission(category, title, summary, context) {
 }
 
 // 检查 Git 仓库是否就绪
-async function _aiGitEnsureRepo() {
-  const r = await callGit('check', {});
+async function _aiGitEnsureRepo(context) {
+  const r = await callGit('check', {}, context);
   if (!r || !r.ok) {
     return { ok: false, error: '❌ 未能连接 Git 后端：' + (r && r.error ? r.error : '未知错误') };
   }
@@ -2068,11 +2098,11 @@ async function _aiGitEnsureRepo() {
 
 // 🔍 note_status — 查看当前工作区改动概览
 async function aiGitStatus(context) {
-  const repo = await _aiGitEnsureRepo();
+  const repo = await _aiGitEnsureRepo(context);
   if (!repo.ok) return repo.error;
   const perm = await _aiGitCheckPermission('git_read', 'AI 想查看版本状态', '[note_status] 列出当前未提交的改动文件', context);
   if (!perm.ok) return perm.error;
-  const r = await callGit('status', {});
+  const r = await callGit('status', {}, context);
   if (!r.ok) return `❌ ${r.error}`;
   const branch = r.branch || '(无分支)';
   // 后端字段：staged / unstaged / untracked（数组），ahead/behind
@@ -2103,11 +2133,11 @@ async function aiGitStatus(context) {
 
 // 📜 note_history — 查看历史快照
 async function aiGitHistory(limit, context) {
-  const repo = await _aiGitEnsureRepo();
+  const repo = await _aiGitEnsureRepo(context);
   if (!repo.ok) return repo.error;
   const perm = await _aiGitCheckPermission('git_read', 'AI 想查看历史快照', `[note_history] 列出最近 ${limit || 20} 个版本`, context);
   if (!perm.ok) return perm.error;
-  const r = await callGit('log', { limit: Math.min(Math.max(limit || 20, 1), 100) });
+  const r = await callGit('log', { limit: Math.min(Math.max(limit || 20, 1), 100) }, context);
   if (!r.ok) return `❌ ${r.error}`;
   const commits = r.commits || [];
   if (commits.length === 0) return '📜 暂无历史快照（仓库还没有任何提交）。';
@@ -2125,7 +2155,7 @@ async function aiGitHistory(limit, context) {
 
 // 🔬 note_diff — 查看某次快照或当前工作区的具体改动
 async function aiGitDiff(commit, path, context) {
-  const repo = await _aiGitEnsureRepo();
+  const repo = await _aiGitEnsureRepo(context);
   if (!repo.ok) return repo.error;
   const perm = await _aiGitCheckPermission('git_read', 'AI 想查看版本差异',
     `[note_diff] ${commit ? '快照 ' + commit.slice(0, 7) : '当前工作区改动'}${path ? '  文件：' + path : ''}`, context);
@@ -2138,7 +2168,7 @@ async function aiGitDiff(commit, path, context) {
     params.mode = 'working';
   }
   if (path) params.file = path;
-  const r = await callGit('diff', params);
+  const r = await callGit('diff', params, context);
   if (!r.ok) return `❌ ${r.error}`;
   const diff = r.diff || '';
   if (!diff.trim()) return '（没有差异内容 —— 工作区干净，或指定文件没改动）';
@@ -2151,10 +2181,10 @@ async function aiGitDiff(commit, path, context) {
 
 // 💾 note_snapshot — 保存当前工作区为一个新快照（git add . + git commit）
 async function aiGitSnapshot(message, context) {
-  const repo = await _aiGitEnsureRepo();
+  const repo = await _aiGitEnsureRepo(context);
   if (!repo.ok) return repo.error;
   // 先看有没有改动可提交
-  const st = await callGit('status', {});
+  const st = await callGit('status', {}, context);
   if (!st.ok) return `❌ 无法读取状态：${st.error}`;
   const staged = st.staged || [];
   const unstaged = st.unstaged || [];
@@ -2172,9 +2202,9 @@ async function aiGitSnapshot(message, context) {
   if (!perm.ok) return perm.error;
   
   // 后端 add 接受 files 数组；用 ['.'] 等价 git add .
-  const addR = await callGit('add', { files: ['.'] });
+  const addR = await callGit('add', { files: ['.'] }, context);
   if (!addR.ok) return `❌ 暂存失败：${addR.error}`;
-  const cmR = await callGit('commit', { message: msg });
+  const cmR = await callGit('commit', { message: msg }, context);
   if (!cmR.ok) return `❌ 提交失败：${cmR.error}`;
   return `✅ 已保存快照\n📝 信息：${msg}\n📋 包含 ${all.length} 个文件改动\n\n💡 如需查看可调用 note_history，如需回退可调用 note_restore。`;
 }
@@ -2183,11 +2213,11 @@ async function aiGitSnapshot(message, context) {
 async function aiGitRestore(commit, path, context) {
   if (!commit || !path) return '❌ 必须同时提供 commit（快照 hash）和 path（要恢复的文件）。';
   if (!/^[0-9a-fA-F]{4,40}$/.test(commit)) return '❌ commit 必须是 4-40 位的十六进制 hash。';
-  const repo = await _aiGitEnsureRepo();
+  const repo = await _aiGitEnsureRepo(context);
   if (!repo.ok) return repo.error;
   
   // 先确认这个 commit/path 存在
-  const showR = await callGit('show_file', { commit, path });
+  const showR = await callGit('show_file', { commit, path }, context);
   if (!showR.ok) {
     return `❌ 在快照 ${commit.slice(0, 7)} 中找不到文件 ${path}：${showR.error}`;
   }
@@ -2233,7 +2263,7 @@ async function aiGitRestore(commit, path, context) {
   }
   
   // 后端 checkout_file 接受 files 数组 + commit
-  const r = await callGit('checkout_file', { commit, files: [path] });
+  const r = await callGit('checkout_file', { commit, files: [path] }, context);
   if (!r.ok) {
     if (typeof claimConcurrentFileOwnership === 'function') {
       claimConcurrentFileOwnership('git_restore', restoreOwnershipParams, { ok: false }, context);

@@ -12,12 +12,20 @@ const apiAdapterState = ApiAdapterStateModule ? ApiAdapterStateModule.state : st
 
 function normalizeToolCallArguments(raw) {
   if (raw === undefined || raw === null || raw === '') return '{}';
+  let normalized = raw;
   if (typeof raw !== 'string') {
-    try { return JSON.stringify(raw); } catch (e) { return '{}'; }
+    try { normalized = JSON.stringify(raw); } catch (e) {
+      console.warn('[api-adapters] Dropping non-serializable tool_call arguments before request:', e.message);
+      return '{}';
+    }
   }
   try {
-    JSON.parse(raw);
-    return raw;
+    const parsed = JSON.parse(normalized);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.warn('[api-adapters] Dropping non-object tool_call arguments before request');
+      return '{}';
+    }
+    return normalized;
   } catch (e) {
     console.warn('[api-adapters] Dropping malformed tool_call arguments before request:', e.message);
     return '{}';
@@ -141,7 +149,7 @@ function buildOpenAIMessages(history, options = {}) {
   if (typeof privacyGuardSanitizeSystemText === 'function') {
     systemPrompt = privacyGuardSanitizeSystemText(systemPrompt, { includeResponseGuard: options.includeResponseGuard !== false });
   }
-  if (systemPrompt) out.push({ role: 'system', content: systemPrompt });
+  if (systemPrompt && !options.omitEffectiveSystemPrompt) out.push({ role: 'system', content: systemPrompt });
   
   for (const m of history) {
     if (m._textToolCallSuppressed) continue;
@@ -279,7 +287,13 @@ function buildOpenAIResponsesInput(history, options = {}) {
     }
     
     if (m.role === 'assistant' && Array.isArray(m._responsesOutput) && m._responsesOutput.length) {
-      for (const item of m._responsesOutput) out.push(JSON.parse(JSON.stringify(item)));
+      for (const item of m._responsesOutput) {
+        const cloned = JSON.parse(JSON.stringify(item));
+        if (cloned && cloned.type === 'function_call') {
+          cloned.arguments = normalizeToolCallArguments(cloned.arguments);
+        }
+        out.push(cloned);
+      }
       continue;
     }
     

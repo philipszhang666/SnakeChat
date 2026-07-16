@@ -23,6 +23,24 @@ const PlanCoreUiService = window.AgentApp.require('uiService');
 
 const PLAN_STEP_STATUSES = new Set(['pending', 'running', 'done', 'failed', 'skipped']);
 
+function parsePlanToolCallArguments(rawArguments) {
+  const raw = typeof rawArguments === 'string' ? rawArguments.trim() : rawArguments;
+  if (raw === '' || raw === undefined || raw === null) return { ok: true, args: {} };
+  try {
+    const args = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) {
+      return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };
+    }
+    return { ok: true, args };
+  } catch (e) {
+    return {
+      ok: false,
+      args: {},
+      error: `工具参数 JSON 解析失败：${e && e.message ? e.message : String(e)}`
+    };
+  }
+}
+
 function normalizePlanStep(raw, idx) {
   const s = raw || {};
   const id = String(s.id || s.key || `t${idx + 1}`).trim() || `t${idx + 1}`;
@@ -1216,9 +1234,9 @@ async function runMiniAgent(userPrompt, model, systemPrompt, step, onUpdate, sou
       throwIfAborted();
       
       const fname = tc.function?.name || '';
-      let args = {};
-      try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
-      if (typeof privacyGuardRestoreToolCallArguments === 'function') {
+      const parsedArgs = parsePlanToolCallArguments(tc.function?.arguments);
+      let args = parsedArgs.args;
+      if (parsedArgs.ok && typeof privacyGuardRestoreToolCallArguments === 'function') {
         args = privacyGuardRestoreToolCallArguments(args, { context: body });
       }
       
@@ -1230,10 +1248,15 @@ async function runMiniAgent(userPrompt, model, systemPrompt, step, onUpdate, sou
         if (onUpdate) onUpdate(); else PlanCoreUiService.renderMessages();
       }
       
-      const result = await PlanCoreOrchestrationService.executeTool(fname, args, {
-        chatId: options.chatId,
-        chat: options.chat || (options.chatId ? planCoreChatById(options.chatId) : null)
-      });
+      const result = parsedArgs.ok
+        ? await PlanCoreOrchestrationService.executeTool(fname, args, {
+            chatId: options.chatId,
+            chat: options.chat || (options.chatId ? planCoreChatById(options.chatId) : null)
+          })
+        : {
+            ok: false,
+            value: `${parsedArgs.error}；工具 ${fname || '(unknown)'} 未执行，请修正参数后重试。`
+          };
       const rawContent = typeof result.value === 'string' ? result.value : JSON.stringify(result.value);
       const preparedToolResult = typeof prepareToolResultForContext === 'function'
         ? prepareToolResultForContext({

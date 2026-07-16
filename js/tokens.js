@@ -1509,11 +1509,13 @@ async function autoCompressCheck(chat = null, options = {}) {
   if (c.debate && c.debate.type === 'debate_mode' && typeof autoCompressDebateCheck === 'function') {
     return await autoCompressDebateCheck(c, options);
   }
-  if (c.messages.length < 6) return false;
+  const extraMessages = Array.isArray(options.extraMessages) ? options.extraMessages : [];
+  if (c.messages.length < 6 && !extraMessages.length) return false;
   
   // 自动压缩必须看当前消息数组。stats.lastInputTokens 可能是上一轮请求的精确值，
   // 在新 user 消息刚入队时已经过期。
-  const tokens = estimateChatTokens(c);
+  let tokens = estimateChatTokens(c);
+  for (const m of extraMessages) tokens += estimateMessageTokens(m || {});
   
   const limit = getContextLimit(tokensState.settings.currentModel);
   const pct = tokens / limit * 100;
@@ -1590,6 +1592,7 @@ async function ensureContextBeforeAgentRun(chat = null, options = {}) {
   if (isConcurrentChat) return true;
   if (!c || !c.messages || !c.messages.length) return true;
   const result = await autoCompressCheck(c, {
+    extraMessages: ignoreChatForBudget ? [] : extraMessages,
     preserveGeneratingState: options.preserveGeneratingState !== false,
     chat: c,
     chatId: taskOptions.chatId,

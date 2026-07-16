@@ -97,6 +97,8 @@ function normalizeGoalRecord(goal) {
     lastResult: String(goal.lastResult || ''),
     lastError: String(goal.lastError || ''),
     nextStep: String(goal.nextStep || ''),
+    elapsedMs: Math.max(0, Number(goal.elapsedMs || 0) || 0),
+    runningSince: Math.max(0, Number(goal.runningSince || 0) || 0),
     scheduled: goal.scheduled && typeof goal.scheduled === 'object' ? {
       id: String(goal.scheduled.id || ('goal_sch_' + Date.now())),
       runAt: Math.max(0, Number(goal.scheduled.runAt || 0) || 0),
@@ -211,6 +213,23 @@ function pushGoalEvent(goal, type, data = {}) {
   goal.updatedAt = nowIso();
 }
 
+function goalStartRunClock(goal, now = Date.now()) {
+  if (!goal) return;
+  if (!Number.isFinite(Number(goal.elapsedMs))) goal.elapsedMs = 0;
+  if (!goal.runningSince) goal.runningSince = Math.max(0, Number(now) || Date.now());
+}
+
+function goalStopRunClock(goal, now = Date.now()) {
+  if (!goal) return;
+  const started = Math.max(0, Number(goal.runningSince || 0) || 0);
+  if (started) {
+    goal.elapsedMs = Math.max(0, Number(goal.elapsedMs || 0) || 0) + Math.max(0, (Number(now) || Date.now()) - started);
+    goal.runningSince = 0;
+  } else {
+    goal.elapsedMs = Math.max(0, Number(goal.elapsedMs || 0) || 0);
+  }
+}
+
 function createGoalRecord(options = {}) {
   const objective = String(options.objective || '').trim();
   if (!objective) throw new Error('目标不能为空');
@@ -306,18 +325,34 @@ function goalCardTitle(goal, max = 120) {
   return clipGoalText(title, max);
 }
 
-function goalEndTime(goal) {
-  if (!goal || !GOAL_TERMINAL_STATUSES.has(goal.status)) return 0;
-  const value = goal.completedAt || goal.blockedAt || goal.cancelledAt || goal.updatedAt;
-  const time = Date.parse(value || '');
-  return Number.isFinite(time) ? time : 0;
-}
-
 function goalElapsedMs(goal, now = Date.now()) {
-  const start = Date.parse((goal && goal.createdAt) || '');
-  if (!Number.isFinite(start)) return 0;
-  const end = goalEndTime(goal) || now;
-  return Math.max(0, end - start);
+  if (!goal) return 0;
+  const persisted = Math.max(0, Number(goal.elapsedMs || 0) || 0);
+  const runningSince = Math.max(0, Number(goal.runningSince || 0) || 0);
+  if (persisted || runningSince) {
+    return persisted + (goal.status === 'active' && runningSince ? Math.max(0, now - runningSince) : 0);
+  }
+  const events = Array.isArray(goal.events) ? goal.events : [];
+  const runStarts = new Set(['continued', 'turn_start']);
+  const runStops = new Set(['paused', 'budget_pause', 'complete', 'blocked', 'cancelled', 'error']);
+  let eventRunningSince = 0;
+  let total = 0;
+  for (const event of events) {
+    const eventTime = Date.parse((event && event.at) || '');
+    if (!Number.isFinite(eventTime)) continue;
+    if (runStarts.has(event.type)) {
+      if (!eventRunningSince) eventRunningSince = eventTime;
+      continue;
+    }
+    if (runStops.has(event.type) && eventRunningSince) {
+      total += Math.max(0, eventTime - eventRunningSince);
+      eventRunningSince = 0;
+    }
+  }
+  if (eventRunningSince && goal.status === 'active') {
+    total += Math.max(0, now - eventRunningSince);
+  }
+  return Math.max(0, total);
 }
 
 function formatGoalElapsed(ms) {
@@ -982,18 +1017,24 @@ function normalizeGoalContextMessage(message) {
   }
   if (message.tool_call_id) out.tool_call_id = message.tool_call_id;
   if (message.name) out.name = message.name;
+  if (message._isSummary) out._isSummary = true;
+  if (message._isTransientSummary) out._isTransientSummary = true;
   if (!String(out.content || '').trim() && !out.tool_calls && !out.tool_call_id && !out.attachments) return null;
   return out;
 }
 
-function buildGoalConversationContext(chat, beforeIdx, limit = 30) {
+function buildGoalConversationContext(chat, beforeIdx, limit = 0) {
   const messages = Array.isArray(chat && chat.messages) ? chat.messages : [];
   const end = Math.max(0, Math.min(Number(beforeIdx || 0), messages.length));
-  const context = messages
-    .slice(0, end)
+  const sourceMessages = messages.slice(0, end);
+  const apiMessages = typeof compressedMessagesForApi === 'function'
+    ? compressedMessagesForApi(chat, sourceMessages)
+    : sourceMessages;
+  let context = apiMessages
     .map(normalizeGoalContextMessage)
-    .filter(Boolean)
-    .slice(-Math.max(0, Number(limit || 30) || 30));
+    .filter(Boolean);
+  const max = Number(limit || 0);
+  if (Number.isFinite(max) && max > 0) context = context.slice(-max);
   while (context.length && context[0].role === 'tool') context.shift();
   return context;
 }
@@ -1202,6 +1243,7 @@ async function continueGoal(goalId) {
   if (isGoalRunning(goal.id)) return goalToast('目标正在运行');
 
   goal.status = 'active';
+  goalStartRunClock(goal);
   goalStore.activeGoalId = goal.id;
   pushGoalEvent(goal, 'continued', { progress: 'Goal runner continued.' });
   saveGoals();
@@ -1223,6 +1265,7 @@ async function continueGoal(goalId) {
       const freshGoal = goalById(goal.id);
       if (!freshGoal || freshGoal.status !== 'active') break;
       if (freshGoal.turnCount >= freshGoal.maxTurns) {
+        goalStopRunClock(freshGoal);
         freshGoal.status = 'paused';
         freshGoal.lastError = 'Reached goal turn limit.';
         pushGoalEvent(freshGoal, 'paused', { reason: freshGoal.lastError });
@@ -1235,13 +1278,14 @@ async function continueGoal(goalId) {
       pushGoalEvent(freshGoal, 'turn_start', { progress: 'Starting goal turn ' + turnNo + '.' });
       saveGoals();
 
-      chat.messages.push({
+      const goalTurnMessage = {
         role: 'user',
         content: '目标第 ' + turnNo + ' 轮：继续推进「' + freshGoal.objective + '」',
         createdAt: Date.now(),
         goalId: freshGoal.id,
         _goalTurn: turnNo
-      });
+      };
+      chat.messages.push(goalTurnMessage);
       const userMsgIdx = chat.messages.length - 1;
       goalSaveData();
       GoalCoreUiService.renderChatList();
@@ -1252,11 +1296,32 @@ async function continueGoal(goalId) {
       const chatRecorder = createGoalChatRecorder(chat, freshGoal.id, turnNo);
       const turnGuidance = takeGoalPendingGuidance(freshGoal);
       if (turnGuidance) persistGoals();
-      const contextMessages = buildGoalConversationContext(chat, userMsgIdx);
       const tokenStatsBefore = goalChatRecordedTokenTotal(chat);
       const messageCountBeforeRun = chat.messages.length;
       const turnPrompt = buildGoalTurnPrompt(freshGoal, turnGuidance);
       const systemPrompt = goalSettings().goalSystemPrompt || goalDefaultSystemPrompt();
+      const isGoalTurnStopped = () => {
+        const task = GoalCoreStateModule.chatTaskById(chat.id);
+        const latest = goalById(freshGoal.id);
+        return controller.signal.aborted || !!(task && task.stopRequested) || !latest || latest.status !== 'active';
+      };
+      if (typeof ensureContextBeforeAgentRun === 'function') {
+        const ok = await ensureContextBeforeAgentRun(chat, {
+          label: '目标模式',
+          extraMessages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: turnPrompt }
+          ],
+          preserveGeneratingState: true,
+          chat,
+          chatId: chat.id,
+          signal: controller.signal,
+          isStopped: isGoalTurnStopped
+        });
+        if (!ok) throw new Error('自动压缩失败，已停止目标模式请求');
+      }
+      const currentGoalTurnIdx = chat.messages.indexOf(goalTurnMessage);
+      const contextMessages = buildGoalConversationContext(chat, currentGoalTurnIdx >= 0 ? currentGoalTurnIdx : userMsgIdx);
       let result;
       let suppressFinalAssistant = false;
       try {
@@ -1271,11 +1336,7 @@ async function continueGoal(goalId) {
           chatId: chat.id,
           chat,
           toolContext: { goalId: freshGoal.id, chatId: chat.id, chat },
-          isStopped: () => {
-            const task = GoalCoreStateModule.chatTaskById(chat.id);
-            const latest = goalById(freshGoal.id);
-            return controller.signal.aborted || !!(task && task.stopRequested) || !latest || latest.status !== 'active';
-          },
+          isStopped: isGoalTurnStopped,
           onProgress: event => {
             recordGoalProtocolEvent(protocol, event);
             recordGoalLoopProgress(freshGoal.id, event);
@@ -1292,8 +1353,8 @@ async function continueGoal(goalId) {
       const latestGoal = goalById(goal.id);
       if (!latestGoal) break;
       const finalText = String((result && result.finalText) || '').trim();
-      const tokenUsed = usageTokenCount(result && result.usage)
-        || Math.max(0, goalChatRecordedTokenTotal(chat) - tokenStatsBefore)
+      const recordedTokenDelta = Math.max(0, goalChatRecordedTokenTotal(chat) - tokenStatsBefore);
+      const tokenUsed = Math.max(usageTokenCount(result && result.usage), recordedTokenDelta)
         || goalEstimateTurnTokens(systemPrompt, turnPrompt, chat, messageCountBeforeRun);
       if (tokenUsed) latestGoal.tokenUsed += tokenUsed;
       syncGoalTokenUsageFromChat(latestGoal);
@@ -1302,6 +1363,7 @@ async function continueGoal(goalId) {
       const protocolViolation = applyGoalProtocolAudit(latestGoal, inspectGoalProtocol(result && result.messages, protocol), finalText);
 
       if (!protocolViolation && latestGoal.tokenBudget && latestGoal.tokenUsed >= latestGoal.tokenBudget && latestGoal.status === 'active') {
+        goalStopRunClock(latestGoal);
         latestGoal.status = 'paused';
         latestGoal.lastError = 'Token budget reached; goal paused without marking complete.';
         pushGoalEvent(latestGoal, 'budget_pause', { reason: latestGoal.lastError });
@@ -1326,13 +1388,17 @@ async function continueGoal(goalId) {
       if (guidanceAbort) {
         consumePendingGoalGuidance(chat, latestGoal);
         latestGoal.status = 'active';
+        goalStartRunClock(latestGoal);
         latestGoal.lastError = '';
         restartAfterGuidance = true;
       } else if (stoppedByGoalStatus) {
         // A goal tool intentionally changed the status, e.g. update_goal
         // reached complete/blocked. Preserve the status-specific reason.
       } else {
-        if (controller.signal.aborted && latestGoal.status === 'active') latestGoal.status = 'paused';
+        if (controller.signal.aborted && latestGoal.status === 'active') {
+          goalStopRunClock(latestGoal);
+          latestGoal.status = 'paused';
+        }
         latestGoal.lastError = e && e.message ? e.message : String(e);
         if (!stoppedByGoalStatus) pushGoalEvent(latestGoal, controller.signal.aborted ? 'paused' : 'error', { reason: latestGoal.lastError });
       }
@@ -1411,6 +1477,7 @@ function pauseGoal(goalId) {
     try { runner.controller.abort(); } catch (e) {}
   }
   if (goal.chatId) goalRequestStopChatTask(goal.chatId);
+  goalStopRunClock(goal);
   goal.status = 'paused';
   pushGoalEvent(goal, 'paused', { reason: 'Paused by user.' });
   saveGoals();
@@ -1428,6 +1495,7 @@ function cancelGoal(goalId) {
     try { runner.controller.abort(); } catch (e) {}
   }
   if (goal.chatId) goalRequestStopChatTask(goal.chatId);
+  goalStopRunClock(goal);
   goal.status = 'cancelled';
   goal.cancelledAt = nowIso();
   pushGoalEvent(goal, 'cancelled', { reason: 'Cancelled by user.' });
@@ -1560,6 +1628,7 @@ function updateGoal(args = {}, toolContext = {}) {
         goal: summarizeGoalForTool(goal)
       };
     }
+    goalStopRunClock(goal);
     goal.status = 'complete';
     goal.completedAt = nowIso();
     goal.summary = finalSummary || progress || goal.summary;
@@ -1575,15 +1644,18 @@ function updateGoal(args = {}, toolContext = {}) {
       count: goal.blockerAudit.count
     });
     if (goal.blockerAudit.count >= threshold) {
+      goalStopRunClock(goal);
       goal.status = 'blocked';
       goal.blockedAt = nowIso();
       goal.lastError = blockerReason || progress || 'Blocked.';
       pushGoalEvent(goal, 'blocked', { reason: goal.lastError });
     } else {
       goal.status = 'active';
+      goalStartRunClock(goal);
     }
   } else if (!GOAL_TERMINAL_STATUSES.has(goal.status)) {
     goal.status = 'active';
+    goalStartRunClock(goal);
   }
 
   saveGoals();
@@ -1688,6 +1760,8 @@ window.resetGoalPrompts = resetGoalPrompts;
 window.createGoal = createGoal;
 window.getGoal = getGoal;
 window.updateGoal = updateGoal;
+window.goalElapsedMs = goalElapsedMs;
+window.goalElapsedText = goalElapsedText;
 
 window.AgentApp.define('goalCore', {
   loadGoals,
@@ -1717,5 +1791,7 @@ window.AgentApp.define('goalCore', {
   resetGoalPrompts,
   createGoal,
   getGoal,
-  updateGoal
+  updateGoal,
+  goalElapsedMs,
+  goalElapsedText
 });

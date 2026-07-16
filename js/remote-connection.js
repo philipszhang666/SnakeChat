@@ -232,14 +232,15 @@ function activeRemoteMatchesBinding(binding) {
 async function applyBackendBinding(binding, options = {}) {
   const b = normalizeBackendBinding(binding);
   if (b.type !== 'remote') {
-    if (isRemoteAgentActive()) {
+    if (isRemoteAgentActive() && options.disconnectRemote) {
       await disconnectRemoteAgent({
         skipConfirm: true,
         stopRemote: false,
         silent: true,
         refreshWorkspace: false
       });
-    } else if (typeof TERMINAL_CONFIG !== 'undefined') {
+    }
+    if (typeof TERMINAL_CONFIG !== 'undefined') {
       TERMINAL_CONFIG.serverUrl = localBackendServerUrl();
       TERMINAL_CONFIG.remoteGitProxyUrl = '';
     }
@@ -302,7 +303,8 @@ async function applyBackendBinding(binding, options = {}) {
     skipConfirm: true,
     silentSave: true,
     reuseExisting: true,
-    throwOnError: true
+    throwOnError: true,
+    suppressWorkspaceUi: !!options.suppressWorkspaceUi
   });
   return {
     ok: true,
@@ -763,7 +765,7 @@ async function connectRemoteAgent(options = {}) {
       console.error('[remote] workspace read failed', { response: r, workspaceInfo });
       throw new Error('远程 Agent 已启动，但无法读取远程工作区：' + detail);
     }
-    if (typeof updateWorkspaceDisplay === 'function') {
+    if (!opts.suppressWorkspaceUi && typeof updateWorkspaceDisplay === 'function') {
       updateWorkspaceDisplay(workspaceInfo);
     }
     persistActiveRemoteConnection({
@@ -773,7 +775,7 @@ async function connectRemoteAgent(options = {}) {
       remoteAgentPort: r.remote_agent_port || v.remoteAgentPort,
       localPort: r.local_port || v.localPort
     });
-    if (typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
+    if (!opts.suppressWorkspaceUi && typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
     setRemoteStatus(`已连接：${r.server_url} → ${workspaceInfo.workspace || v.remoteWorkspace}`, 'ok');
     RemoteConnectionUiService.toast('远程 Agent 已连接');
     return {

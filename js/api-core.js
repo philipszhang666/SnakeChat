@@ -52,6 +52,24 @@ function restorePrivacyToolArgs(args, context) {
     : args;
 }
 
+function parseToolCallArguments(rawArguments) {
+  const raw = typeof rawArguments === 'string' ? rawArguments.trim() : rawArguments;
+  if (raw === '' || raw === undefined || raw === null) return { ok: true, args: {} };
+  try {
+    const args = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) {
+      return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };
+    }
+    return { ok: true, args };
+  } catch (e) {
+    return {
+      ok: false,
+      args: {},
+      error: `工具参数 JSON 解析失败：${e && e.message ? e.message : String(e)}`
+    };
+  }
+}
+
 function finalizePrivacyAuxiliaryText(text, body, source) {
   if (typeof privacyGuardFinalizeText !== 'function') return text;
   return privacyGuardFinalizeText(text, {
@@ -333,6 +351,64 @@ function accumulateUsageForAccounting(total, usage) {
 function responsesEventKey(j, item) {
   const key = j?.output_index ?? j?.item_id ?? item?.id ?? item?.call_id ?? j?.call_id ?? '';
   return String(key);
+}
+
+function applyResponsesToolEvent(blocks, j) {
+  if (!blocks || !j) return false;
+  const item = j.item && j.item.type === 'function_call' ? j.item : null;
+  const isAdded = j.type === 'response.output_item.added' && item;
+  const isDelta = j.type === 'response.function_call_arguments.delta';
+  const isDone = j.type === 'response.output_item.done' && item;
+  if (!isAdded && !isDelta && !isDone) return false;
+
+  const ids = [];
+  const addId = value => {
+    if (value === undefined || value === null || value === '') return;
+    const id = String(value);
+    if (!ids.includes(id)) ids.push(id);
+  };
+  addId(j.output_index);
+  addId(j.item_id);
+  addId(item?.id);
+  addId(item?.call_id);
+  addId(j.call_id);
+
+  let key = ids.find(id => Object.prototype.hasOwnProperty.call(blocks, id));
+  if (key === undefined) {
+    key = Object.keys(blocks).find(candidate => {
+      const aliases = blocks[candidate]?._eventKeys;
+      return Array.isArray(aliases) && ids.some(id => aliases.includes(id));
+    });
+  }
+  if (key === undefined) key = ids[0] || '';
+
+  const previous = blocks[key] || { id: '', name: '', arguments: '' };
+  const aliases = Array.isArray(previous._eventKeys) ? previous._eventKeys.slice() : [];
+  for (const id of ids) if (!aliases.includes(id)) aliases.push(id);
+
+  if (isAdded) {
+    blocks[key] = {
+      id: item.call_id || item.id || previous.id || key,
+      name: item.name || previous.name || '',
+      arguments: item.arguments || previous.arguments || '',
+      _eventKeys: aliases
+    };
+  } else if (isDelta) {
+    blocks[key] = {
+      ...previous,
+      id: previous.id || j.call_id || j.item_id || key,
+      arguments: (previous.arguments || '') + (j.delta || ''),
+      _eventKeys: aliases
+    };
+  } else {
+    blocks[key] = {
+      id: item.call_id || item.id || previous.id || key,
+      name: item.name || previous.name || '',
+      arguments: item.arguments || previous.arguments || '{}',
+      _eventKeys: aliases
+    };
+  }
+  return true;
 }
 
 function _assistantHasOutput(text, toolCalls) {
@@ -1109,15 +1185,19 @@ async function callAPI(roundLimit, options = {}) {
           break;
         }
         const fname = tc.function?.name || '';
-        let args = {};
-        try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
-        args = restorePrivacyToolArgs(args, { body });
-        const result = await ApiCoreOrchestrationService.executeTool(fname, args, {
-          chatId: taskChatId,
-          chat: c,
-          signal: abortCtrl.signal,
-          isStopped: isMainToolStopRequested
-        });
+        const parsedArgs = parseToolCallArguments(tc.function?.arguments);
+        const args = parsedArgs.ok ? restorePrivacyToolArgs(parsedArgs.args, { body }) : {};
+        const result = parsedArgs.ok
+          ? await ApiCoreOrchestrationService.executeTool(fname, args, {
+              chatId: taskChatId,
+              chat: c,
+              signal: abortCtrl.signal,
+              isStopped: isMainToolStopRequested
+            })
+          : {
+              ok: false,
+              value: `${parsedArgs.error}；工具 ${fname || '(unknown)'} 未执行，请修正参数后重试。`
+            };
         if (isMainToolStopRequested()) {
           userStoppedAll = true;
           pruneToolCallsToExecuted(msg, executedToolCallIds);
@@ -1382,29 +1462,7 @@ async function handleStream(resp, c, lastIdx, reqCtx, readOptions = {}) {
               if (typeof markMsgTimerActivity === 'function') markMsgTimerActivity(c.messages[lastIdx]);
               updateLastMsg(c, lastIdx);
             }
-            if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
-              const key = responsesEventKey(j, j.item);
-              responsesToolBlocks[key] = {
-                id: j.item.call_id || j.item.id || key,
-                name: j.item.name || '',
-                arguments: j.item.arguments || ''
-              };
-            }
-            if (j.type === 'response.function_call_arguments.delta') {
-              const key = responsesEventKey(j);
-              if (!responsesToolBlocks[key]) {
-                responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
-              }
-              responsesToolBlocks[key].arguments += j.delta || '';
-            }
-            if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
-              const key = responsesEventKey(j, j.item);
-              responsesToolBlocks[key] = {
-                id: j.item.call_id || j.item.id || key,
-                name: j.item.name || responsesToolBlocks[key]?.name || '',
-                arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
-              };
-            }
+            applyResponsesToolEvent(responsesToolBlocks, j);
             if (j.type === 'response.completed' && j.response) {
               responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
               streamUsage = normalizeResponsesUsage(j.response.usage) || streamUsage;
@@ -1986,7 +2044,10 @@ async function runAgentLoop({
             forceFinal: forceFinalNoTools || !allowToolsThisRound
           })
         : '';
-      const adapterOptions = loopToolBudgetPrompt ? { extraSystemPrompt: loopToolBudgetPrompt } : undefined;
+      const adapterOptions = {
+        ...(loopToolBudgetPrompt ? { extraSystemPrompt: loopToolBudgetPrompt } : {}),
+        omitEffectiveSystemPrompt: true
+      };
       const apiMessages = s.apiFormat === 'anthropic'
         ? buildAnthropicMessages(messages, adapterOptions)
         : (s.apiFormat === 'responses' ? buildOpenAIResponsesInput(messages, adapterOptions) : buildOpenAIMessages(messages, adapterOptions));
@@ -2017,7 +2078,7 @@ async function runAgentLoop({
         if (allowToolsThisRound) nextBody.tools = tools;
       } else {
         const msgs = loopSystemPrompt ? [{ role: 'system', content: loopSystemPrompt }] : [];
-        for (const m of apiMessages) if (m.role !== 'system') msgs.push(m);
+        for (const m of apiMessages) msgs.push(m);
         nextBody = {
           model,
           messages: msgs,
@@ -2132,29 +2193,7 @@ async function runAgentLoop({
                   assistantText += delta;
                   _emit({ type: 'text_delta', text: delta });
                 }
-                if (j.type === 'response.output_item.added' && j.item?.type === 'function_call') {
-                  const key = responsesEventKey(j, j.item);
-                  responsesToolBlocks[key] = {
-                    id: j.item.call_id || j.item.id || key,
-                    name: j.item.name || '',
-                    arguments: j.item.arguments || ''
-                  };
-                }
-                if (j.type === 'response.function_call_arguments.delta') {
-                  const key = responsesEventKey(j);
-                  if (!responsesToolBlocks[key]) {
-                    responsesToolBlocks[key] = { id: key, name: '', arguments: '' };
-                  }
-                  responsesToolBlocks[key].arguments += j.delta || '';
-                }
-                if (j.type === 'response.output_item.done' && j.item?.type === 'function_call') {
-                  const key = responsesEventKey(j, j.item);
-                  responsesToolBlocks[key] = {
-                    id: j.item.call_id || j.item.id || key,
-                    name: j.item.name || responsesToolBlocks[key]?.name || '',
-                    arguments: j.item.arguments || responsesToolBlocks[key]?.arguments || '{}'
-                  };
-                }
+                applyResponsesToolEvent(responsesToolBlocks, j);
                 if (j.type === 'response.completed' && j.response) {
                   responsesOutput = Array.isArray(j.response.output) ? j.response.output : null;
                   usage = normalizeResponsesUsage(j.response.usage) || usage;
@@ -2375,10 +2414,9 @@ async function runAgentLoop({
         const err = new Error('用户中断'); err.name = 'AbortError'; throw err;
       }
       
-      let args = {};
-      try { args = JSON.parse(tc.arguments || '{}'); } catch (e) {}
-      args = restorePrivacyToolArgs(args, { body: privacyContext });
-      
+      const parsedArgs = parseToolCallArguments(tc.arguments);
+      const args = parsedArgs.ok ? restorePrivacyToolArgs(parsedArgs.args, { body: privacyContext }) : {};
+
       _emit({ type: 'tool_call', id: tc.id, name: tc.name, args });
       
       const toolChat = chat || (chatId ? apiCoreChatById(chatId) : null);
@@ -2390,7 +2428,12 @@ async function runAgentLoop({
         signal,
         isStopped: _isAborted
       };
-      const result = await ApiCoreOrchestrationService.executeTool(tc.name, args, runToolContext);
+      const result = parsedArgs.ok
+        ? await ApiCoreOrchestrationService.executeTool(tc.name, args, runToolContext)
+        : {
+            ok: false,
+            value: `${parsedArgs.error}；工具 ${tc.name || '(unknown)'} 未执行，请修正参数后重试。`
+          };
       if (_isAborted()) {
         if (assistantMsg.tool_calls) {
           assistantMsg.tool_calls = assistantMsg.tool_calls.filter(
@@ -2497,6 +2540,7 @@ async function runAgentLoop({
 window.AgentApp.define('apiCore', {
   buildRequestBody,
   restorePrivacyToolArgs,
+  parseToolCallArguments,
   finalizePrivacyAuxiliaryText,
   buildHeaders,
   extractResponsesText,
@@ -2505,6 +2549,7 @@ window.AgentApp.define('apiCore', {
   normalizeResponsesUsage,
   accumulateUsageForAccounting,
   responsesEventKey,
+  applyResponsesToolEvent,
   callAPI,
   handleStream,
   handleNonStream,

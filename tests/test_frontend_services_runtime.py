@@ -1899,6 +1899,53 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
         )
 
     @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_api_adapters_normalize_historical_tool_arguments_to_objects(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const root = process.cwd();
+            const sandbox = { console };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            vm.createContext(sandbox);
+            const run = file => vm.runInContext(
+              fs.readFileSync(path.join(root, file), 'utf8'), sandbox, { filename: file }
+            );
+
+            run('js/app-context.js');
+            sandbox.AgentApp.define('state', { state: { settings: { systemPrompt: '' } } });
+            run('js/api-adapters.js');
+            const adapters = sandbox.AgentApp.require('apiAdapters');
+
+            for (const invalid of ['{bad', '[]', 'null', '42', ['bad'], null, 42]) {
+              const history = [{
+                role: 'assistant', content: '',
+                tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_note', arguments: invalid } }]
+              }, { role: 'tool', tool_call_id: 'call_1', content: 'invalid arguments' }];
+              const openai = adapters.buildOpenAIMessages(history);
+              assert.strictEqual(openai[0].tool_calls[0].function.arguments, '{}');
+              const anthropic = adapters.buildAnthropicMessages(history);
+              assert.deepStrictEqual(JSON.parse(JSON.stringify(anthropic[0].content[0].input)), {});
+            }
+
+            const valid = [{ role: 'assistant', content: '', tool_calls: [{
+              id: 'call_2', type: 'function', function: { name: 'read_note', arguments: '{"path":"a"}' }
+            }] }, { role: 'tool', tool_call_id: 'call_2', content: 'ok' }];
+            assert.strictEqual(
+              adapters.buildOpenAIMessages(valid)[0].tool_calls[0].function.arguments,
+              '{"path":"a"}'
+            );
+            assert.strictEqual(adapters.buildAnthropicMessages(valid)[0].content[0].input.path, 'a');
+            """
+        )
+        completed = subprocess.run(['node', '-e', script], cwd=ROOT, capture_output=True, text=True, check=False)
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr or completed.stdout)
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
     def test_responses_input_fills_missing_function_call_outputs(self):
         script = textwrap.dedent(
             r"""
@@ -1950,6 +1997,23 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             ]);
             assert.strictEqual(built[built.length - 1].type, 'function_call_output');
             assert.strictEqual(built[built.length - 1].call_id, 'call_3');
+
+            for (const invalid of ['{bad', '[]', 'null', '42', ['bad'], null, 42]) {
+              const replay = adapters.buildOpenAIResponsesInput([
+                {
+                  role: 'assistant',
+                  content: '',
+                  _responsesOutput: [{
+                    type: 'function_call',
+                    call_id: 'call_bad',
+                    name: 'read_file',
+                    arguments: invalid
+                  }]
+                },
+                { role: 'tool', tool_call_id: 'call_bad', content: 'invalid arguments' }
+              ]);
+              assert.strictEqual(replay[0].arguments, '{}');
+            }
             """
         )
 
@@ -1968,6 +2032,266 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             0,
             msg=f'responses input sequence runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
         )
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_responses_tool_events_correlate_mixed_identifiers_without_merging_calls(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const modules = {
+              state: { state: { settings: {} } },
+              uiService: {},
+              orchestrationService: {}
+            };
+            const sandbox = { console };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            sandbox.AgentApp = {
+              require(name) { return modules[name] || {}; },
+              define(name, value) { modules[name] = value; }
+            };
+            vm.createContext(sandbox);
+            vm.runInContext(
+              fs.readFileSync(path.join(process.cwd(), 'js/api-core.js'), 'utf8'),
+              sandbox,
+              { filename: 'js/api-core.js' }
+            );
+
+            const apply = modules.apiCore.applyResponsesToolEvent;
+            const blocks = {};
+
+            apply(blocks, {
+              type: 'response.output_item.added',
+              output_index: 0,
+              item: { type: 'function_call', id: 'item_a', call_id: 'call_a', name: 'first' }
+            });
+            apply(blocks, {
+              type: 'response.output_item.added',
+              output_index: 1,
+              item: { type: 'function_call', id: 'item_b', call_id: 'call_b', name: 'second' }
+            });
+            apply(blocks, {
+              type: 'response.function_call_arguments.delta',
+              item_id: 'item_b',
+              delta: '{"b":'
+            });
+            apply(blocks, {
+              type: 'response.function_call_arguments.delta',
+              call_id: 'call_a',
+              delta: '{"a":1}'
+            });
+            apply(blocks, {
+              type: 'response.function_call_arguments.delta',
+              output_index: 1,
+              delta: '2}'
+            });
+            apply(blocks, {
+              type: 'response.output_item.done',
+              item_id: 'item_a',
+              item: { type: 'function_call', id: 'item_a', call_id: 'call_a', name: 'first' }
+            });
+
+            assert.deepStrictEqual(Object.keys(blocks).sort(), ['0', '1']);
+            assert.strictEqual(blocks['0'].id, 'call_a');
+            assert.strictEqual(blocks['0'].arguments, '{"a":1}');
+            assert.strictEqual(blocks['1'].id, 'call_b');
+            assert.strictEqual(blocks['1'].arguments, '{"b":2}');
+            """
+        )
+        completed = subprocess.run(
+            ['node', '-e', script], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr or completed.stdout)
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_tool_request_filters_malformed_nested_json_schemas(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const state = {
+              settings: { useTools: true, apiFormat: 'openai' },
+              tools: [
+                { name: 'good', code: 'return "ok";', parameters: { type: 'object', properties: { value: { type: 'string' } } } },
+                { name: 'bad_required', code: 'return "bad";', parameters: { type: 'object', required: 'value', properties: {} } },
+                { name: 'bad_property', code: 'return "bad";', parameters: { type: 'object', properties: { value: [] } } },
+                { name: 'bad_type', code: 'return "bad";', parameters: { type: 'object', properties: { value: { type: 'strng' } } } },
+                { name: 'bad_items', code: 'return "bad";', parameters: { type: 'object', properties: { values: { type: 'array', items: [] } } } }
+              ]
+            };
+            const modules = {
+              config: { BUILTIN_TOOLS: [], PRESET_TOOLS: {} },
+              state: { state, persistTools() {}, persistSettings() {} },
+              uiService: {}
+            };
+            const sandbox = {
+              console,
+              setTimeout,
+              clearTimeout,
+              AbortController,
+              localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            sandbox.AgentApp = {
+              require(name) { return modules[name] || {}; },
+              define(name, value) { modules[name] = value; }
+            };
+            vm.createContext(sandbox);
+            vm.runInContext(
+              fs.readFileSync(path.join(process.cwd(), 'js/tools.js'), 'utf8'),
+              sandbox,
+              { filename: 'js/tools.js' }
+            );
+
+            const tools = modules.tools.buildToolsArray();
+            assert.deepStrictEqual(Array.from(tools, t => t.function.name), ['good']);
+            assert.strictEqual(modules.tools.isValidToolParametersSchema({ type: 'object', additionalProperties: false }), true);
+            """
+        )
+        completed = subprocess.run(
+            ['node', '-e', script], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr or completed.stdout)
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_duplicate_tool_names_are_not_advertised_or_executed(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const parameters = { type: 'object', properties: {} };
+            const state = {
+              settings: { useTools: true, apiFormat: 'openai' },
+              tools: [
+                { name: 'duplicate', parameters, code: 'return "first";' },
+                { name: 'safe', parameters, code: 'return "safe";' },
+                { name: 'duplicate', parameters, code: 'return "second";' }
+              ]
+            };
+            const modules = {
+              config: { BUILTIN_TOOLS: [], PRESET_TOOLS: {} },
+              state: { state, persistTools() {}, persistSettings() {} },
+              uiService: {}
+            };
+            const sandbox = {
+              console,
+              setTimeout,
+              clearTimeout,
+              AbortController,
+              localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            sandbox.AgentApp = {
+              require(name) { return modules[name] || {}; },
+              define(name, value) { modules[name] = value; }
+            };
+            vm.createContext(sandbox);
+            vm.runInContext(
+              fs.readFileSync(path.join(process.cwd(), 'js/tools.js'), 'utf8'),
+              sandbox,
+              { filename: 'js/tools.js' }
+            );
+
+            (async () => {
+              const advertised = modules.tools.buildToolsArray();
+              assert.deepStrictEqual(Array.from(advertised, t => t.function.name), ['safe']);
+
+              const ambiguous = await modules.tools.executeTool('duplicate', {});
+              assert.strictEqual(ambiguous.ok, false);
+              assert.match(ambiguous.value, /名称冲突/);
+
+              const safe = await modules.tools.executeTool('safe', {});
+              assert.deepStrictEqual({ ok: safe.ok, value: safe.value }, { ok: true, value: 'safe' });
+            })().catch(error => {
+              console.error(error);
+              process.exitCode = 1;
+            });
+            """
+        )
+        completed = subprocess.run(
+            ['node', '-e', script], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr or completed.stdout)
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_invalid_imported_tool_definitions_are_not_advertised_or_executed(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const validParameters = { type: 'object', properties: {} };
+            const state = {
+              settings: { useTools: true, apiFormat: 'openai' },
+              tools: [
+                { name: 'safe', parameters: validParameters, code: 'return "safe";' },
+                { name: 'bad-name', parameters: validParameters, code: 'return "ran";' },
+                { name: 'x'.repeat(65), parameters: validParameters, code: 'return "ran";' },
+                { name: 'bad_schema', parameters: { type: 'array' }, code: 'return "ran";' },
+                { name: 'bad_code', parameters: validParameters, code: { source: 'return "ran";' } }
+              ]
+            };
+            const modules = {
+              config: { BUILTIN_TOOLS: [], PRESET_TOOLS: {} },
+              state: { state, persistTools() {}, persistSettings() {} },
+              uiService: {}
+            };
+            const sandbox = {
+              console,
+              setTimeout,
+              clearTimeout,
+              AbortController,
+              localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            sandbox.AgentApp = {
+              require(name) { return modules[name] || {}; },
+              define(name, value) { modules[name] = value; }
+            };
+            vm.createContext(sandbox);
+            vm.runInContext(
+              fs.readFileSync(path.join(process.cwd(), 'js/tools.js'), 'utf8'),
+              sandbox,
+              { filename: 'js/tools.js' }
+            );
+
+            (async () => {
+              const advertised = modules.tools.buildToolsArray();
+              assert.deepStrictEqual(Array.from(advertised, t => t.function.name), ['safe']);
+              for (const name of ['bad-name', 'x'.repeat(65), 'bad_schema', 'bad_code']) {
+                const result = await modules.tools.executeTool(name, {});
+                assert.strictEqual(result.ok, false, name);
+                assert.match(result.value, /定义无效/, name);
+              }
+              const safe = await modules.tools.executeTool('safe', {});
+              assert.deepStrictEqual({ ok: safe.ok, value: safe.value }, { ok: true, value: 'safe' });
+              assert.strictEqual(modules.tools.isValidToolName('a'.repeat(64)), true);
+              assert.strictEqual(modules.tools.isValidToolName('a'.repeat(65)), false);
+            })().catch(error => {
+              console.error(error);
+              process.exitCode = 1;
+            });
+            """
+        )
+        completed = subprocess.run(
+            ['node', '-e', script], cwd=ROOT, capture_output=True, text=True, check=False
+        )
+        self.assertEqual(completed.returncode, 0, msg=completed.stderr or completed.stdout)
 
     @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
     def test_chat_attachments_are_chat_scoped_and_wait_for_async_reads(self):

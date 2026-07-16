@@ -68,6 +68,46 @@ async function goalSnapshot(page) {
   });
 }
 
+function validCompressionSummary(title) {
+  return [
+    '## 当前任务',
+    title,
+    '',
+    '## 用户目标和约束',
+    'Keep goal-mode compression visible and cache-friendly.',
+    '',
+    '## 已完成事项',
+    'Older goal chat history was summarized before the next goal request.',
+    '',
+    '## 关键决策和事实',
+    'Goal mode should use the same visible compressed context as normal chat.',
+    '',
+    '## 已查看或修改的文件',
+    '无',
+    '',
+    '## 工具/命令结果',
+    '无',
+    '',
+    '## 计划/大纲状态',
+    '无',
+    '',
+    '## 测试和验证状态',
+    'Playwright verified goal-mode visible compression.',
+    '',
+    '## 未完成事项',
+    'Continue the goal after compression.',
+    '',
+    '## 风险/阻塞',
+    '无',
+    '',
+    '## 下一步建议',
+    'Run the goal request with the compressed summary.',
+    '',
+    '## 可丢弃上下文',
+    'The raw legacy context messages can be discarded.'
+  ].join('\n');
+}
+
 test.describe('goal mode workflows', () => {
   test('runs multiple goals in the current chat without creating goal-only conversations', async ({ page }) => {
     const { backend, clientErrors } = await gotoApp(page, { goalScenario: true });
@@ -103,6 +143,108 @@ test.describe('goal mode workflows', () => {
     expect(JSON.stringify(afterSecond)).not.toContain('"goal_"');
     expect(backend.llmCalls.length).toBeGreaterThanOrEqual(4);
 
+    clientErrors.expectNoErrors();
+  });
+
+  test('auto compression in goal mode is visible and feeds the compressed context to the goal request', async ({ page }) => {
+    const { backend, clientErrors } = await gotoApp(page, { goalScenario: true });
+    await configureMockProvider(page);
+    await ensureCurrentChat(page);
+
+    await page.evaluate(summary => {
+      const apiCore = window.AgentApp.require('apiCore');
+      window.__e2eOriginalGoalCompressionCallOnce = apiCore.callOnceWithRole;
+      window.__e2eGoalCompressionCalls = 0;
+      apiCore.callOnceWithRole = async () => {
+        window.__e2eGoalCompressionCalls += 1;
+        return summary;
+      };
+
+      window.saveContextLimitRules([{ key: 'e2e-goal-compress-model', limit: 8000 }]);
+      const appState = window.AgentApp.require('state').state;
+      appState.settings.currentModel = 'e2e-goal-compress-model';
+      appState.settings.compressAutoEnabled = true;
+      appState.settings.compressAutoThreshold = 50;
+      appState.settings.compressKeepLast = 2;
+      appState.settings.maxTokens = 0;
+      appState.settings.systemPrompt = '';
+
+      const chat = window.AgentApp.require('state').currentChat();
+      chat.messages = Array.from({ length: 8 }, (_, idx) => ({
+        role: idx % 2 === 0 ? 'user' : 'assistant',
+        content: `legacy-context-message-${idx} ` + 'x'.repeat(3000)
+      }));
+      window.renderMessages();
+    }, validCompressionSummary('E2E goal visible compression summary.'));
+
+    await openGoalPanel(page);
+    await createGoalFromPanel(page, 'E2E compressed goal context');
+    await waitForGoalStatus(page, 'E2E compressed goal context', 'complete');
+
+    await expect.poll(() => page.evaluate(() => window.__e2eGoalCompressionCalls)).toBe(1);
+    await expect(page.locator('.compression-summary-card')).not.toHaveAttribute('open', '');
+    await expect(page.locator('.compression-summary-card')).toContainText('E2E goal visible compression summary');
+
+    const requestBodies = backend.llmCalls.map(call => JSON.stringify(call.body));
+    expect(requestBodies.some(text => text.includes('E2E goal visible compression summary'))).toBe(true);
+    expect(requestBodies.some(text => text.includes('legacy-context-message-0'))).toBe(false);
+
+    await page.evaluate(() => {
+      const apiCore = window.AgentApp.require('apiCore');
+      if (window.__e2eOriginalGoalCompressionCallOnce) {
+        apiCore.callOnceWithRole = window.__e2eOriginalGoalCompressionCallOnce;
+        delete window.__e2eOriginalGoalCompressionCallOnce;
+      }
+      delete window.__e2eGoalCompressionCalls;
+    });
+    clientErrors.expectNoErrors();
+  });
+
+  test('elapsed time freezes while a goal is paused', async ({ page }) => {
+    const objective = 'E2E paused elapsed goal';
+    const { clientErrors } = await gotoApp(page, {
+      goalScenario: true,
+      delayForLlm() {
+        return 1500;
+      }
+    });
+    await configureMockProvider(page);
+    await ensureCurrentChat(page);
+
+    await openGoalPanel(page);
+    await page.fill('#goalObjectiveInput', objective);
+    await page.fill('#goalMaxTurnsInput', '3');
+    await page.locator('[data-action="createGoalFromUi"]').click();
+    await expect.poll(() => page.evaluate(objective => {
+      const goal = window.AgentApp.require('goalCore').listGoals().find(item => item.objective === objective);
+      return goal ? goal.status : '';
+    }, objective)).toBe('active');
+
+    await page.locator('[data-handler="pauseGoalById"]').first().click();
+    await expect.poll(() => page.evaluate(objective => {
+      const core = window.AgentApp.require('goalCore');
+      const goal = core.listGoals().find(item => item.objective === objective);
+      return goal ? goal.status : '';
+    }, objective)).toBe('paused');
+
+    const elapsedAtPause = await page.evaluate(objective => {
+      const core = window.AgentApp.require('goalCore');
+      const goal = core.listGoals().find(item => item.objective === objective);
+      return core.goalElapsedMs(goal);
+    }, objective);
+    await expect.poll(() => page.evaluate(objective => {
+      const core = window.AgentApp.require('goalCore');
+      const goal = core.listGoals().find(item => item.objective === objective);
+      return goal ? Number(goal.runningSince || 0) : -1;
+    }, objective)).toBe(0);
+    await page.waitForTimeout(1200);
+    const elapsedLater = await page.evaluate(objective => {
+      const core = window.AgentApp.require('goalCore');
+      const goal = core.listGoals().find(item => item.objective === objective);
+      return core.goalElapsedMs(goal);
+    }, objective);
+
+    expect(elapsedLater).toBe(elapsedAtPause);
     clientErrors.expectNoErrors();
   });
 

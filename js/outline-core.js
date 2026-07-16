@@ -23,6 +23,24 @@ const outlineCoreActiveTaskChat = OutlineCoreStateModule.activeTaskChat;
 const OutlineCoreOrchestrationService = window.AgentApp.require('orchestrationService');
 const OutlineCoreUiService = window.AgentApp.require('uiService');
 
+function parseOutlineToolCallArguments(rawArguments) {
+  const raw = typeof rawArguments === 'string' ? rawArguments.trim() : rawArguments;
+  if (raw === '' || raw === undefined || raw === null) return { ok: true, args: {} };
+  try {
+    const args = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) {
+      return { ok: false, args: {}, error: '工具参数必须是 JSON 对象' };
+    }
+    return { ok: true, args };
+  } catch (e) {
+    return {
+      ok: false,
+      args: {},
+      error: `工具参数 JSON 解析失败：${e && e.message ? e.message : String(e)}`
+    };
+  }
+}
+
 function outlineToolTimeoutMs(name, args) {
   if (name === 'execute_action') {
     const commandTimeoutSec = Math.max(1, parseInt(args && args.timeout, 10) || 60);
@@ -1337,9 +1355,9 @@ async function callAPIWithOutline(options = {}) {
         throwIfAborted();
         
         const fname = tc.function?.name || '';
-        let args = {};
-        try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
-        if (typeof privacyGuardRestoreToolCallArguments === 'function') {
+        const parsedArgs = parseOutlineToolCallArguments(tc.function?.arguments);
+        let args = parsedArgs.args;
+        if (parsedArgs.ok && typeof privacyGuardRestoreToolCallArguments === 'function') {
           args = privacyGuardRestoreToolCallArguments(args, { context: body });
         }
         
@@ -1347,7 +1365,12 @@ async function callAPIWithOutline(options = {}) {
         let result;
         let preparedExternalToolResult = null;
         
-        if (isOutlineTool) {
+        if (!parsedArgs.ok) {
+          result = {
+            ok: false,
+            value: `${parsedArgs.error}；工具 ${fname || '(unknown)'} 未执行，请修正参数后重试。`
+          };
+        } else if (isOutlineTool) {
           result = handleOutlineTool(fname, args, aiMsg.outline);
           anyOutlineChanged = true;
           onUpdate();

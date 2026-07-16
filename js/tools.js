@@ -341,6 +341,75 @@ function editTool(i) {
   document.getElementById('toolEditModal').classList.add('show');
 }
 
+function isValidJsonSchemaNode(schema, seen = new WeakSet()) {
+  if (schema === true || schema === false) return true;
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return false;
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  try {
+    const validTypes = new Set(['null', 'boolean', 'object', 'array', 'number', 'integer', 'string']);
+    if (schema.type !== undefined) {
+      const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+      if (!types.length || types.some(type => typeof type !== 'string' || !validTypes.has(type))) return false;
+    }
+    if (schema.required !== undefined && (
+      !Array.isArray(schema.required)
+      || schema.required.some(name => typeof name !== 'string')
+      || new Set(schema.required).size !== schema.required.length
+    )) return false;
+    if (schema.enum !== undefined && !Array.isArray(schema.enum)) return false;
+    if (schema.properties !== undefined) {
+      if (!schema.properties || typeof schema.properties !== 'object' || Array.isArray(schema.properties)) return false;
+      if (Object.values(schema.properties).some(child => !isValidJsonSchemaNode(child, seen))) return false;
+    }
+    for (const key of ['$defs', 'definitions', 'patternProperties']) {
+      if (schema[key] === undefined) continue;
+      if (!schema[key] || typeof schema[key] !== 'object' || Array.isArray(schema[key])) return false;
+      if (Object.values(schema[key]).some(child => !isValidJsonSchemaNode(child, seen))) return false;
+    }
+    for (const key of ['allOf', 'anyOf', 'oneOf']) {
+      if (schema[key] !== undefined && (
+        !Array.isArray(schema[key])
+        || !schema[key].length
+        || schema[key].some(child => !isValidJsonSchemaNode(child, seen))
+      )) return false;
+    }
+    for (const key of ['items', 'additionalProperties', 'not', 'if', 'then', 'else']) {
+      if (schema[key] !== undefined && !isValidJsonSchemaNode(schema[key], seen)) return false;
+    }
+    return true;
+  } finally {
+    seen.delete(schema);
+  }
+}
+
+function isValidToolParametersSchema(schema) {
+  return !!schema
+    && typeof schema === 'object'
+    && !Array.isArray(schema)
+    && (schema.type === undefined || schema.type === 'object')
+    && isValidJsonSchemaNode(schema);
+}
+
+function isValidToolName(name) {
+  // Keep one conservative format accepted by all currently supported
+  // function-calling providers. The UI already enforces the same character
+  // set; the length guard protects imported/persisted definitions.
+  return typeof name === 'string'
+    && name.length <= 64
+    && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+}
+
+function isValidToolDefinition(tool) {
+  return !!tool && isValidToolName(tool.name)
+    && typeof tool.code === 'string'
+    && isValidToolParametersSchema(tool.parameters);
+}
+
+function isValidToolArguments(args) {
+  return !!args && typeof args === 'object' && !Array.isArray(args);
+}
+
 function saveToolEdit() {
   const name = document.getElementById('te_name').value.trim();
   const desc = document.getElementById('te_desc').value.trim();
@@ -351,18 +420,23 @@ function saveToolEdit() {
     alert('参数 JSON 错误：' + e.message);
     return;
   }
+  if (!isValidToolParametersSchema(params)) {
+    alert('参数 Schema 必须是 object 类型的 JSON Schema');
+    return;
+  }
   const code = document.getElementById('te_code').value;
-  if (!name || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
-    alert('名称需为合法英文标识符');
+  if (!isValidToolName(name)) {
+    alert('名称需为不超过 64 字符的合法英文标识符');
+    return;
+  }
+  const editingIdx = Number.isInteger(toolsState.editingToolIdx) ? toolsState.editingToolIdx : -1;
+  if (toolsState.tools.some((t, i) => i !== editingIdx && t && t.name === name)) {
+    alert('已存在');
     return;
   }
   const tool = { name, description: desc, parameters: params, code };
-  if (toolsState.editingToolIdx >= 0) toolsState.tools[toolsState.editingToolIdx] = tool;
+  if (editingIdx >= 0) toolsState.tools[editingIdx] = tool;
   else {
-    if (toolsState.tools.some(t => t.name === name)) {
-      alert('已存在');
-      return;
-    }
     toolsState.tools.push(tool);
   }
   toolsPersistTools();
@@ -415,8 +489,16 @@ function compareToolSchemaOrder(a, b) {
 function buildToolsArray(options = {}) {
   const force = !!(options && options.force);
   if ((!force && !toolsState.settings.useTools) || !toolsState.tools.length) return null;
+  // A tool call only carries its name. If persisted/imported data contains
+  // duplicates, advertising either definition is unsafe: executeTool cannot
+  // know which schema/code the model selected. Hide every ambiguous name.
+  const nameCounts = new Map();
+  for (const tool of toolsState.tools) {
+    if (!tool || typeof tool.name !== 'string') continue;
+    nameCounts.set(tool.name, (nameCounts.get(tool.name) || 0) + 1);
+  }
   const availableTools = toolsState.tools
-    .filter(t => toolVisibleForContext(t, options))
+    .filter(t => nameCounts.get(t && t.name) === 1 && toolVisibleForContext(t, options) && isValidToolDefinition(t))
     .sort(compareToolSchemaOrder);
   if (!availableTools.length) return null;
   
@@ -839,9 +921,95 @@ function _ctxToolFn(name, context) {
   };
 }
 
+const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 5 * 60 * 1000;
+
+function toolExecutionTimeoutMs(name, args, context = {}) {
+  const override = Number(context && context._toolExecutionTimeoutMs);
+  if (Number.isFinite(override) && override > 0) return Math.max(10, Math.min(30 * 60 * 1000, override));
+  if (name === 'execute_action') {
+    const commandTimeoutSec = Math.max(1, parseInt(args && args.timeout, 10) || 60);
+    return Math.min(315 * 1000, (commandTimeoutSec * 1000) + 30 * 1000);
+  }
+  if (name === 'web_search' || name === 'fetch_url') return 150 * 1000;
+  if (name === 'attach_file' || name === 'ai_screenshot') return 120 * 1000;
+  return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
+}
+
+function toolExecutionAbortError(message, name = 'AbortError') {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+async function runToolCodeWithLimits(run, context, timeoutMs) {
+  const parentSignal = context && context.signal;
+  if (parentSignal && parentSignal.aborted) throw toolExecutionAbortError('用户中断');
+
+  const controller = new AbortController();
+  let timer = null;
+  let abortHandler = null;
+  const timeoutPromise = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      try { controller.abort(); } catch (e) {}
+      reject(toolExecutionAbortError(
+        `工具执行超过 ${Math.max(1, Math.ceil(timeoutMs / 1000))} 秒，已停止等待`,
+        'ToolTimeoutError'
+      ));
+    }, timeoutMs);
+  });
+  const racers = [Promise.resolve().then(() => run(controller.signal)), timeoutPromise];
+  if (parentSignal) {
+    racers.push(new Promise((resolve, reject) => {
+      abortHandler = () => {
+        try { controller.abort(); } catch (e) {}
+        reject(toolExecutionAbortError('用户中断'));
+      };
+      parentSignal.addEventListener('abort', abortHandler, { once: true });
+    }));
+  }
+  try {
+    return await Promise.race(racers);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (parentSignal && abortHandler) parentSignal.removeEventListener('abort', abortHandler);
+    if (!controller.signal.aborted) {
+      try { controller.abort(); } catch (e) {}
+    }
+  }
+}
+
+function normalizeToolReturnValue(value) {
+  if (value === undefined) return { ok: true, value: '' };
+  if (typeof value === 'bigint') return { ok: true, value: String(value) };
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    return { ok: false, value: `工具返回了不支持的类型：${typeof value}` };
+  }
+  if (value && typeof value === 'object') {
+    try {
+      JSON.stringify(value);
+    } catch (e) {
+      return {
+        ok: false,
+        value: `工具返回值无法序列化：${e && e.message ? e.message : String(e)}`
+      };
+    }
+  }
+  return { ok: true, value };
+}
+
 async function executeTool(name, args, context = {}) {
-  const tool = toolsState.tools.find(t => t.name === name);
-  if (!tool) return { ok: false, value: `未找到工具：${name}` };
+  const matches = toolsState.tools.filter(t => t && t.name === name);
+  if (!matches.length) return { ok: false, value: `未找到工具：${name}` };
+  if (matches.length > 1) {
+    return { ok: false, value: `工具名称冲突：${name} 存在 ${matches.length} 个定义，请先在工具面板中删除或重命名重复项` };
+  }
+  const tool = matches[0];
+  if (!isValidToolDefinition(tool)) {
+    return { ok: false, value: `工具定义无效：${String(name)}（名称、参数 Schema 或代码字段不合法）` };
+  }
+  if (!isValidToolArguments(args)) {
+    return { ok: false, value: `工具参数无效：${String(name)} 的参数必须是 JSON 对象` };
+  }
   if (isPptTool(name) && !(toolsState.settings && toolsState.settings.usePpt)) {
     return { ok: false, value: 'PPT 工具只能在顶栏 PPT 模式开启时使用。' };
   }
@@ -858,24 +1026,26 @@ async function executeTool(name, args, context = {}) {
     }
   }
   try {
-    if (typeof window !== 'undefined') window.__currentToolContext = toolContext;
-    const scopedNames = [
-      'callAgentBackend',
-      'executeTerminalCommand', 'readCommandTaskOutput', 'listCommandTasks', 'readFile', 'writeFile', 'appendFile', 'editFile', 'applyPatch', 'deleteFile',
-      'generatePpt',
-      'readToolArtifact',
-      'listCheckpoints', 'restoreCheckpoint',
-      'listDir', 'searchInFiles', 'webSearch', 'fetchUrl', 'aiScreenshot', 'attachFileForAI',
-      'callGit', 'aiGitStatus', 'aiGitHistory', 'aiGitDiff', 'aiGitSnapshot', 'aiGitRestore',
-      'createGoal', 'getGoal', 'updateGoal'
-    ];
-    const scopedFns = scopedNames.map(n => _ctxToolFn(n, toolContext));
-    const fn = new Function('args', 'toolContext', ...scopedNames, `return (async () => { ${tool.code} })();`);
-    const value = await fn(args, toolContext, ...scopedFns);
-    if (typeof window !== 'undefined' && window.__currentToolContext === toolContext) delete window.__currentToolContext;
-    return { ok: true, value };
+    const timeoutMs = toolExecutionTimeoutMs(name, args, toolContext);
+    const value = await runToolCodeWithLimits(
+      signal => {
+        const executionContext = { ...toolContext, signal };
+        const scopedNames = [
+          'callAgentBackend',
+          'executeTerminalCommand', 'readCommandTaskOutput', 'listCommandTasks', 'readFile', 'writeFile', 'appendFile', 'editFile', 'applyPatch', 'deleteFile',
+          'generatePpt', 'readToolArtifact', 'listCheckpoints', 'restoreCheckpoint',
+          'listDir', 'searchInFiles', 'webSearch', 'fetchUrl', 'aiScreenshot', 'attachFileForAI',
+          'callGit', 'aiGitStatus', 'aiGitHistory', 'aiGitDiff', 'aiGitSnapshot', 'aiGitRestore',
+          'createGoal', 'getGoal', 'updateGoal'
+        ];
+        const scopedFns = scopedNames.map(n => _ctxToolFn(n, executionContext));
+        const fn = new Function('args', 'toolContext', ...scopedNames, `return (async () => { ${tool.code} })();`);
+        return fn(args, executionContext, ...scopedFns);
+      }, toolContext, timeoutMs
+    );
+    const normalized = normalizeToolReturnValue(value);
+    return normalized;
   } catch (e) {
-    if (typeof window !== 'undefined' && window.__currentToolContext === toolContext) delete window.__currentToolContext;
     return { ok: false, value: `工具出错：${e.message}` };
   }
 }
@@ -886,6 +1056,11 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     closeTools,
     renderToolList,
     compareToolSchemaOrder,
+    isValidJsonSchemaNode,
+    isValidToolName,
+    isValidToolDefinition,
+    isValidToolArguments,
+    isValidToolParametersSchema,
     buildToolsArray,
     executeTool,
     readToolArtifact,
