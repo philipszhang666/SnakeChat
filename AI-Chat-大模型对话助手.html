@@ -168,7 +168,7 @@
         <div class="workspace-actions">
           <span class="workspace-status" id="workspaceStatus">●</span>
           <button class="workspace-refresh" data-action="refreshWorkspaceInfo" title="刷新">⟳</button>
-          <button class="workspace-home" data-action="returnToAgentWorkspace" title="返回 Agent 所在目录；远程连接时先断开">🏠</button>
+          <button class="workspace-home" data-action="returnToAgentWorkspace" title="返回 Agent 所在目录；不会断开远程连接">🏠</button>
           <button class="workspace-select" data-action="selectWorkspaceFromUi" title="选择沙箱目录">📂</button>
         </div>
       </div>
@@ -872,6 +872,7 @@
       </label>
       <div class="remote-connection-hint">流程：打包最小后端 → scp 上传到 ~/.snake-agent/current → 远程 nohup 启动 127.0.0.1 → 本地 ssh -N -L 建立隧道 → 自动切换前端后端地址。远程 Agent 会依赖本地心跳；任意远程请求也会刷新心跳，关闭本地后端/隧道后会在超时后自动退出。</div>
       <div id="remoteConnectionStatus" class="remote-connection-status">未连接</div>
+      <div id="remoteConnectionsList" class="remote-connections-list"></div>
     </div>
     <div class="modal-footer file-editor-footer">
       <button class="btn" type="button" data-action="checkRemoteStatus">检查状态</button>

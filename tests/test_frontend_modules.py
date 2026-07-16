@@ -328,7 +328,7 @@ class FrontendModuleTests(unittest.TestCase):
             "lastServerUrl: ''",
             'let remoteAutoReconnectAttempted = false;',
             'function persistActiveRemoteConnection(info = {})',
-            'function clearRemoteAutoReconnectFlag()',
+            'function clearRemoteAutoReconnectFlag(binding = null)',
             'function noteRemoteWorkspaceChanged(path)',
             'function remoteProfileKey(sshCommand)',
             'function normalizeRemoteProfiles(profiles)',
@@ -387,7 +387,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('远程连接时不能用本机默认应用直接打开远程文件', file_explorer_js)
         self.assertIn('请使用预览或下载', file_explorer_js)
 
-    def test_workspace_home_button_disconnects_remote_and_resets_agent_home(self):
+    def test_workspace_home_button_switches_local_without_killing_remote(self):
         html_file = next(ROOT.glob('AI-Chat-*.html'))
         html = html_file.read_text(encoding='utf-8')
         utils_js = (ROOT / 'js' / 'utils.js').read_text(encoding='utf-8')
@@ -398,16 +398,17 @@ class FrontendModuleTests(unittest.TestCase):
         proxy_py = (ROOT / 'server' / 'proxy.py').read_text(encoding='utf-8')
 
         self.assertIn('data-action="returnToAgentWorkspace"', html)
+        self.assertIn('id="remoteConnectionsList"', html)
         self.assertIn('async function returnToAgentWorkspace()', utils_js)
+        self.assertIn('returnToAgentWorkspace = async function()', utils_js)
         self.assertIn("workspaceBackendAction('reset_workspace_to_agent_home')", utils_js)
-        self.assertIn('disconnectRemoteAgent({', utils_js)
-        self.assertIn('skipConfirm: true', utils_js)
-        self.assertIn('stopRemote: false', utils_js)
-        self.assertIn('refreshWorkspace: false', utils_js)
+        self.assertIn('TERMINAL_CONFIG.serverUrl = localBackendServerUrl();', utils_js)
+        self.assertIn('远程连接保持在线', utils_js)
         self.assertIn('window.returnToAgentWorkspace = returnToAgentWorkspace;', utils_js)
         self.assertIn('returnToAgentWorkspace,', utils_js)
         self.assertIn("'returnToAgentWorkspace'", event_delegation_js)
         self.assertIn('async function disconnectRemoteAgent(options = {})', remote_connection_js)
+        self.assertIn('switchedLocalOnly: true', remote_connection_js)
         self.assertIn('if (!opts.skipConfirm && !confirm(', remote_connection_js)
         self.assertIn("ActionRoute('reset_workspace_to_agent_home', 'handle_reset_workspace_to_agent_home')", routes_py)
         self.assertIn('def handle_reset_workspace_to_agent_home(self, body):', workspace_py)
@@ -476,8 +477,11 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn("if (!isCurrent()) throw new Error('Remote backend binding request is stale');", remote_connection_js)
         self.assertIn('suppressWorkspaceUi: !!options.suppressWorkspaceUi', remote_connection_js)
         self.assertIn('suppressStatusUi: !!options.suppressStatusUi', remote_connection_js)
-        self.assertIn('const cleanupStaleRemote = async info => {', remote_connection_js)
-        self.assertIn("await cleanupStaleRemote({ serverUrl: r.server_url, localPort: r.local_port });", remote_connection_js)
+        self.assertNotIn('const cleanupStaleRemote = async info => {', remote_connection_js)
+        self.assertNotIn("await cleanupStaleRemote({ serverUrl: r.server_url, localPort: r.local_port });", remote_connection_js)
+        self.assertIn('function remoteConnectionMatchesBinding(connection, binding)', remote_connection_js)
+        self.assertIn('function findRemoteConnectionForBinding(binding, connections = REMOTE_CONNECTIONS_CACHE)', remote_connection_js)
+        self.assertIn('function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE)', remote_connection_js)
         self.assertIn('remoteBindingNeedsConnection,', remote_connection_js)
         self.assertIn("if (!opts.suppressWorkspaceUi && canUpdateStatusUi() && typeof updateWorkspaceDisplay === 'function')", remote_connection_js)
         self.assertIn("RemoteConnectionUiService.toast(options.toastMessage || '远程连接中", remote_connection_js)
@@ -485,7 +489,9 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('reuseExisting: true', remote_connection_js)
         self.assertIn('reuse_existing: !!opts.reuseExisting || autoReconnect', remote_connection_js)
         self.assertIn("target_server_url = (body.get('server_url') or '').strip()", remote_py)
-        self.assertIn("return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote connection changed'})", remote_py)
+        self.assertIn('_REMOTE_CONNECTIONS = {}', remote_py)
+        self.assertIn('_LOCAL_PORT_RESERVATIONS = set()', remote_py)
+        self.assertIn('def _remote_connections_public():', remote_py)
         self.assertIn("logs.append('快速连接：尝试复用远程已运行的 Agent...')", remote_py)
         self.assertIn("'reused_existing': True", remote_py)
         self.assertIn('SESSION_WORKSPACES = {}', config_py)

@@ -416,6 +416,9 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect.poll(() => backend.backendCalls.some(call =>
       call.action === 'create_file' && call.body.path === 'e2e-created.txt'
     )).toBe(true);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'create_file' && call.body.path === 'e2e-created.txt' && call.body.allow_full_access
+    )).toBe(false);
 
     await page.fill('#fileEditorContent', 'clipboard from file editor');
     await page.locator('[data-action="copyFileEditorContent"]').click();
@@ -449,6 +452,9 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
       call.body.path === 'e2e-created.txt' &&
       call.body.content === inlineSaveText
     )).toBe(true);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'write_file' && call.body.path === 'e2e-created.txt' && call.body.allow_full_access
+    )).toBe(false);
     await page.locator('[data-action="closeInlineFilePanel"]').click();
 
     await openBlankExplorerContextMenu(page);
@@ -480,6 +486,9 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     const listCallsBeforeRefresh = backend.backendCalls.filter(call => call.action === 'list_dir').length;
     await page.locator('[data-action="refreshFileExplorer"]').click();
     await expect.poll(() => backend.backendCalls.filter(call => call.action === 'list_dir').length).toBeGreaterThan(listCallsBeforeRefresh);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'list_dir' && call.body.allow_full_access
+    )).toBe(false);
 
     clientErrors.expectNoErrors();
   });
@@ -630,6 +639,9 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText(/沙箱目录|当前目录/);
     await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-drive="true"][data-graph-path="C:/"]')).toHaveText(/C:/);
     await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-drive="true"][data-graph-path="D:/"]')).toHaveText(/D:/);
+    await expect.poll(() => backend.backendCalls.some(call =>
+      call.action === 'list_drives' && call.body.allow_full_access === true
+    )).toBe(true);
     const fixedQuickAccessPaths = await page.locator('#fileExplorerGraphQuickAccessList .file-explorer-graph-quick-item').evaluateAll(items =>
       items.slice(0, 3).map(item => ({
         path: item.getAttribute('data-graph-path'),

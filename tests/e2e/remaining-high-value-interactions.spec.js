@@ -115,7 +115,7 @@ test.describe('remaining high-value interactions without real services', () => {
     await expect.poll(() => page.evaluate(() => state.currentId)).toBe('e2e-local-chat');
     await expect.poll(() => page.evaluate(() => TERMINAL_CONFIG.serverUrl)).toContain('8765');
     await expect(page.locator('#workspacePath')).toHaveText('C:/e2e-local-chat');
-    expect(backend.backendCalls.some(call => call.action === 'remote_disconnect' && call.body.server_url)).toBe(true);
+    expect(backend.backendCalls.some(call => call.action === 'remote_disconnect' && call.body.server_url)).toBe(false);
     clientErrors.expectNoErrors();
   });
 
@@ -154,6 +154,13 @@ test.describe('remaining high-value interactions without real services', () => {
     await page.locator('#remoteSshHistoryToggle').click();
     await expect(page.locator('#remoteSshProfileMenu')).toBeVisible();
     await expect(page.locator('#remoteSshProfileMenu .remote-ssh-profile-item')).toHaveCount(2);
+    await page.locator('#remoteSshProfileMenu .remote-ssh-profile-row').filter({ hasText: 'ssh other@example.test' }).locator('.remote-ssh-profile-delete').click();
+    await expect(page.locator('#remoteSshProfileMenu .remote-ssh-profile-item')).toHaveCount(1);
+    await expect.poll(() => page.evaluate(() => {
+      const raw = storage.get('snake_remote_connection_v1') || '{}';
+      const cfg = JSON.parse(raw);
+      return !!(cfg.profiles && cfg.profiles['ssh other@example.test']);
+    })).toBe(false);
     await page.locator('#remoteSshProfileMenu .remote-ssh-profile-item').filter({ hasText: 'ssh e2e@example.test' }).click();
     await expect(page.locator('#remoteWorkspace')).toHaveValue('~/project');
     await page.fill('#remoteSshCommand', 'ssh e2e@example.test');

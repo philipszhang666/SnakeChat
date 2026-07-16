@@ -336,6 +336,45 @@ async function refreshWorkspaceInfo() {
     return { ok: false, error: e.message };
   }
 }
+
+returnToAgentWorkspace = async function() {
+  if (_workspaceHomeInFlight) return;
+  _workspaceHomeInFlight = true;
+  const pathEl = document.getElementById('workspacePath');
+  const statusEl = document.getElementById('workspaceStatus');
+  const homeBtn = document.querySelector('[data-action="returnToAgentWorkspace"]');
+  const previousText = pathEl ? pathEl.textContent : '';
+  const wasRemote = typeof isRemoteAgentActive === 'function' && isRemoteAgentActive();
+  try {
+    if (homeBtn) homeBtn.disabled = true;
+    if (statusEl) {
+      statusEl.className = 'workspace-status checking';
+      statusEl.title = wasRemote ? '正在切回本地 Agent 目录，远程连接保持在线' : '正在返回 Agent 目录';
+    }
+    if (pathEl) {
+      pathEl.textContent = wasRemote ? '正在切回本地 Agent 目录...' : '正在返回 Agent 目录...';
+      pathEl.title = '正在切换沙箱目录';
+    }
+    if (wasRemote && typeof localBackendServerUrl === 'function' && typeof TERMINAL_CONFIG !== 'undefined') {
+      TERMINAL_CONFIG.serverUrl = localBackendServerUrl();
+      TERMINAL_CONFIG.remoteGitProxyUrl = '';
+    }
+    const r = await workspaceBackendAction('reset_workspace_to_agent_home');
+    if (!r.ok) throw new Error(r.error || '返回 Agent 目录失败');
+    updateWorkspaceDisplay(r);
+    refreshWorkspaceDependentContext();
+    if (typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
+    toast(wasRemote ? '已切回本地 Agent 目录，远程连接保持在线' : '已返回 Agent 目录');
+  } catch (e) {
+    if (pathEl && previousText) pathEl.textContent = previousText;
+    toast('返回 Agent 目录失败：' + e.message, 4500);
+    await refreshWorkspaceInfo();
+  } finally {
+    if (homeBtn) homeBtn.disabled = false;
+    _workspaceHomeInFlight = false;
+  }
+};
+
 window.refreshWorkspaceInfo = refreshWorkspaceInfo;
 window.selectWorkspaceFromUi = selectWorkspaceFromUi;
 window.returnToAgentWorkspace = returnToAgentWorkspace;

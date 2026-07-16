@@ -45,6 +45,130 @@ _REMOTE_STATE = {
     'reverse_git_proxy_port': 0,
     'local_git_proxy_url': '',
 }
+_REMOTE_CONNECTIONS = {}
+_REMOTE_LOCK = threading.RLock()
+_LOCAL_PORT_RESERVATIONS = set()
+
+
+def _remote_state_defaults():
+    return {
+        'connected': False,
+        'ssh_command': '',
+        'remote_workspace': '',
+        'remote_agent_port': 8765,
+        'local_port': 0,
+        'server_url': '',
+        'tunnel_pid': None,
+        'started_at': '',
+        'last_error': '',
+        'tunnel_process': None,
+        'heartbeat_thread': None,
+        'heartbeat_stop': None,
+        'heartbeat_timeout': 300,
+        'reverse_git_proxy_enabled': False,
+        'reverse_git_proxy_url': '',
+        'reverse_git_proxy_port': 0,
+        'local_git_proxy_url': '',
+        'connection_id': '',
+    }
+
+
+def _remote_connection_key(ssh_command, remote_workspace='', remote_agent_port=0):
+    raw = '\0'.join([
+        str(ssh_command or '').strip(),
+        str(remote_workspace or '').strip(),
+        str(int(remote_agent_port or 0)),
+    ])
+    return hashlib.sha256(raw.encode('utf-8', errors='replace')).hexdigest()[:16]
+
+
+def _refresh_remote_state(state):
+    if not state:
+        return False
+    proc = state.get('tunnel_process')
+    connected = bool(proc and proc.poll() is None and state.get('server_url'))
+    state['connected'] = connected
+    if not connected and state.get('local_port'):
+        _release_local_port_reservation(state.get('local_port'))
+    return connected
+
+
+def _public_remote_state(state):
+    state = state or _remote_state_defaults()
+    _refresh_remote_state(state)
+    hidden = {'tunnel_process', 'heartbeat_thread', 'heartbeat_stop'}
+    return {k: v for k, v in state.items() if k not in hidden}
+
+
+def _remember_remote_connection(state):
+    if not state:
+        return state
+    key = state.get('connection_id') or _remote_connection_key(
+        state.get('ssh_command'),
+        state.get('remote_workspace'),
+        state.get('remote_agent_port'),
+    )
+    state['connection_id'] = key
+    with _REMOTE_LOCK:
+        _REMOTE_CONNECTIONS[key] = state
+        _REMOTE_STATE.clear()
+        _REMOTE_STATE.update(state)
+    return state
+
+
+def _remote_connection_matches(state, body):
+    if not state:
+        return False
+    target_server_url = (body.get('server_url') or '').strip()
+    target_ssh_command = (body.get('ssh_command') or '').strip()
+    target_remote_workspace = (body.get('remote_workspace') or '').strip()
+    try:
+        target_local_port = int(body.get('local_port') or 0)
+    except Exception:
+        target_local_port = 0
+    try:
+        target_remote_port = int(body.get('remote_agent_port') or 0)
+    except Exception:
+        target_remote_port = 0
+    target_connection_id = (body.get('connection_id') or '').strip()
+    if target_connection_id:
+        return target_connection_id == (state.get('connection_id') or '')
+    if target_server_url:
+        return target_server_url == (state.get('server_url') or '')
+    if target_ssh_command and target_ssh_command != (state.get('ssh_command') or ''):
+        return False
+    if target_remote_workspace and target_remote_workspace != (state.get('remote_workspace') or ''):
+        return False
+    if target_local_port and target_local_port != int(state.get('local_port') or 0):
+        return False
+    if target_remote_port and target_remote_port != int(state.get('remote_agent_port') or 0):
+        return False
+    return True
+
+
+def _find_remote_connection(body):
+    with _REMOTE_LOCK:
+        candidates = list(_REMOTE_CONNECTIONS.values())
+    for state in candidates:
+        if _remote_connection_matches(state, body):
+            return state
+    if _remote_connection_matches(_REMOTE_STATE, body):
+        return _REMOTE_STATE
+    return None
+
+
+def _remote_connections_public():
+    with _REMOTE_LOCK:
+        return [_public_remote_state(state) for state in _REMOTE_CONNECTIONS.values()]
+
+
+def _first_connected_remote_state():
+    with _REMOTE_LOCK:
+        states = list(_REMOTE_CONNECTIONS.values())
+    for state in states:
+        if _refresh_remote_state(state):
+            return state
+    return None
 
 
 def _now_stamp():
@@ -169,10 +293,25 @@ def _local_port_free(port):
 
 def _pick_local_port(preferred=18765):
     p = int(preferred or 18765)
-    for port in range(p, p + 100):
-        if _local_port_free(port):
-            return port
+    with _REMOTE_LOCK:
+        for port in range(p, p + 100):
+            if port in _LOCAL_PORT_RESERVATIONS:
+                continue
+            if _local_port_free(port):
+                _LOCAL_PORT_RESERVATIONS.add(port)
+                return port
     raise RuntimeError('没有可用的本地隧道端口')
+
+
+def _release_local_port_reservation(port):
+    try:
+        p = int(port or 0)
+    except Exception:
+        return
+    if not p:
+        return
+    with _REMOTE_LOCK:
+        _LOCAL_PORT_RESERVATIONS.discard(p)
 
 
 def _normalize_reverse_git_proxy(raw):
@@ -282,12 +421,6 @@ def _run(cmd, password='', timeout=120, input_text=None):
 
 
 def _start_tunnel(ssh_parts, local_port, remote_port, password='', reverse_forwards=None):
-    old = _REMOTE_STATE.get('tunnel_process')
-    if old and old.poll() is None:
-        try:
-            old.terminate()
-        except Exception:
-            pass
     cmd = list(ssh_parts[:-1]) + [
         '-N',
         '-o', 'ExitOnForwardFailure=yes',
@@ -312,19 +445,21 @@ def _start_tunnel(ssh_parts, local_port, remote_port, password='', reverse_forwa
     return p
 
 
-def _stop_heartbeat():
-    ev = _REMOTE_STATE.get('heartbeat_stop')
+def _stop_heartbeat(state=None):
+    target = state or _REMOTE_STATE
+    ev = target.get('heartbeat_stop')
     if ev:
         try:
             ev.set()
         except Exception:
             pass
-    _REMOTE_STATE['heartbeat_thread'] = None
-    _REMOTE_STATE['heartbeat_stop'] = None
+    target['heartbeat_thread'] = None
+    target['heartbeat_stop'] = None
 
 
-def _start_heartbeat(server_url, interval=15):
-    _stop_heartbeat()
+def _start_heartbeat(server_url, interval=15, state=None):
+    target = state or _REMOTE_STATE
+    _stop_heartbeat(target)
     stop_event = threading.Event()
 
     def _loop():
@@ -334,13 +469,13 @@ def _start_heartbeat(server_url, interval=15):
                 with urllib.request.urlopen(url, timeout=5) as resp:
                     resp.read(200)
             except Exception as e:
-                _REMOTE_STATE['last_error'] = f'远程心跳失败: {e}'
+                target['last_error'] = f'远程心跳失败: {e}'
             stop_event.wait(interval)
 
     t = threading.Thread(target=_loop, name='remote-agent-heartbeat', daemon=True)
     t.start()
-    _REMOTE_STATE['heartbeat_thread'] = t
-    _REMOTE_STATE['heartbeat_stop'] = stop_event
+    target['heartbeat_thread'] = t
+    target['heartbeat_stop'] = stop_event
     return t
 
 
@@ -579,45 +714,63 @@ class RemoteMixin:
             self.response.json(200, {'ok': False, 'error': str(e), 'path': path})
 
     def handle_remote_status(self, body):
-        proc = _REMOTE_STATE.get('tunnel_process')
-        connected = bool(proc and proc.poll() is None and _REMOTE_STATE.get('server_url'))
-        _REMOTE_STATE['connected'] = connected
-        hidden = {'tunnel_process', 'heartbeat_thread', 'heartbeat_stop'}
-        self.response.json(200, {k: v for k, v in _REMOTE_STATE.items() if k not in hidden})
+        has_target = any(body.get(k) for k in (
+            'server_url',
+            'ssh_command',
+            'remote_workspace',
+            'local_port',
+            'remote_agent_port',
+            'connection_id',
+        ))
+        target = _find_remote_connection(body) if has_target else (_REMOTE_STATE if _REMOTE_STATE.get('server_url') else None)
+        if target is None:
+            target = _first_connected_remote_state()
+        payload = _public_remote_state(target)
+        payload['ok'] = True
+        payload['connections'] = _remote_connections_public()
+        self.response.json(200, payload)
 
     def handle_remote_disconnect(self, body):
         stop_remote = bool(body.get('stop_remote'))
         password = body.get('password') or ''
-        target_server_url = (body.get('server_url') or '').strip()
-        target_ssh_command = (body.get('ssh_command') or '').strip()
-        target_remote_workspace = (body.get('remote_workspace') or '').strip()
-        try:
-            target_local_port = int(body.get('local_port') or 0)
-        except Exception:
-            target_local_port = 0
-        if target_server_url and target_server_url != (_REMOTE_STATE.get('server_url') or ''):
-            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote connection changed'})
-        if target_ssh_command and target_ssh_command != (_REMOTE_STATE.get('ssh_command') or ''):
-            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote ssh changed'})
-        if target_remote_workspace and target_remote_workspace != (_REMOTE_STATE.get('remote_workspace') or ''):
-            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote workspace changed'})
-        if target_local_port and target_local_port != int(_REMOTE_STATE.get('local_port') or 0):
-            return self.response.json(200, {'ok': True, 'skipped': True, 'reason': 'remote local port changed'})
-        proc = _REMOTE_STATE.get('tunnel_process')
+        target = _find_remote_connection(body) or (_REMOTE_STATE if _REMOTE_STATE.get('server_url') else None)
+        if not target:
+            return self.response.json(200, {
+                'ok': True,
+                'skipped': True,
+                'reason': 'remote connection not found',
+                'connections': _remote_connections_public(),
+            })
+        proc = target.get('tunnel_process')
         if proc and proc.poll() is None:
             try:
                 proc.terminate()
             except Exception:
                 pass
-        _stop_heartbeat()
-        if stop_remote and _REMOTE_STATE.get('ssh_command'):
+        _stop_heartbeat(target)
+        if stop_remote and target.get('ssh_command'):
             try:
-                parts = _split_cmd(_REMOTE_STATE['ssh_command'])
-                cmd = 'if [ -f ~/.snake-agent/run/agent.pid ]; then kill $(cat ~/.snake-agent/run/agent.pid) 2>/dev/null || true; rm -f ~/.snake-agent/run/agent.pid; fi'
+                parts = _split_cmd(target['ssh_command'])
+                remote_port = int(target.get('remote_agent_port') or 0)
+                cmd = f'''
+                pid_file="$HOME/.snake-agent/run/agent-{remote_port}.pid"
+                if [ -f "$pid_file" ]; then
+                    kill "$(cat "$pid_file")" 2>/dev/null || true
+                    rm -f "$pid_file"
+                fi
+                if [ {remote_port} -gt 0 ]; then
+                    if command -v fuser >/dev/null 2>&1; then
+                        fuser -k {remote_port}/tcp >/dev/null 2>&1 || true
+                    elif command -v lsof >/dev/null 2>&1; then
+                        pids=$(lsof -ti tcp:{remote_port} 2>/dev/null || true)
+                        if [ -n "$pids" ]; then kill $pids 2>/dev/null || true; fi
+                    fi
+                fi
+                '''
                 _run(parts + [cmd], password=password, timeout=20)
             except Exception as e:
-                _REMOTE_STATE['last_error'] = str(e)
-        _REMOTE_STATE.update({
+                target['last_error'] = str(e)
+        target.update({
             'connected': False,
             'server_url': '',
             'tunnel_pid': None,
@@ -627,14 +780,31 @@ class RemoteMixin:
             'reverse_git_proxy_port': 0,
             'local_git_proxy_url': '',
         })
-        self.response.json(200, {'ok': True, 'message': '已断开远程隧道'})
+        _release_local_port_reservation(target.get('local_port'))
+        with _REMOTE_LOCK:
+            key = target.get('connection_id')
+            if key and key in _REMOTE_CONNECTIONS:
+                _REMOTE_CONNECTIONS.pop(key, None)
+            replacement = None
+            for state in _REMOTE_CONNECTIONS.values():
+                if _refresh_remote_state(state):
+                    replacement = state
+                    break
+            _REMOTE_STATE.clear()
+            _REMOTE_STATE.update(replacement or _remote_state_defaults())
+        self.response.json(200, {
+            'ok': True,
+            'message': 'remote tunnel disconnected',
+            'connections': _remote_connections_public(),
+        })
 
     def handle_remote_connect(self, body):
         ssh_command = (body.get('ssh_command') or '').strip()
         password = body.get('password') or ''
         remote_workspace = (body.get('remote_workspace') or '~/').strip()
         remote_port = int(body.get('remote_agent_port') or 8765)
-        local_port = _pick_local_port(int(body.get('local_port') or 18765))
+        requested_local_port = int(body.get('local_port') or 18765)
+        local_port = 0
         heartbeat_timeout = max(120, int(body.get('heartbeat_timeout') or 300))
         install_deps = body.get('install_deps', True) is not False
         reuse_existing = bool(body.get('reuse_existing'))
@@ -647,6 +817,47 @@ class RemoteMixin:
             git_proxy_cfg, git_proxy_error = _normalize_reverse_git_proxy(body.get('git_proxy'))
             if git_proxy_error:
                 raise RuntimeError(git_proxy_error)
+
+            existing_state = None
+            with _REMOTE_LOCK:
+                for state in _REMOTE_CONNECTIONS.values():
+                    if (
+                        state.get('ssh_command') == ssh_command
+                        and state.get('remote_workspace') == remote_workspace
+                        and int(state.get('remote_agent_port') or 0) == int(remote_port or 0)
+                        and _refresh_remote_state(state)
+                    ):
+                        existing_state = state
+                        break
+            if existing_state:
+                _remember_remote_connection(existing_state)
+                server_url = existing_state.get('server_url') or ''
+                try:
+                    workspace_info = _read_remote_workspace_info(server_url, timeout=6)
+                except Exception as e:
+                    workspace_info = {'ok': False, 'error': str(e)}
+                logs.append('Reused active local SSH tunnel from connection pool.')
+                return self.response.json(200, {
+                    'ok': True,
+                    'reused_existing': True,
+                    'reused_pool': True,
+                    'server_url': server_url,
+                    'local_port': int(existing_state.get('local_port') or 0),
+                    'remote_agent_port': int(existing_state.get('remote_agent_port') or 0),
+                    'remote_workspace': existing_state.get('remote_workspace') or remote_workspace,
+                    'tunnel_pid': existing_state.get('tunnel_pid'),
+                    'heartbeat_timeout': existing_state.get('heartbeat_timeout') or heartbeat_timeout,
+                    'reverse_git_proxy_enabled': bool(existing_state.get('reverse_git_proxy_url')),
+                    'reverse_git_proxy_url': existing_state.get('reverse_git_proxy_url') or '',
+                    'reverse_git_proxy_port': existing_state.get('reverse_git_proxy_port') or 0,
+                    'local_git_proxy_url': existing_state.get('local_git_proxy_url') or '',
+                    'connection_id': existing_state.get('connection_id') or '',
+                    'workspace_info': workspace_info,
+                    'connections': _remote_connections_public(),
+                    'logs': logs,
+                })
+
+            local_port = _pick_local_port(requested_local_port)
 
             if reuse_existing:
                 tunnel = None
@@ -683,8 +894,8 @@ class RemoteMixin:
                     server_url = f'http://127.0.0.1:{local_port}'
                     _wait_for_remote_agent(server_url, timeout=8)
                     workspace_info = _read_remote_workspace_info(server_url, timeout=6)
-                    _start_heartbeat(server_url, interval=max(5, min(20, heartbeat_timeout // 4 or 15)))
-                    _REMOTE_STATE.update({
+                    state = _remote_state_defaults()
+                    state.update({
                         'connected': True,
                         'ssh_command': ssh_command,
                         'remote_workspace': remote_workspace,
@@ -701,6 +912,8 @@ class RemoteMixin:
                         'started_at': _now_stamp(),
                         'last_error': '',
                     })
+                    _start_heartbeat(server_url, interval=max(5, min(20, heartbeat_timeout // 4 or 15)), state=state)
+                    _remember_remote_connection(state)
                     logs.append('快速连接成功：已复用远程 Agent。')
                     return self.response.json(200, {
                         'ok': True,
@@ -715,7 +928,9 @@ class RemoteMixin:
                         'reverse_git_proxy_url': reverse_git_proxy_url,
                         'reverse_git_proxy_port': reverse_git_proxy_port,
                         'local_git_proxy_url': local_git_proxy_url,
+                        'connection_id': state.get('connection_id'),
                         'workspace_info': workspace_info,
+                        'connections': _remote_connections_public(),
                         'logs': logs,
                     })
                 except Exception as e:
@@ -726,6 +941,7 @@ class RemoteMixin:
                             pass
                     logs.append(f'快速连接失败，{"降级完整启动流程" if fallback_on_reuse_failure else "不再重试"}：{e}')
                     if not fallback_on_reuse_failure:
+                        _release_local_port_reservation(local_port)
                         return self.response.json(200, {'ok': False, 'error': str(e), 'reused_existing': False, 'logs': logs})
 
             deployment_manifest = _deployment_manifest()
@@ -783,11 +999,13 @@ class RemoteMixin:
                 echo "python=$PY_BIN"
                 {deploy_cmd}
                 # 先停掉旧 Agent。只 kill pidfile 可能不够：pidfile 可能丢失/过期，或旧进程不是当前 pid。
-                if [ -f ~/.snake-agent/run/agent.pid ]; then
-                    oldpid=$(cat ~/.snake-agent/run/agent.pid 2>/dev/null || true)
+                pid_file="$HOME/.snake-agent/run/agent-{remote_port}.pid"
+                if [ -f "$pid_file" ]; then
+                    oldpid=$(cat "$pid_file" 2>/dev/null || true)
                     if [ -n "$oldpid" ]; then
                         kill "$oldpid" 2>/dev/null || true
                     fi
+                    rm -f "$pid_file"
                 fi
 
                 # 再清理占用目标端口的进程，避免新 Agent 启动后报 Address already in use。
@@ -809,7 +1027,7 @@ class RemoteMixin:
                 cd ~/.snake-agent/current
                 SNAKE_AGENT_LOGIN_SHELL="${{SNAKE_AGENT_LOGIN_SHELL:-${{SHELL:-/bin/sh}}}}" nohup "$PY_BIN" local_terminal_server.py --workspace {_remote_q(remote_workspace)} --host 127.0.0.1 --port {remote_port} --remote-heartbeat-timeout {heartbeat_timeout} > ~/.snake-agent/logs/remote-agent.log 2>&1 &
                 newpid=$!
-                echo $newpid > ~/.snake-agent/run/agent.pid
+                echo $newpid > "$pid_file"
                 sleep 1.5
                 if ! kill -0 "$newpid" 2>/dev/null; then
                     echo "远程 Agent 启动后立即退出，日志如下：" >&2
@@ -876,8 +1094,8 @@ class RemoteMixin:
                 workspace_info = {'ok': False, 'error': detail}
                 logs.append('读取远程工作区失败：' + detail[-3000:])
                 print(f"❌ [remote] workspace detail: {detail[-4000:]}", flush=True)
-            _start_heartbeat(server_url, interval=max(5, min(20, heartbeat_timeout // 4 or 15)))
-            _REMOTE_STATE.update({
+            state = _remote_state_defaults()
+            state.update({
                 'connected': True,
                 'ssh_command': ssh_command,
                 'remote_workspace': remote_workspace,
@@ -894,6 +1112,8 @@ class RemoteMixin:
                 'started_at': _now_stamp(),
                 'last_error': '',
             })
+            _start_heartbeat(server_url, interval=max(5, min(20, heartbeat_timeout // 4 or 15)), state=state)
+            _remember_remote_connection(state)
             self.response.json(200, {
                 'ok': True,
                 'server_url': server_url,
@@ -906,11 +1126,14 @@ class RemoteMixin:
                 'reverse_git_proxy_url': reverse_git_proxy_url,
                 'reverse_git_proxy_port': reverse_git_proxy_port,
                 'local_git_proxy_url': local_git_proxy_url,
+                'connection_id': state.get('connection_id'),
                 'workspace_info': workspace_info,
                 'deployment_cache_hit': deployment_cache_hit,
+                'connections': _remote_connections_public(),
                 'logs': logs,
             })
         except Exception as e:
+            _release_local_port_reservation(local_port)
             _REMOTE_STATE['last_error'] = str(e)
             self.response.json(200, {'ok': False, 'error': str(e), 'logs': logs})
         finally:
