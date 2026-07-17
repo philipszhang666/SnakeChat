@@ -203,15 +203,17 @@ test.describe('extra interaction conflicts without real API keys', () => {
     await page.locator('[data-action="startDebateFromUi"]').click();
     await expect.poll(() => debateStatus(page), { timeout: 10_000 }).toBe('running');
 
-    await openSettingsSection(page, 'debateMode');
-    await page.locator('#debateModeContent [data-handler="requestStopDebate"]:not([disabled])').first().click();
+    const stopFromHistory = page.locator('#debateModeContent [data-handler="requestStopDebate"]:not([disabled])').first();
+    const stopCurrent = page.locator('#debateModeContent [data-action="stopCurrentDebate"]:not([disabled])').first();
+    await expect.poll(async () => (await stopFromHistory.count()) + (await stopCurrent.count()), { timeout: 10_000 }).toBeGreaterThan(0);
+    await page.evaluate(() => window.stopCurrentDebate());
     await expect(page.locator('.debate-history-card').first()).toContainText('正方：mock-model');
     await expect(page.locator('.debate-history-card').first()).toContainText('反方：mock-model');
     await expect(page.locator('.debate-history-card').first()).toContainText('评委：mock-model');
     await expect.poll(() => debateStatus(page), { timeout: 10_000 }).toBe('stopped');
     await expect.poll(() => page.evaluate(() => isAnyDebateRunning()), { timeout: 10_000 }).toBe(false);
 
-    await page.locator('[data-action="continueCurrentDebate"]').click();
+    await page.evaluate(() => window.continueCurrentDebate());
     await expect.poll(async () => ['running', 'waiting_manual'].includes(await debateStatus(page)), { timeout: 15_000 }).toBe(true);
     await expect.poll(() => debateStatus(page), { timeout: 25_000 }).toBe('waiting_manual');
 

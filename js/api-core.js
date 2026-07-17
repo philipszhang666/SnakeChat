@@ -1849,9 +1849,7 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
         // 之前漏算导致 Plan/大纲/师生 模式的 token 都不进总账
         if (usageForRecord && typeof recordUsageFromResponse === 'function') {
           const _c = options.chat
-            || (options.chatId ? apiCoreChatById(options.chatId) : null)
-            || apiCoreActiveTaskChat()
-            || apiCoreCurrentChat();
+            || (options.chatId ? apiCoreChatById(options.chatId) : null);
           if (_c) recordUsageFromResponse(_c, usageForRecord, { model });
         }
         if (!String(content || '').trim()) {
@@ -2322,9 +2320,7 @@ async function runAgentLoop({
     }
     if (usageForAccounting && typeof recordUsageFromResponse === 'function') {
       const _c = chat
-        || (chatId ? apiCoreChatById(chatId) : null)
-        || apiCoreActiveTaskChat()
-        || apiCoreCurrentChat();
+        || (chatId ? apiCoreChatById(chatId) : null);
       if (_c) recordUsageFromResponse(_c, usageForAccounting, { model });
     }
     

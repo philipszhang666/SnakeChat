@@ -35,7 +35,8 @@ class FrontendModuleTests(unittest.TestCase):
             tools_js[save_start:build_start],
         )
         self.assertIn(
-            "toolVisibleForContext(t, options) && isValidToolParametersSchema(t.parameters)",
+            "nameCounts.get(t && t.name) === 1 && toolVisibleForContext(t, options) "
+            "&& isValidToolDefinition(t)",
             tools_js[build_start:],
         )
 
@@ -329,7 +330,7 @@ class FrontendModuleTests(unittest.TestCase):
             'let remoteAutoReconnectAttempted = false;',
             'function persistActiveRemoteConnection(info = {})',
             'function clearRemoteAutoReconnectFlag(binding = null)',
-            'function noteRemoteWorkspaceChanged(path)',
+            'function noteRemoteWorkspaceChanged(path, binding = null)',
             'function remoteProfileKey(sshCommand)',
             'function normalizeRemoteProfiles(profiles)',
             "const hasSavedSshCommand = Object.prototype.hasOwnProperty.call(rawConfig, 'sshCommand')",
@@ -359,6 +360,8 @@ class FrontendModuleTests(unittest.TestCase):
         ):
             self.assertIn(snippet, remote_connection_js)
 
+        self.assertIn('const workspaceRestore = restoreWorkspaceForCurrentChat({ resetFileExplorer: true });', main_js)
+        self.assertIn('workspaceRestore.catch(e => console.warn(\'[workspace] initial restore failed:\', e)).then(() => {', main_js)
         self.assertIn('const remoteInit = initRemoteConnection();', main_js)
         self.assertIn("remoteInit.catch(e => console.warn('[remote] init failed:', e));", main_js)
         self.assertIn('noteRemoteWorkspaceChanged(r.workspace || r.cwd);', utils_js)
@@ -438,7 +441,11 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('&& currentChatId === expectedChatId;', utils_js)
         self.assertIn('recordCurrentChatWorkspace(info)', utils_js)
         self.assertIn('function recordChatWorkspace(chat, info, options = {})', chat_js)
-        self.assertIn('chat.backend = captureCurrentBackendBinding();', chat_js)
+        snapshot_start = chat_js.index('function currentWorkspaceSnapshotForNewChat()')
+        snapshot_end = chat_js.index('function applyWorkspaceSnapshotToChat(chat, snapshot)')
+        snapshot_code = chat_js[snapshot_start:snapshot_end]
+        self.assertIn('if (current && current.backend && typeof current.backend === \'object\')', snapshot_code)
+        self.assertLess(snapshot_code.index("if (current && current.backend && typeof current.backend === 'object')"), snapshot_code.index('backend = captureCurrentBackendBinding();'))
         self.assertIn("chat.backend.remoteWorkspace = workspace;", chat_js)
         self.assertIn('async function restoreBackendForChat(chat, options = {})', chat_js)
         self.assertIn('let _chatWorkspaceRestoreToken = null;', chat_js)
@@ -459,7 +466,8 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('restoreWorkspaceForChat(chat);', chat_js)
         self.assertIn('applyWorkspaceSnapshotToChat(chatState.temporaryChat, workspaceSnapshot);', chat_js)
         self.assertIn('restoreWorkspaceForChat(chatState.temporaryChat);', chat_js)
-        self.assertIn('restoreWorkspaceForCurrentChat({ resetFileExplorer: false });', main_js)
+        self.assertIn('restoreWorkspaceForCurrentChat({ resetFileExplorer: true });', main_js)
+        self.assertLess(main_js.index('restoreWorkspaceForCurrentChat({ resetFileExplorer: true });'), main_js.index('initRemoteConnection();'))
         self.assertIn('function backendBindingForToolChat(chatId, context)', terminal_js)
         self.assertIn('function workspaceForToolChat(chatId, context)', terminal_js)
         self.assertIn('const auditWorkspace = workspaceForToolChat(chatId, context);', terminal_js)
@@ -480,6 +488,9 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertNotIn('const cleanupStaleRemote = async info => {', remote_connection_js)
         self.assertNotIn("await cleanupStaleRemote({ serverUrl: r.server_url, localPort: r.local_port });", remote_connection_js)
         self.assertIn('function remoteConnectionMatchesBinding(connection, binding)', remote_connection_js)
+        self.assertIn('if (b.connectionId && c.connectionId && b.connectionId !== c.connectionId) return false;', remote_connection_js)
+        self.assertIn('if (b.remoteWorkspace && c.remoteWorkspace && String(b.remoteWorkspace) !== String(c.remoteWorkspace)) return false;', remote_connection_js)
+        self.assertIn('const activeWorkspace = (activeConnection && activeConnection.remoteWorkspace) || profile.remoteWorkspace || cfg.remoteWorkspace || \'~/\';', remote_connection_js)
         self.assertIn('function findRemoteConnectionForBinding(binding, connections = REMOTE_CONNECTIONS_CACHE)', remote_connection_js)
         self.assertIn('function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE)', remote_connection_js)
         self.assertIn('remoteBindingNeedsConnection,', remote_connection_js)
@@ -489,6 +500,9 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('reuseExisting: true', remote_connection_js)
         self.assertIn('reuse_existing: !!opts.reuseExisting || autoReconnect', remote_connection_js)
         self.assertIn("target_server_url = (body.get('server_url') or '').strip()", remote_py)
+        self.assertIn("str(remote_workspace or '').strip()", remote_py)
+        self.assertIn("and (state.get('remote_workspace') or '') == remote_workspace", remote_py)
+        self.assertIn("if target_remote_workspace and target_remote_workspace != (state.get('remote_workspace') or ''):", remote_py)
         self.assertIn('_REMOTE_CONNECTIONS = {}', remote_py)
         self.assertIn('_LOCAL_PORT_RESERVATIONS = set()', remote_py)
         self.assertIn('def _remote_connections_public():', remote_py)
@@ -808,14 +822,14 @@ class FrontendModuleTests(unittest.TestCase):
         api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
 
         self.assertIn('const isMainToolStopRequested = () => {', api_core_js)
-        main_exec = 'const result = await ApiCoreOrchestrationService.executeTool(fname, args, {'
+        main_exec = 'await ApiCoreOrchestrationService.executeTool(fname, args, {'
         main_after_stop = 'if (isMainToolStopRequested()) {\n          userStoppedAll = true;\n          pruneToolCallsToExecuted(msg, executedToolCallIds);'
         main_prepare = 'const preparedToolResult = typeof prepareToolResultForContext'
         self.assertLess(api_core_js.index(main_exec), api_core_js.index(main_after_stop))
         self.assertLess(api_core_js.index(main_after_stop), api_core_js.index(main_prepare))
         self.assertIn("lastMsg.content = '*[已停止]*';", api_core_js)
 
-        loop_exec = 'const result = await ApiCoreOrchestrationService.executeTool(tc.name, args, runToolContext);'
+        loop_exec = 'await ApiCoreOrchestrationService.executeTool(tc.name, args, runToolContext)'
         loop_after_stop = "if (_isAborted()) {\n        if (assistantMsg.tool_calls) {"
         loop_emit = "_emit({ type: 'tool_result'"
         self.assertLess(api_core_js.index(loop_exec), api_core_js.index(loop_after_stop, api_core_js.index(loop_exec)))
@@ -1053,10 +1067,18 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('traceState.traces', trace_js)
         self.assertIn('traceState.currentId', trace_js)
         self.assertIn('traceState.settings', trace_js)
+        self.assertIn('const chatId = opts.chatId || meta.chatId ||', trace_js)
+        self.assertNotIn('traceState.activeTaskChatId || traceState.currentId', trace_js)
+        self.assertIn('function traceChatId(t)', trace_js)
+        self.assertIn('arr = arr.filter(t => traceChatId(t) === currentChatId);', trace_js)
+        self.assertIn('traceChatId(t) === traceState.currentId', trace_js)
+        self.assertIn('traceUserMessage(text || \'\', chat.id)', (ROOT / 'js' / 'ppt-mode.js').read_text(encoding='utf-8'))
         self.assertNotIn('window.state', trace_code)
         self.assertNotIn('state.', trace_code)
         self.assertNotIn('typeof state', trace_code)
         self.assertNotIn('onclick=', trace_js)
+        self.assertIn('traceUserMessage(text, c.id)', (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8'))
+        self.assertNotIn('traceUserMessage(text || \'\');', (ROOT / 'js' / 'ppt-mode.js').read_text(encoding='utf-8'))
         for delegated_attr in (
             'data-handler="copyTraceJson"',
             'data-handler="deleteTrace"',
@@ -3551,8 +3573,34 @@ class FrontendModuleTests(unittest.TestCase):
 
         self.assertRegex(
             file_explorer_js,
-            r"callAgentBackend\(\s*'delete_file',\s*\{ path: normalizedPath, recursive: true \}[\s\S]+fileExplorerBackendContext\(\{ skipConfirm: true \}\)"
+            r"callAgentBackend\(\s*'delete_file',\s*\{ path: normalizedPath, recursive: true \}[\s\S]+fileExplorerPathBackendContext\(normalizedPath, \{ skipConfirm: true \}\)"
         )
+
+    def test_async_context_prefers_explicit_chat_and_workspace(self):
+        tools_js = (ROOT / 'js' / 'tools.js').read_text(encoding='utf-8')
+        terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
+        api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
+        plan_core_js = (ROOT / 'js' / 'plan-core.js').read_text(encoding='utf-8')
+        outline_core_js = (ROOT / 'js' / 'outline-core.js').read_text(encoding='utf-8')
+        concurrent_requests_js = (ROOT / 'js' / 'concurrent-requests.js').read_text(encoding='utf-8')
+
+        self.assertIn('function _toolContextChatId(context = {})', tools_js)
+        self.assertIn('return (toolsState && toolsState.currentId) || \'\';', tools_js)
+        self.assertNotIn('toolsState.activeTaskChatId || toolsState.currentId', tools_js)
+        self.assertIn('function resolveToolChatId(context)', terminal_js)
+        self.assertIn('return (terminalState && terminalState.currentId) || \'\';', terminal_js)
+        self.assertNotIn('terminalState.currentId || terminalState.activeTaskChatId', terminal_js)
+
+        self.assertNotIn('|| apiCoreActiveTaskChat()\n            || apiCoreCurrentChat()', api_core_js)
+        self.assertNotIn('|| planCoreActiveTaskChat()', plan_core_js)
+        self.assertIn('const _c = recordChat || null;', outline_core_js)
+        self.assertNotIn('recordChat || outlineCoreActiveTaskChat()', outline_core_js)
+        self.assertIn('const targetChatId = chatId || \'\';', outline_core_js)
+
+        self.assertIn('function concurrentCurrentWorkspaceSnapshot()', concurrent_requests_js)
+        self.assertIn('(chat && (chat.workspace || chat.cwd))', concurrent_requests_js)
+        self.assertIn('sandboxBackend: workspace ? snapshot.backend : { type: \'local\' }', concurrent_requests_js)
+        self.assertIn('initial_dir: settings.sandboxWorkspace || snapshot.workspace || \'\'', concurrent_requests_js)
 
 
 if __name__ == '__main__':

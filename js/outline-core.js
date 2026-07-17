@@ -1869,7 +1869,7 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
   // ⭐ 保底收尾调用的 usage 也计入统计
   const usageForRecord = outlineNormalizeUsage(j.usage);
   if (usageForRecord && typeof recordUsageFromResponse === 'function') {
-    const _c = recordChat || outlineCoreActiveTaskChat();
+    const _c = recordChat || null;
     if (_c) recordUsageFromResponse(_c, usageForRecord, { model });
   }
   
@@ -1894,7 +1894,7 @@ async function doFinalSummaryCall(conversationMessages, history, systemPrompt, m
 // 把 outlineCoreState.pendingAIAttachments 中的项目转换为 user 消息注入到对话上下文，
 // 然后清空 pendingAIAttachments（防止 autoResend 在大纲结束后再触发新对话）
 function consumePendingAttachments(conversationMessages, outlineObj, chatId) {
-  const targetChatId = chatId || (typeof resolveToolChatId === 'function' ? resolveToolChatId() : outlineCoreState.currentId);
+  const targetChatId = chatId || '';
   const atts = typeof takePendingAIAttachments === 'function'
     ? takePendingAIAttachments(targetChatId)
     : ((outlineCoreState.pendingAIAttachments || []).splice(0));

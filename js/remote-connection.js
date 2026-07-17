@@ -181,19 +181,25 @@ function localBackendServerUrl() {
 function captureCurrentBackendBinding() {
   if (isRemoteAgentActive()) {
     const cfg = loadRemoteConnectionConfig();
-    const profile = remoteProfileForCommand(cfg, cfg.sshCommand) || {};
+    const activeServerUrl = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || '';
+    const activeConnection = (REMOTE_CONNECTIONS_CACHE || [])
+      .map(normalizeRemoteConnectionInfo)
+      .find(c => c.connected && c.serverUrl && c.serverUrl === activeServerUrl);
+    const activeSshCommand = activeConnection && activeConnection.sshCommand ? activeConnection.sshCommand : cfg.sshCommand;
+    const profile = remoteProfileForCommand(cfg, activeSshCommand) || {};
+    const activeWorkspace = (activeConnection && activeConnection.remoteWorkspace) || profile.remoteWorkspace || cfg.remoteWorkspace || '~/';
     return {
       type: 'remote',
       serverUrl: TERMINAL_CONFIG.serverUrl || '',
-      remoteGitProxyUrl: TERMINAL_CONFIG.remoteGitProxyUrl || '',
-      sshCommand: cfg.sshCommand || profile.sshCommand || '',
-      remoteWorkspace: cfg.remoteWorkspace || profile.remoteWorkspace || '~/',
-      remoteAgentPort: parseInt(cfg.remoteAgentPort || profile.remoteAgentPort, 10) || 8765,
-      localPort: parseInt(cfg.localPort || profile.localPort, 10) || 18765,
+      remoteGitProxyUrl: (activeConnection && activeConnection.remoteGitProxyUrl) || TERMINAL_CONFIG.remoteGitProxyUrl || '',
+      sshCommand: activeSshCommand || profile.sshCommand || '',
+      remoteWorkspace: activeWorkspace,
+      remoteAgentPort: parseInt((activeConnection && activeConnection.remoteAgentPort) || cfg.remoteAgentPort || profile.remoteAgentPort, 10) || 8765,
+      localPort: parseInt((activeConnection && activeConnection.localPort) || cfg.localPort || profile.localPort, 10) || 18765,
       heartbeatTimeout: Math.max(120, parseInt(cfg.heartbeatTimeout || profile.heartbeatTimeout, 10) || REMOTE_HEARTBEAT_DEFAULT_SECONDS),
       installDeps: cfg.installDeps !== false,
       encryptedPassword: cfg.encryptedPassword || profile.encryptedPassword || '',
-      connectionId: cfg.connectionId || profile.connectionId || '',
+      connectionId: (activeConnection && activeConnection.connectionId) || cfg.connectionId || profile.connectionId || '',
       updatedAt: Date.now()
     };
   }
@@ -259,17 +265,32 @@ function remoteConnectionMatchesBinding(connection, binding) {
   const c = normalizeRemoteConnectionInfo(connection);
   const b = normalizeBackendBinding(binding);
   if (b.type !== 'remote') return false;
-  if (b.connectionId && c.connectionId) return b.connectionId === c.connectionId;
-  if (b.serverUrl && c.serverUrl) return b.serverUrl === c.serverUrl;
+  if (b.connectionId && c.connectionId && b.connectionId !== c.connectionId) return false;
   if (!b.sshCommand || !c.sshCommand || remoteProfileKey(b.sshCommand) !== remoteProfileKey(c.sshCommand)) return false;
-  if (b.remoteWorkspace && c.remoteWorkspace && b.remoteWorkspace !== c.remoteWorkspace) return false;
   if (b.remoteAgentPort && c.remoteAgentPort && parseInt(b.remoteAgentPort, 10) !== parseInt(c.remoteAgentPort, 10)) return false;
+  if (b.remoteWorkspace && c.remoteWorkspace && String(b.remoteWorkspace) !== String(c.remoteWorkspace)) return false;
+  if (b.serverUrl && c.serverUrl && b.serverUrl !== c.serverUrl) return false;
   return true;
 }
 
 function findRemoteConnectionForBinding(binding, connections = REMOTE_CONNECTIONS_CACHE) {
   const list = Array.isArray(connections) ? connections : [];
   return list.map(normalizeRemoteConnectionInfo).find(c => c.connected && remoteConnectionMatchesBinding(c, binding)) || null;
+}
+
+function remoteProfileMatchesConnection(profile, connection) {
+  if (!profile || !connection || !profile.sshCommand || !connection.sshCommand) return false;
+  if (remoteProfileKey(profile.sshCommand) !== remoteProfileKey(connection.sshCommand)) return false;
+  const profilePort = parseInt(profile.remoteAgentPort, 10) || 0;
+  const connectionPort = parseInt(connection.remoteAgentPort, 10) || 0;
+  return !profilePort || !connectionPort || profilePort === connectionPort;
+}
+
+function remoteDisplayWorkspaceForConnection(connection, cfg = loadRemoteConnectionConfig()) {
+  const c = normalizeRemoteConnectionInfo(connection);
+  const profile = remoteProfileForCommand(cfg, c.sshCommand);
+  if (remoteProfileMatchesConnection(profile, c) && profile.remoteWorkspace) return profile.remoteWorkspace;
+  return c.remoteWorkspace || '~';
 }
 
 function remoteDisconnectPayloadForBinding(binding, extra = {}) {
@@ -291,7 +312,7 @@ function rememberConnectedRemoteFromResult(result = {}, source = {}) {
   const serverUrl = r.server_url || r.serverUrl || src.serverUrl || src.lastServerUrl || '';
   const localPort = parseInt(r.local_port || r.localPort || src.localPort, 10) || 18765;
   const remoteAgentPort = parseInt(r.remote_agent_port || r.remoteAgentPort || src.remoteAgentPort, 10) || 8765;
-  const remoteWorkspace = r.remote_workspace || r.remoteWorkspace || src.remoteWorkspace || '~/';
+  const remoteWorkspace = src.remoteWorkspace || r.remote_workspace || r.remoteWorkspace || '~/';
   const connectionId = r.connection_id || r.connectionId || src.connectionId || '';
   const remoteGitProxyUrl = r.reverse_git_proxy_url || r.remoteGitProxyUrl || src.remoteGitProxyUrl || '';
   const cfg = loadRemoteConnectionConfig();
@@ -332,6 +353,7 @@ function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE) {
   const el = document.getElementById('remoteConnectionsList');
   if (!el) return;
   const list = (Array.isArray(connections) ? connections : []).map(normalizeRemoteConnectionInfo);
+  const cfg = loadRemoteConnectionConfig();
   if (!list.length) {
     el.innerHTML = '<div class="remote-connections-empty">暂无远程连接</div>';
     return;
@@ -345,6 +367,7 @@ function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE) {
       c.tunnelPid ? `PID ${c.tunnelPid}` : '',
       c.startedAt || ''
     ].filter(Boolean).join(' · ');
+    const workspace = remoteDisplayWorkspaceForConnection(c, cfg);
     return `
       <button class="remote-connection-item ${state}" type="button" data-connection-id="${remoteEscapeHtml(c.connectionId)}" data-server-url="${remoteEscapeHtml(c.serverUrl)}">
         <span class="remote-connection-item-head">
@@ -352,7 +375,7 @@ function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE) {
           <span class="remote-connection-command">${remoteEscapeHtml(c.sshCommand || '(unknown ssh)')}</span>
           <span class="remote-connection-state">${statusText}</span>
         </span>
-        <span class="remote-connection-workspace">${remoteEscapeHtml(c.remoteWorkspace || '~')}</span>
+        <span class="remote-connection-workspace">${remoteEscapeHtml(workspace)}</span>
         <span class="remote-connection-meta">${remoteEscapeHtml(meta || '未分配本地端口')}</span>
         ${c.lastError ? `<span class="remote-connection-error">${remoteEscapeHtml(c.lastError)}</span>` : ''}
       </button>
@@ -368,12 +391,15 @@ function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE) {
       REMOTE_SELECTED_CONNECTION = target;
       const cfg = loadRemoteConnectionConfig();
       const profile = remoteProfileForCommand(cfg, target.sshCommand) || {};
+      const workspace = remoteProfileMatchesConnection(profile, target)
+        ? (profile.remoteWorkspace || target.remoteWorkspace)
+        : target.remoteWorkspace;
       const password = await remoteDecryptPassword(profile.encryptedPassword || cfg.encryptedPassword || '');
       applyRemoteConfigToForm({
         ...cfg,
         ...profile,
         sshCommand: target.sshCommand,
-        remoteWorkspace: target.remoteWorkspace,
+        remoteWorkspace: workspace,
         remoteAgentPort: target.remoteAgentPort,
         localPort: target.localPort || profile.localPort || cfg.localPort,
         connectionId: target.connectionId,
@@ -388,11 +414,32 @@ function renderRemoteConnectionsList(connections = REMOTE_CONNECTIONS_CACHE) {
 function activeRemoteMatchesBinding(binding) {
   const b = normalizeBackendBinding(binding);
   if (b.type !== 'remote' || !isRemoteAgentActive()) return false;
+  const activeServerUrl = String((typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || '');
+
+  const activeConnection = (REMOTE_CONNECTIONS_CACHE || [])
+    .map(normalizeRemoteConnectionInfo)
+    .find(c => c.connected && c.serverUrl && String(c.serverUrl) === activeServerUrl);
+  if (activeConnection) return remoteConnectionMatchesBinding(activeConnection, b);
+
+  if (b.serverUrl && activeServerUrl === String(b.serverUrl)) return true;
+
   const cfg = loadRemoteConnectionConfig();
+  const cfgServerUrl = String(cfg.lastServerUrl || '');
+  if (!cfgServerUrl || cfgServerUrl !== activeServerUrl) return false;
   if (b.connectionId && cfg.connectionId && b.connectionId === cfg.connectionId) return true;
-  if (b.serverUrl && String(TERMINAL_CONFIG.serverUrl || '') === String(b.serverUrl)) return true;
   return remoteProfileKey(cfg.sshCommand) === remoteProfileKey(b.sshCommand)
-    && (parseInt(cfg.remoteAgentPort, 10) || 8765) === (parseInt(b.remoteAgentPort, 10) || 8765);
+    && (parseInt(cfg.remoteAgentPort, 10) || 8765) === (parseInt(b.remoteAgentPort, 10) || 8765)
+    && (!b.remoteWorkspace || !cfg.remoteWorkspace || String(cfg.remoteWorkspace) === String(b.remoteWorkspace));
+}
+
+function currentChatBackendBinding() {
+  try {
+    const stateModule = window.AgentApp && window.AgentApp.require && window.AgentApp.require('state');
+    const chat = stateModule && typeof stateModule.currentChat === 'function' ? stateModule.currentChat() : null;
+    return chat && chat.backend && typeof chat.backend === 'object' ? chat.backend : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 function remoteBindingNeedsConnection(binding) {
@@ -580,24 +627,56 @@ function clearRemoteAutoReconnectFlag(binding = null) {
   return next;
 }
 
-function noteRemoteWorkspaceChanged(path) {
+function noteRemoteWorkspaceChanged(path, binding = null) {
   const workspace = String(path || '').trim();
   if (!workspace || !isRemoteAgentActive()) return;
+  const b = binding ? normalizeBackendBinding(binding) : normalizeBackendBinding(currentChatBackendBinding() || {});
   const cfg = loadRemoteConnectionConfig();
+  const activeServerUrl = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || '';
+  const activeConnection = (REMOTE_CONNECTIONS_CACHE || [])
+    .map(normalizeRemoteConnectionInfo)
+    .find(c => c.connected && c.serverUrl && c.serverUrl === activeServerUrl);
+  if (b.type === 'remote' && activeServerUrl) {
+    const bindingMatchesActive = (b.serverUrl && b.serverUrl === activeServerUrl)
+      || (activeConnection && remoteConnectionMatchesBinding(activeConnection, b));
+    if (!bindingMatchesActive) return;
+  }
+  const sshCommand = remoteProfileKey(
+    (b.type === 'remote' && b.sshCommand)
+    || (activeConnection && activeConnection.sshCommand)
+    || cfg.sshCommand
+  );
+  if (!sshCommand) return;
+  REMOTE_CONNECTIONS_CACHE = (REMOTE_CONNECTIONS_CACHE || []).map(connection => {
+    const c = normalizeRemoteConnectionInfo(connection);
+    const shouldUpdate = (activeConnection && remoteConnectionMatchesBinding(c, activeConnection))
+      || (b.type === 'remote' && remoteConnectionMatchesBinding(c, b))
+      || (c.serverUrl && c.serverUrl === activeServerUrl);
+    return shouldUpdate ? { ...c, remoteWorkspace: workspace } : c;
+  });
   const next = {
     ...cfg,
+    sshCommand,
     remoteWorkspace: workspace,
     autoReconnect: true,
     lastConnectedAt: Date.now(),
-    lastServerUrl: TERMINAL_CONFIG.serverUrl || ''
+    lastServerUrl: activeServerUrl,
+    connectionId: (b.type === 'remote' && b.connectionId) || (activeConnection && activeConnection.connectionId) || cfg.connectionId || '',
+    remoteAgentPort: (b.type === 'remote' && b.remoteAgentPort) || (activeConnection && activeConnection.remoteAgentPort) || cfg.remoteAgentPort,
+    localPort: (b.type === 'remote' && b.localPort) || (activeConnection && activeConnection.localPort) || cfg.localPort
   };
-  upsertRemoteProfile(next, next.sshCommand, {
+  upsertRemoteProfile(next, sshCommand, {
     remoteWorkspace: workspace,
+    remoteAgentPort: next.remoteAgentPort,
+    localPort: next.localPort,
     autoReconnect: true,
     lastConnectedAt: next.lastConnectedAt,
-    lastServerUrl: next.lastServerUrl
+    lastServerUrl: next.lastServerUrl,
+    connectionId: next.connectionId,
+    remoteGitProxyUrl: (b.type === 'remote' && b.remoteGitProxyUrl) || cfg.remoteGitProxyUrl || ''
   });
   saveRemoteConnectionConfig(next);
+  renderRemoteConnectionsList(REMOTE_CONNECTIONS_CACHE);
 }
 
 function setRemoteStatus(message, kind = '') {
@@ -1064,6 +1143,25 @@ async function connectRemoteAgent(options = {}) {
       console.error('[remote] workspace read failed', { response: r, workspaceInfo });
       throw new Error('远程 Agent 已启动，但无法读取远程工作区：' + detail);
     }
+    const requestedWorkspace = String(v.remoteWorkspace || '').trim();
+    const currentRemoteWorkspace = String((workspaceInfo && (workspaceInfo.workspace || workspaceInfo.cwd)) || '').trim();
+    if (requestedWorkspace && currentRemoteWorkspace && currentRemoteWorkspace !== requestedWorkspace && typeof workspaceBackendAction === 'function') {
+      const switchedWorkspace = await workspaceBackendAction('set_workspace', { path: requestedWorkspace });
+      if (!switchedWorkspace || switchedWorkspace.ok === false) {
+        throw new Error((switchedWorkspace && switchedWorkspace.error) || '切换远程沙箱目录失败');
+      }
+      workspaceInfo = switchedWorkspace;
+    }
+    if (!isCurrent()) {
+      return {
+        ok: false,
+        stale: true,
+        serverUrl: r.server_url,
+        localPort: r.local_port,
+        remoteAgentPort: r.remote_agent_port,
+        connectionId: r.connection_id || ''
+      };
+    }
     if (!opts.suppressWorkspaceUi && canUpdateStatusUi() && typeof updateWorkspaceDisplay === 'function') {
       updateWorkspaceDisplay(workspaceInfo);
     }
@@ -1237,6 +1335,8 @@ disconnectRemoteAgent = async function(options = {}) {
 async function initRemoteConnection() {
   if (remoteAutoReconnectAttempted) return;
   remoteAutoReconnectAttempted = true;
+  const currentBinding = currentChatBackendBinding();
+  if (currentBinding && currentBinding.type) return;
   const cfg = loadRemoteConnectionConfig();
   if (!cfg.autoReconnect || !cfg.sshCommand || !cfg.remoteWorkspace) return;
   if (isRemoteAgentActive()) return;

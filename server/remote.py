@@ -103,13 +103,16 @@ def _public_remote_state(state):
 def _remember_remote_connection(state):
     if not state:
         return state
-    key = state.get('connection_id') or _remote_connection_key(
+    old_key = state.get('connection_id') or ''
+    key = _remote_connection_key(
         state.get('ssh_command'),
         state.get('remote_workspace'),
         state.get('remote_agent_port'),
     )
     state['connection_id'] = key
     with _REMOTE_LOCK:
+        if old_key and old_key != key:
+            _REMOTE_CONNECTIONS.pop(old_key, None)
         _REMOTE_CONNECTIONS[key] = state
         _REMOTE_STATE.clear()
         _REMOTE_STATE.update(state)
@@ -131,17 +134,18 @@ def _remote_connection_matches(state, body):
     except Exception:
         target_remote_port = 0
     target_connection_id = (body.get('connection_id') or '').strip()
-    if target_connection_id:
-        return target_connection_id == (state.get('connection_id') or '')
-    if target_server_url:
-        return target_server_url == (state.get('server_url') or '')
+    if target_connection_id and target_connection_id != (state.get('connection_id') or ''):
+        return False
+    if target_server_url and target_server_url != (state.get('server_url') or ''):
+        return False
+    has_connection_selector = bool(target_ssh_command or target_remote_port or target_local_port or target_server_url)
     if target_ssh_command and target_ssh_command != (state.get('ssh_command') or ''):
         return False
-    if target_remote_workspace and target_remote_workspace != (state.get('remote_workspace') or ''):
-        return False
-    if target_local_port and target_local_port != int(state.get('local_port') or 0):
+    if target_local_port and not target_ssh_command and not target_remote_port and target_local_port != int(state.get('local_port') or 0):
         return False
     if target_remote_port and target_remote_port != int(state.get('remote_agent_port') or 0):
+        return False
+    if target_remote_workspace and target_remote_workspace != (state.get('remote_workspace') or ''):
         return False
     return True
 
@@ -823,7 +827,7 @@ class RemoteMixin:
                 for state in _REMOTE_CONNECTIONS.values():
                     if (
                         state.get('ssh_command') == ssh_command
-                        and state.get('remote_workspace') == remote_workspace
+                        and (state.get('remote_workspace') or '') == remote_workspace
                         and int(state.get('remote_agent_port') or 0) == int(remote_port or 0)
                         and _refresh_remote_state(state)
                     ):

@@ -352,7 +352,7 @@ function resolveToolChatId(context) {
   if (typeof context === 'string') return context;
   if (context && context.chatId) return context.chatId;
   if (context && context.chat && context.chat.id) return context.chat.id;
-  return (terminalState && (terminalState.currentId || terminalState.activeTaskChatId)) || '';
+  return (terminalState && terminalState.currentId) || '';
 }
 
 function getTaskAllowForChat(chatId) {

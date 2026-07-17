@@ -1227,7 +1227,7 @@ function queuePptMidrunGuidanceFromComposer(chat, input, text) {
     input.value = '';
     input.style.height = 'auto';
   }
-  if (typeof traceUserMessage === 'function') traceUserMessage(text || '');
+  if (typeof traceUserMessage === 'function') traceUserMessage(text || '', chat.id);
   if (!Array.isArray(msg.pptMode.guidance)) msg.pptMode.guidance = [];
   msg.pptMode.guidance.push({
     message: text || '',

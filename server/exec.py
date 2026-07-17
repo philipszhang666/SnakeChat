@@ -137,6 +137,46 @@ def _shell_kwargs_for_subprocess():
     return {'executable': shell}
 
 
+def _login_shell_for_subprocess():
+    if os.name == 'nt':
+        return ''
+    shell = os.environ.get('SNAKE_AGENT_LOGIN_SHELL') or os.environ.get('SHELL') or ''
+    shell = shell.strip()
+    if not shell or not os.path.isabs(shell) or not os.path.exists(shell):
+        return ''
+    name = os.path.basename(shell).lower()
+    if name not in _POSIX_COMMAND_SHELLS:
+        return ''
+    return shell
+
+
+def _login_shell_env_prelude(shell):
+    name = os.path.basename(str(shell or '')).lower()
+    if name in ('bash', 'sh', 'dash', 'ksh', 'mksh'):
+        return (
+            'if [ -r /etc/profile ]; then . /etc/profile >/dev/null 2>&1 || true; fi; '
+            'if [ -r ~/.bash_profile ]; then . ~/.bash_profile >/dev/null 2>&1 || true; '
+            'elif [ -r ~/.bash_login ]; then . ~/.bash_login >/dev/null 2>&1 || true; '
+            'elif [ -r ~/.profile ]; then . ~/.profile >/dev/null 2>&1 || true; fi; '
+            'if [ -r ~/.bashrc ]; then . ~/.bashrc >/dev/null 2>&1 || true; fi; '
+        )
+    if name == 'zsh':
+        return (
+            'if [ -r /etc/zprofile ]; then . /etc/zprofile >/dev/null 2>&1 || true; fi; '
+            'if [ -r ~/.zprofile ]; then . ~/.zprofile >/dev/null 2>&1 || true; fi; '
+            'if [ -r ~/.zshrc ]; then . ~/.zshrc >/dev/null 2>&1 || true; fi; '
+        )
+    return ''
+
+
+def _wrap_command_for_login_shell(command, cwd_abs):
+    shell = _login_shell_for_subprocess()
+    if not shell:
+        return command
+    inner = f'{_login_shell_env_prelude(shell)}cd {shlex.quote(str(cwd_abs))} && {command}'
+    return f'exec {shlex.quote(shell)} -lc {shlex.quote(inner)}'
+
+
 def _split_ssh_command(command):
     command = (command or '').strip()
     if not command:
@@ -366,6 +406,7 @@ class ExecMixin:
 
     def _start_background_command(self, command, cwd_abs, env=None, body=None, kind='execute'):
         body = body or {}
+        command = _wrap_command_for_login_shell(command, cwd_abs)
         max_runtime = coerce_command_task_runtime(
             body.get('max_runtime') or body.get('background_timeout') or body.get('task_timeout')
         )
@@ -449,6 +490,7 @@ class ExecMixin:
 
     def _run_command_until_foreground_timeout(self, command, cwd_abs, env=None, body=None, timeout=60, kind='execute'):
         body = body or {}
+        command = _wrap_command_for_login_shell(command, cwd_abs)
         max_runtime = coerce_command_task_runtime(
             body.get('max_runtime') or body.get('background_timeout') or body.get('task_timeout')
         )

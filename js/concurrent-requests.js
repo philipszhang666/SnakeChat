@@ -65,29 +65,42 @@ function _concurrentSandboxBackendLabel(settings = loadConcurrentRequestSettings
   return backend.type === 'remote' ? '远程' : '本地';
 }
 
+function concurrentCurrentWorkspaceSnapshot() {
+  const chat = concurrentRequestsCurrentChat();
+  const workspace = String(
+    (chat && (chat.workspace || chat.cwd))
+    || (typeof TERMINAL_CONFIG !== 'undefined' ? (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd || '') : '')
+  ).trim();
+  const backend = chat && chat.backend && typeof chat.backend === 'object'
+    ? { ...chat.backend }
+    : (typeof captureCurrentBackendBinding === 'function' ? captureCurrentBackendBinding() : { type: 'local' });
+  if (backend && backend.type === 'remote' && workspace) backend.remoteWorkspace = workspace;
+  return { workspace, backend };
+}
+
 function concurrentSandboxWorkspaceChanged(value) {
   const workspace = String(value || '').trim();
+  const snapshot = concurrentCurrentWorkspaceSnapshot();
   saveConcurrentRequestSettings({
     sandboxWorkspace: workspace,
-    sandboxBackend: workspace && typeof captureCurrentBackendBinding === 'function'
-      ? captureCurrentBackendBinding()
-      : { type: 'local' }
+    sandboxBackend: workspace ? snapshot.backend : { type: 'local' }
   });
   renderConcurrentRequestsModal();
 }
 
 async function chooseConcurrentSandboxWorkspace() {
   const settings = loadConcurrentRequestSettings();
+  const snapshot = concurrentCurrentWorkspaceSnapshot();
   try {
     const r = await workspaceBackendAction('choose_workspace_directory', {
-      initial_dir: settings.sandboxWorkspace || (typeof TERMINAL_CONFIG !== 'undefined' ? (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd || '') : '')
+      initial_dir: settings.sandboxWorkspace || snapshot.workspace || ''
     });
     if (r && r.cancelled) return;
     if (!r || r.ok === false) throw new Error((r && r.error) || '选择沙箱目录失败');
     const workspace = r.workspace || r.cwd || '';
     saveConcurrentRequestSettings({
       sandboxWorkspace: workspace,
-      sandboxBackend: typeof captureCurrentBackendBinding === 'function' ? captureCurrentBackendBinding() : { type: 'local' }
+      sandboxBackend: snapshot.backend
     });
     renderConcurrentRequestsModal();
     ConcurrentRequestsUiService.toast('已设置并发请求沙箱目录');

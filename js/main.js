@@ -112,17 +112,6 @@ async function init() {
   if (typeof initRemoteControl === 'function') {
     try { initRemoteControl(); } catch (e) { console.warn('[remote-control] init failed:', e); }
   }
-  if (typeof initRemoteConnection === 'function') {
-    try {
-      const remoteInit = initRemoteConnection();
-      if (remoteInit && typeof remoteInit.catch === 'function') {
-        remoteInit.catch(e => console.warn('[remote] init failed:', e));
-      }
-    } catch (e) {
-      console.warn('[remote] init failed:', e);
-    }
-  }
-  
   // 6. 鏇存柊搴曢儴鐘舵€佷俊鎭?
   MainUiService.updateSendBtn();
   
@@ -132,9 +121,31 @@ async function init() {
   // 猸?7.5 鍚姩鏃舵娴嬫矙绠辩洰褰曪紝骞舵瘡 30s 蹇冭烦涓€娆?
   if (typeof refreshWorkspaceInfo === 'function') {
     if (typeof restoreWorkspaceForCurrentChat === 'function' && mainState().currentId) {
-      restoreWorkspaceForCurrentChat({ resetFileExplorer: false });
+      const workspaceRestore = restoreWorkspaceForCurrentChat({ resetFileExplorer: true });
+      if (workspaceRestore && typeof workspaceRestore.then === 'function' && typeof initRemoteConnection === 'function') {
+        workspaceRestore.catch(e => console.warn('[workspace] initial restore failed:', e)).then(() => {
+          try {
+            const remoteInit = initRemoteConnection();
+            if (remoteInit && typeof remoteInit.catch === 'function') {
+              remoteInit.catch(e => console.warn('[remote] init failed:', e));
+            }
+          } catch (e) {
+            console.warn('[remote] init failed:', e);
+          }
+        });
+      }
     } else {
       refreshWorkspaceInfo();
+      if (typeof initRemoteConnection === 'function') {
+        try {
+          const remoteInit = initRemoteConnection();
+          if (remoteInit && typeof remoteInit.catch === 'function') {
+            remoteInit.catch(e => console.warn('[remote] init failed:', e));
+          }
+        } catch (e) {
+          console.warn('[remote] init failed:', e);
+        }
+      }
     }
     setInterval(refreshWorkspaceInfo, 30000);
   }

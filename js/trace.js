@@ -91,9 +91,14 @@ function _fmtDur(ms) {
  * 开启一个 trace，返回 id；调用 traceEnd(id, output, status) 收尾
  */
 function traceStart(opts) {
+  opts = opts || {};
+  const meta = opts.meta || {};
+  // 优先使用调用方明确传入的 chatId。不能无脑用 activeTaskChatId，
+  // 否则当前对话发送/查看日志时，可能被其他后台生成中的对话串台。
+  const chatId = opts.chatId || meta.chatId || traceState.currentId || null;
   const t = {
     id: _traceId(),
-    chatId: (traceState.activeTaskChatId || traceState.currentId) || null,
+    chatId,
     type: opts.type || 'misc',       // api | tool | plan | reflection | user | system
     role: opts.role || '',
     title: opts.title || '(untitled)',
@@ -104,7 +109,7 @@ function traceStart(opts) {
     input: opts.input != null ? opts.input : null,
     output: null,
     error: null,
-    meta: opts.meta || {}
+    meta
   };
   traceState.traces.push(t);
   if (traceState.traces.length > TRACE_MAX) traceState.traces.splice(0, traceState.traces.length - TRACE_MAX);
@@ -213,6 +218,7 @@ function installTraceHooks() {
     const _origExec = window.executeTool;
     window.executeTool = async function(name, args, context) {
       const id = traceStart({
+        chatId: context && context.chatId,
         type: 'tool',
         role: 'tool',
         title: name,
@@ -260,9 +266,10 @@ function installTraceHooks() {
 }
 
 // ---------- 暴露给 chat.js 等的轻量 API（可选调用） ----------
-function traceUserMessage(text) {
+function traceUserMessage(text, chatId = null) {
   if (!text) return;
   traceLog({
+    chatId: chatId || traceState.currentId || null,
     type: 'user',
     role: 'user',
     title: text.length > 60 ? text.slice(0, 60) + '…' : text,
@@ -294,10 +301,15 @@ function toggleTracePanel() {
   else openTracePanel();
 }
 
+function traceChatId(t) {
+  return (t && (t.chatId || (t.meta && t.meta.chatId))) || null;
+}
+
 function _getFilteredTraces() {
   let arr = traceState.traces.slice();
   if (traceState._traceFilter === 'session' && traceState.currentId) {
-    arr = arr.filter(t => t.chatId === traceState.currentId);
+    const currentChatId = traceState.currentId;
+    arr = arr.filter(t => traceChatId(t) === currentChatId);
   }
   const q = (document.getElementById('traceSearchInput')?.value || '').trim().toLowerCase();
   if (q) {
@@ -340,7 +352,9 @@ function renderTracePanel() {
   const body = document.getElementById('traceBody');
   if (!body) return;
   const all = traceState.traces.length;
-  const sessionCount = traceState.currentId ? traceState.traces.filter(t => t.chatId === traceState.currentId).length : 0;
+  const sessionCount = traceState.currentId
+    ? traceState.traces.filter(t => traceChatId(t) === traceState.currentId).length
+    : 0;
   const list = _getFilteredTraces();
 
   // 头部统计
@@ -444,7 +458,7 @@ function clearAllTraces() {
 function clearSessionTraces() {
   if (!traceState.currentId) return;
   if (!confirm('清空当前会话的 Trace？')) return;
-  traceState.traces = traceState.traces.filter(t => t.chatId !== traceState.currentId);
+  traceState.traces = traceState.traces.filter(t => traceChatId(t) !== traceState.currentId);
   saveTraces();
   renderTracePanel();
   _updateTraceBadge();

@@ -1,4 +1,4 @@
-﻿const ChatStateModule = window.AgentApp.require('state');
+const ChatStateModule = window.AgentApp.require('state');
 const chatState = ChatStateModule.state;
 const chatSaveData = ChatStateModule.saveData;
 const chatPersistSettings = ChatStateModule.persistSettings;
@@ -232,7 +232,7 @@ function queueMidrunGuidance(chat, input, text) {
     task.pendingGuidance = userMsg;
     task.guidanceRequested = true;
   }
-  if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof traceUserMessage === 'function') traceUserMessage(text, chat.id);
   if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   _clearComposerAfterSend(input);
 
@@ -348,15 +348,15 @@ function chatDesiredWorkspace(chat) {
 function currentWorkspaceSnapshotForNewChat() {
   const current = chatCurrentChat();
   let backend = null;
-  if (typeof captureCurrentBackendBinding === 'function') {
-    backend = captureCurrentBackendBinding();
-  } else if (current && current.backend && typeof current.backend === 'object') {
+  if (current && current.backend && typeof current.backend === 'object') {
     backend = current.backend;
+  } else if (typeof captureCurrentBackendBinding === 'function') {
+    backend = captureCurrentBackendBinding();
   }
   const workspace = String(
     (current && (current.workspace || current.cwd))
-    || (typeof TERMINAL_CONFIG !== 'undefined' && (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd))
     || (backend && backend.remoteWorkspace)
+    || (typeof TERMINAL_CONFIG !== 'undefined' && (TERMINAL_CONFIG.workspace || TERMINAL_CONFIG.cwd))
     || ''
   ).trim();
   backend = backend && typeof backend === 'object' ? { ...backend } : { type: 'local' };
@@ -443,6 +443,9 @@ async function restoreWorkspaceForChat(chat, options = {}) {
     if (typeof updateWorkspaceDisplay === 'function') updateWorkspaceDisplay(r, { persistToChat: false });
     recordChatWorkspace(chat, r);
     chatSaveData();
+    if (chat.backend && chat.backend.type === 'remote' && typeof noteRemoteWorkspaceChanged === 'function') {
+      noteRemoteWorkspaceChanged(r.workspace || r.cwd || desired, chat.backend);
+    }
     if (typeof refreshWorkspaceDependentContext === 'function') refreshWorkspaceDependentContext();
     if (options.resetFileExplorer !== false && typeof resetFileExplorerToRoot === 'function') resetFileExplorerToRoot();
     return r;
@@ -588,7 +591,7 @@ async function submitEditResend(input) {
   delete c.compressedContext;
   c.messages.push(userMsg);
   if (c.messages.length === 1) c.title = (text || '附件对话').slice(0, 30);
-  if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof traceUserMessage === 'function') traceUserMessage(text, c.id);
   if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   if (typeof maybeInsertBeacon === 'function') {
     try { maybeInsertBeacon(c); } catch (e) { console.warn('[beacon] 插入失败:', e); }
@@ -2030,7 +2033,7 @@ async function onSend() {
   if (c.messages.length === 1) c.title = (text || '附件对话').slice(0, 30);
   
   // ⭐ Trace: 记录一条用户消息（仅本地）
-  if (typeof traceUserMessage === 'function') traceUserMessage(text);
+  if (typeof traceUserMessage === 'function') traceUserMessage(text, c.id);
   if (typeof recordPromptHistory === 'function') recordPromptHistory(text);
   
   // 🧪 自动信标：在最新 user 消息之前可能插入一条隐藏的"记代号"消息

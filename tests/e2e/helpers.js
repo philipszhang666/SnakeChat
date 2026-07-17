@@ -1053,17 +1053,159 @@ function takeMockBackendFailure(action, body, state = {}) {
   return { ok: false, error: (failure && failure.error) || `mock ${action} failure` };
 }
 
-function agentBackendPayload(action, body, state = {}) {
+function normalizeMockBackendUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+function normalizeMockSshCommand(command) {
+  return String(command || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeMockRemoteWorkspace(workspace) {
+  return String(workspace || '~/project').trim() || '~/project';
+}
+
+function mockRemoteConnectionId(sshCommand, remoteWorkspace, remoteAgentPort) {
+  const command = normalizeMockSshCommand(sshCommand).replace(/[^A-Za-z0-9_.@-]+/g, '_') || 'remote';
+  const workspace = normalizeMockRemoteWorkspace(remoteWorkspace).replace(/[^A-Za-z0-9_.@-]+/g, '_') || 'workspace';
+  return `mock-${command}-${workspace}-${Number(remoteAgentPort) || 8765}`;
+}
+
+function mockRemoteConnections(state = {}) {
+  if (!Array.isArray(state.remoteConnections)) state.remoteConnections = [];
+  return state.remoteConnections;
+}
+
+function normalizeMockRemoteConnection(connection = {}) {
+  const remoteAgentPort = Number(connection.remote_agent_port || connection.remoteAgentPort || 8765) || 8765;
+  const localPort = Number(connection.local_port || connection.localPort || 18765) || 18765;
+  const sshCommand = normalizeMockSshCommand(connection.ssh_command || connection.sshCommand || 'ssh e2e@example.test');
+  const serverUrl = normalizeMockBackendUrl(connection.server_url || connection.serverUrl || `http://127.0.0.1:${localPort}`);
+  const remoteWorkspace = normalizeMockRemoteWorkspace(connection.remote_workspace || connection.remoteWorkspace || '~/project');
+  return {
+    connected: connection.connected !== false,
+    ssh_command: sshCommand,
+    remote_workspace: remoteWorkspace,
+    remote_agent_port: remoteAgentPort,
+    local_port: localPort,
+    server_url: serverUrl,
+    tunnel_pid: connection.tunnel_pid || connection.tunnelPid || (connection.connected === false ? null : 4242 + localPort),
+    started_at: connection.started_at || connection.startedAt || 'mock-started',
+    last_error: connection.last_error || connection.lastError || '',
+    reverse_git_proxy_url: connection.reverse_git_proxy_url || connection.remoteGitProxyUrl || '',
+    connection_id: connection.connection_id || connection.connectionId || mockRemoteConnectionId(sshCommand, remoteWorkspace, remoteAgentPort)
+  };
+}
+
+function mockRemoteConnectionMatches(connection, body = {}) {
+  const c = normalizeMockRemoteConnection(connection);
+  const connectionId = body.connection_id || body.connectionId || '';
+  if (connectionId && connectionId !== c.connection_id) return false;
+  const serverUrl = normalizeMockBackendUrl(body.server_url || body.serverUrl || '');
+  const sshCommand = normalizeMockSshCommand(body.ssh_command || body.sshCommand || '');
+  if (sshCommand && sshCommand !== c.ssh_command) return false;
+  const remoteAgentPort = Number(body.remote_agent_port || body.remoteAgentPort || 0) || 0;
+  if (remoteAgentPort && remoteAgentPort !== c.remote_agent_port) return false;
+  const remoteWorkspace = normalizeMockRemoteWorkspace(body.remote_workspace || body.remoteWorkspace || '');
+  if (remoteWorkspace !== '~/project' && remoteWorkspace !== c.remote_workspace) return false;
+  if (serverUrl && serverUrl !== c.server_url && !sshCommand && !remoteAgentPort && remoteWorkspace === '~/project') return false;
+  const localPort = Number(body.local_port || body.localPort || 0) || 0;
+  if (localPort && !sshCommand && !remoteAgentPort && localPort !== c.local_port) return false;
+  return !!(connectionId || serverUrl || sshCommand || remoteAgentPort || localPort || remoteWorkspace !== '~/project');
+}
+
+function findMockRemoteConnection(state = {}, body = {}) {
+  const connections = mockRemoteConnections(state)
+    .map(normalizeMockRemoteConnection)
+    .filter(connection => connection.connected);
+  return connections.find(connection => mockRemoteConnectionMatches(connection, body))
+    || connections.find(connection => connection.server_url === normalizeMockBackendUrl(state.remoteServerUrl || ''))
+    || connections[0]
+    || null;
+}
+
+function upsertMockRemoteConnection(state = {}, patch = {}) {
+  const next = normalizeMockRemoteConnection(patch);
+  const connections = mockRemoteConnections(state);
+  const index = connections.findIndex(connection => {
+    const c = normalizeMockRemoteConnection(connection);
+    return c.connection_id === next.connection_id
+      || (c.ssh_command === next.ssh_command && c.remote_agent_port === next.remote_agent_port && c.remote_workspace === next.remote_workspace);
+  });
+  if (index >= 0) connections[index] = { ...connections[index], ...next };
+  else connections.push(next);
+  state.remoteConnected = true;
+  state.remoteServerUrl = next.server_url;
+  state.remoteWorkspace = next.remote_workspace;
+  return next;
+}
+
+function currentMockWorkspace(state = {}, body = {}, context = {}) {
+  const sessionId = body.session_id || 'default';
+  const serverUrl = normalizeMockBackendUrl(context.serverUrl || 'http://localhost:8765');
+  state.workspaceByBackendSession = state.workspaceByBackendSession || {};
+  state.workspaceByBackendSession[serverUrl] = state.workspaceByBackendSession[serverUrl] || {};
+  const stored = state.workspaceByBackendSession[serverUrl][sessionId];
+  if (stored) return stored;
+  const connection = findMockRemoteConnection(state, { server_url: serverUrl });
+  if (connection && serverUrl !== 'http://localhost:8765') return connection.remote_workspace || '~/project';
+  return (state.workspaceBySession && state.workspaceBySession[sessionId]) || MOCK_WORKSPACE;
+}
+
+function setCurrentMockWorkspace(state = {}, body = {}, context = {}, workspace = MOCK_WORKSPACE) {
+  const sessionId = body.session_id || 'default';
+  const serverUrl = normalizeMockBackendUrl(context.serverUrl || 'http://localhost:8765');
+  state.workspaceByBackendSession = state.workspaceByBackendSession || {};
+  state.workspaceByBackendSession[serverUrl] = state.workspaceByBackendSession[serverUrl] || {};
+  state.workspaceByBackendSession[serverUrl][sessionId] = workspace;
+  state.workspaceBySession = state.workspaceBySession || {};
+  state.workspaceBySession[sessionId] = workspace;
+  const connection = findMockRemoteConnection(state, { server_url: serverUrl });
+  if (connection && serverUrl !== 'http://localhost:8765') {
+    const connections = mockRemoteConnections(state);
+    const index = connections.findIndex(item => normalizeMockRemoteConnection(item).connection_id === connection.connection_id);
+    if (index >= 0) connections[index] = { ...normalizeMockRemoteConnection(connections[index]), remote_workspace: workspace };
+  }
+  return workspace;
+}
+
+function mockListDirEntriesForWorkspace(workspace) {
+  if (!workspace || workspace === MOCK_WORKSPACE) {
+    return [
+      { name: 'src', type: 'dir', size: 0, modified: 1000 },
+      { name: 'sample.txt', type: 'file', size: 42, modified: 100 },
+      { name: 'sample.md', type: 'file', size: 64, modified: 200 },
+      { name: 'sample.py', type: 'file', size: 96, modified: 300 },
+      { name: 'sample.tex', type: 'file', size: 128, modified: 400 },
+      { name: 'sample.pdf', type: 'file', size: 1024, modified: 500 },
+      { name: 'sample.png', type: 'file', size: 256, modified: 600 },
+      { name: 'sample.mp3', type: 'file', size: 512, modified: 700 }
+    ];
+  }
+  const label = String(workspace).split(/[\\/]+/).filter(Boolean).pop() || 'remote-workspace';
+  return [
+    { name: 'src', type: 'dir', size: 0, modified: 1000 },
+    { name: `${label}.txt`, type: 'file', size: 42, modified: 100 }
+  ];
+}
+
+function agentBackendPayload(action, body, state = {}, context = {}) {
   const failure = takeMockBackendFailure(action, body, state);
   if (failure) return failure;
 
   if (action === 'remote_status') {
+    const target = findMockRemoteConnection(state, body);
+    const connections = mockRemoteConnections(state).map(normalizeMockRemoteConnection);
     return {
       ok: true,
-      connected: !!state.remoteConnected,
-      server_url: state.remoteServerUrl || 'http://127.0.0.1:18765',
-      tunnel_pid: state.remoteConnected ? 4242 : null,
-      heartbeat_timeout: Number(body.heartbeat_timeout || 75)
+      connected: !!(target && target.connected),
+      ...(target || {
+        server_url: state.remoteServerUrl || 'http://127.0.0.1:18765',
+        tunnel_pid: null,
+        heartbeat_timeout: Number(body.heartbeat_timeout || 75)
+      }),
+      heartbeat_timeout: Number(body.heartbeat_timeout || (target && target.heartbeat_timeout) || 300),
+      connections
     };
   }
   if (action === 'remote_list_dirs') {
@@ -1081,42 +1223,59 @@ function agentBackendPayload(action, body, state = {}) {
     return { ok: true, path, parent, entries, truncated: false };
   }
   if (action === 'remote_connect') {
-    state.remoteConnected = true;
-    state.remoteServerUrl = `http://127.0.0.1:${body.local_port || 18765}`;
-    state.remoteWorkspace = body.remote_workspace || '~/project';
+    const remoteAgentPort = Number(body.remote_agent_port || 8765) || 8765;
+    const existing = mockRemoteConnections(state)
+      .map(normalizeMockRemoteConnection)
+      .find(connection => connection.connected
+        && connection.ssh_command === normalizeMockSshCommand(body.ssh_command || 'ssh e2e@example.test')
+        && connection.remote_agent_port === remoteAgentPort
+        && connection.remote_workspace === normalizeMockRemoteWorkspace(body.remote_workspace || '~/project'));
+    const connection = upsertMockRemoteConnection(state, {
+      ...(existing || {}),
+      connected: true,
+      ssh_command: body.ssh_command || (existing && existing.ssh_command) || 'ssh e2e@example.test',
+      remote_workspace: normalizeMockRemoteWorkspace(body.remote_workspace || (existing && existing.remote_workspace) || '~/project'),
+      remote_agent_port: remoteAgentPort,
+      local_port: (existing && existing.local_port) || Number(body.local_port || 18765) || 18765
+    });
     return {
       ok: true,
-      server_url: state.remoteServerUrl,
+      reused_existing: !!existing,
+      server_url: connection.server_url,
+      local_port: connection.local_port,
+      remote_agent_port: connection.remote_agent_port,
+      remote_workspace: connection.remote_workspace,
+      connection_id: connection.connection_id,
       workspace_info: {
         ok: true,
-        workspace: state.remoteWorkspace,
-        cwd: state.remoteWorkspace
+        workspace: connection.remote_workspace,
+        cwd: connection.remote_workspace
       },
+      connections: mockRemoteConnections(state).map(normalizeMockRemoteConnection),
       logs: ['mock remote agent started']
     };
   }
   if (action === 'remote_disconnect') {
-    state.remoteConnected = false;
-    return { ok: true, stopped: !!body.stop_remote };
+    const target = findMockRemoteConnection(state, body);
+    if (target) {
+      state.remoteConnections = mockRemoteConnections(state)
+        .map(normalizeMockRemoteConnection)
+        .filter(connection => connection.connection_id !== target.connection_id);
+    }
+    state.remoteConnected = mockRemoteConnections(state).some(connection => normalizeMockRemoteConnection(connection).connected);
+    return { ok: true, stopped: !!body.stop_remote, connections: mockRemoteConnections(state).map(normalizeMockRemoteConnection) };
   }
   if (action === 'open_terminal') {
     return { ok: true, opened: true, workspace: state.remoteWorkspace || MOCK_WORKSPACE, cwd: state.remoteWorkspace || MOCK_WORKSPACE };
   }
   if (action === 'list_dir') {
+    const workspace = currentMockWorkspace(state, body, context);
     return {
       ok: true,
-      workspace: MOCK_WORKSPACE,
-      cwd: MOCK_WORKSPACE,
-      entries: [
-        { name: 'src', type: 'dir', size: 0, modified: 1000 },
-        { name: 'sample.txt', type: 'file', size: 42, modified: 100 },
-        { name: 'sample.md', type: 'file', size: 64, modified: 200 },
-        { name: 'sample.py', type: 'file', size: 96, modified: 300 },
-        { name: 'sample.tex', type: 'file', size: 128, modified: 400 },
-        { name: 'sample.pdf', type: 'file', size: 1024, modified: 500 },
-        { name: 'sample.png', type: 'file', size: 256, modified: 600 },
-        { name: 'sample.mp3', type: 'file', size: 512, modified: 700 }
-      ]
+      path: body.path === '.' || !body.path ? workspace : body.path,
+      workspace,
+      cwd: workspace,
+      entries: mockListDirEntriesForWorkspace(workspace)
     };
   }
   if (action === 'list_drives') {
@@ -1170,13 +1329,14 @@ function agentBackendPayload(action, body, state = {}) {
   if (action === 'workspace_info' || action === 'set_workspace' || action === 'reset_workspace_to_agent_home') {
     const sessionId = body.session_id || 'default';
     state.workspaceBySession = state.workspaceBySession || {};
+    let workspace = currentMockWorkspace(state, body, context);
     if (action === 'reset_workspace_to_agent_home') {
-      state.workspaceBySession[sessionId] = MOCK_WORKSPACE;
+      workspace = setCurrentMockWorkspace(state, body, context, MOCK_WORKSPACE);
       state.remoteWorkspace = '';
     } else if (action === 'set_workspace') {
-      state.workspaceBySession[sessionId] = body.path || MOCK_WORKSPACE;
+      workspace = setCurrentMockWorkspace(state, body, context, body.path || MOCK_WORKSPACE);
     }
-    const workspace = state.workspaceBySession[sessionId] || MOCK_WORKSPACE;
+    state.workspaceBySession[sessionId] = workspace;
     return { ok: true, workspace, cwd: workspace, agent_home: MOCK_WORKSPACE };
   }
   if (action === 'skill_list') {
@@ -1332,7 +1492,9 @@ async function installMockBackend(page, options = {}) {
     lmsHasSavedCredential: !!options.lmsHasSavedCredential,
     commandTasks: {},
     commandTaskListSnapshots: [],
-    workspaceBySession: {}
+    workspaceBySession: {},
+    workspaceByBackendSession: {},
+    remoteConnections: []
   };
 
   await page.route('**/*', async route => {
@@ -1374,10 +1536,14 @@ async function installMockBackend(page, options = {}) {
       return;
     }
 
-    const isLocalBackend = ['localhost', '127.0.0.1'].includes(url.hostname) && ['8765', '18765'].includes(url.port);
+    const isLocalBackend = ['localhost', '127.0.0.1'].includes(url.hostname)
+      && (url.port === '8765' || /^18\d{3}$/.test(url.port));
+    const requestContext = {
+      serverUrl: normalizeMockBackendUrl(`${url.protocol}//${url.host}`)
+    };
     if (isLocalBackend && url.pathname === '/workspace' && request.method() === 'GET') {
       const sessionId = url.searchParams.get('session_id') || 'default';
-      const workspace = state.remoteWorkspace || state.workspaceBySession[sessionId] || MOCK_WORKSPACE;
+      const workspace = currentMockWorkspace(state, { session_id: sessionId }, requestContext);
       await fulfillSafely(route, jsonResponse({ ok: true, workspace, cwd: workspace, agent_home: MOCK_WORKSPACE }));
       return;
     }
@@ -1400,12 +1566,12 @@ async function installMockBackend(page, options = {}) {
     if (isLocalBackend && request.method() === 'POST') {
       const body = await requestJson(request);
       const action = body.action || '';
-      state.backendCalls.push({ action, body });
+      state.backendCalls.push({ action, body, url: request.url(), serverUrl: requestContext.serverUrl });
       const delayMs = typeof options.delayForBackend === 'function'
         ? options.delayForBackend(action, body, state)
         : 0;
       if (delayMs > 0) await sleep(delayMs);
-      await fulfillSafely(route, jsonResponse(agentBackendPayload(action, body, state)));
+      await fulfillSafely(route, jsonResponse(agentBackendPayload(action, body, state, requestContext)));
       return;
     }
     if (isLocalBackend && url.pathname === '/preview-file') {

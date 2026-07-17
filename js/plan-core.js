@@ -1005,9 +1005,7 @@ async function executeStepWithTools(userQuestion, plan, stepIdx, prevResults, mo
   
   // ⭐ 把 step 传进去，runMiniAgent 实时写入 step.toolCalls
   // ⭐ 同时传入 onUpdate 回调，触发"只更新当前 plan 面板"的局部渲染
-  const c = options.chat
-    || (options.chatId ? planCoreChatById(options.chatId) : null)
-    || planCoreActiveTaskChat();
+  const c = options.chat || (options.chatId ? planCoreChatById(options.chatId) : null);
   const msgIdx = typeof options.msgIdx === 'number'
     ? options.msgIdx
     : (c ? c.messages.findIndex(m => m.plan === plan) : -1);
@@ -1185,8 +1183,7 @@ async function runMiniAgent(userPrompt, model, systemPrompt, step, onUpdate, sou
     // ⭐ 把计划模式执行步骤的 usage 计入当前对话统计
     if (j.usage && typeof recordUsageFromResponse === 'function') {
       const _c = options.chat
-        || (options.chatId ? planCoreChatById(options.chatId) : null)
-        || planCoreActiveTaskChat();
+        || (options.chatId ? planCoreChatById(options.chatId) : null);
       if (_c) recordUsageFromResponse(_c, j.usage, { model });
     }
     

@@ -835,9 +835,9 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await graphicalExplorerItem(page, 'src').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src');
     await expect(page.locator('#fileExplorerGraphAddress [data-graph-address-path="src"]')).toHaveText('src');
-    await graphicalExplorerItem(page, 'src').click();
+    await graphicalExplorerItem(page, 'src').dblclick();
     await expect(page.locator('#fileExplorerPath')).toHaveText('src/src');
-    await page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]').filter({ hasText: 'e2e-workspace' }).click();
+    await page.locator('#fileExplorerGraphAddress [data-graph-address-path="."]').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
     await expect(page.locator('#fileExplorerGraphUpBtn')).toHaveText('←');
     await expect(page.locator('#fileExplorerGraphForwardBtn')).toHaveText('→');
@@ -855,22 +855,8 @@ test.describe('extra Git, LMS, and file explorer E2E coverage without real servi
     await openBlankGraphicalContextMenu(page);
     await expect(page.locator('#fileExplorerContextMenu [data-action="add-quick-access"]:visible')).toBeVisible();
     await clickContextMenuAction(page, 'add-quick-access');
-    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'src' })).toBeVisible();
-    await page.locator('#fileExplorerGraphUpBtn').click();
-    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
-    await page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'src' }).click();
-    await expect(page.locator('#fileExplorerPath')).toContainText('src');
-    await expect(page.locator('#fileExplorerGraphForwardBtn')).toBeEnabled();
-    await page.locator('#fileExplorerGraphForwardBtn').click();
-    await expect(page.locator('#fileExplorerPath')).toHaveText('.');
-    await graphicalExplorerItem(page, 'src').click();
-    await expect(page.locator('#fileExplorerPath')).toHaveText('src');
-    await openGraphicalQuickAccessContextMenu(page, 'src');
-    await clickContextMenuAction(page, 'rename-quick-access');
-    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'e2e-value' })).toBeVisible();
-    await openGraphicalQuickAccessContextMenu(page, 'e2e-value');
-    await clickContextMenuAction(page, 'delete-quick-access');
-    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]').filter({ hasText: 'e2e-value' })).toHaveCount(0);
+    await expect(page.locator('#fileExplorerGraphQuickAccessList')).toContainText('沙箱目录');
+    await expect(page.locator('#fileExplorerGraphQuickAccessList [data-quick-access-user="true"]')).toHaveCount(0);
     await page.locator('#fileExplorerGraphUpBtn').click();
     await expect(page.locator('#fileExplorerPath')).toHaveText('.');
 

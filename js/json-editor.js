@@ -145,7 +145,7 @@ function refreshJsonPreview() {
       updateJsonStats(0, 0);
       return;
     }
-    const body = jsonEditorBuildRequestBody(c.messages);
+    const body = jsonEditorBuildRequestBody(c.messages, undefined, undefined, { chat: c });
     const url = jsonEditorBuildFullUrl(jsonEditorState.settings.baseUrl, jsonEditorState.settings.apiPath);
     const headers = jsonEditorBuildHeaders();
     const safeHeaders = { ...headers };
@@ -344,7 +344,7 @@ function copyJsonBodyOnly() {
   try {
     const c = jsonEditorCurrentChat();
     if (!c || !c.messages.length) { JsonEditorUiService.toast('当前没有对话'); return; }
-    const body = jsonEditorBuildRequestBody(c.messages);
+    const body = jsonEditorBuildRequestBody(c.messages, undefined, undefined, { chat: c });
     navigator.clipboard.writeText(JSON.stringify(body, null, 2)).then(() => JsonEditorUiService.toast('✓ 请求体已复制'));
   } catch (e) {
     JsonEditorUiService.toast('❌ ' + e.message);
@@ -355,7 +355,7 @@ function copyAsCurl() {
   try {
     const c = jsonEditorCurrentChat();
     if (!c || !c.messages.length) { JsonEditorUiService.toast('当前没有对话'); return; }
-    const body = jsonEditorBuildRequestBody(c.messages);
+    const body = jsonEditorBuildRequestBody(c.messages, undefined, undefined, { chat: c });
     const url = jsonEditorBuildFullUrl(jsonEditorState.settings.baseUrl, jsonEditorState.settings.apiPath);
     const headers = jsonEditorBuildHeaders();
     let curl = `curl -X POST '${url}' \\\n`;

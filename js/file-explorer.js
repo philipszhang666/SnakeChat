@@ -65,7 +65,8 @@ const FILE_EXPLORER_STATE = {
   inlineFileKind: '',
   inlineFileOpenSeq: 0,
   inlineFileSide: 'right',
-  inlineChatWidth: 50
+  inlineChatWidth: 50,
+  pendingReload: null
 };
 
 const INLINE_FILE_MIN_WINDOW_WIDTH = 1100;
@@ -109,9 +110,29 @@ const FILE_EXPLORER_EDITOR_FONT_SIZE_MAX = 24;
 
 function fileExplorerBackendContext(options = {}) {
   return {
+    ...(options && typeof options === 'object' ? options : {})
+  };
+}
+
+function fileExplorerFullAccessBackendContext(options = {}) {
+  return fileExplorerBackendContext({
     ...(options && typeof options === 'object' ? options : {}),
     allowFullAccess: true
-  };
+  });
+}
+
+function fileExplorerPathNeedsFullAccess(path) {
+  const normalized = normalizeExplorerPath(path);
+  if (!normalized || isFileExplorerRemoteMode()) return false;
+  if (isFileExplorerThisPcPath(normalized)) return true;
+  return isAbsoluteExplorerPath(normalized) && !fileExplorerRelativeToWorkspace(normalized);
+}
+
+function fileExplorerPathBackendContext(path, options = {}) {
+  return fileExplorerBackendContext({
+    allowFullAccess: fileExplorerPathNeedsFullAccess(path),
+    ...(options && typeof options === 'object' ? options : {})
+  });
 }
 
 function fileExplorerStorageGet(key) {
@@ -730,7 +751,7 @@ async function ensureFileExplorerLocalDrives(options = {}) {
   FILE_EXPLORER_STATE.localDrivePromise = (async () => {
     try {
       if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext());
+      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerFullAccessBackendContext());
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '读取本机磁盘失败');
       const drives = syncFileExplorerLocalDrives(Array.isArray(r.entries) ? r.entries : []);
@@ -1579,7 +1600,7 @@ async function runGraphicalFileExplorerSearch(query = FILE_EXPLORER_STATE.graphS
       { path: basePath, query: searchText, max_results: 100, include_files: true, include_dirs: true },
       undefined,
       undefined,
-      fileExplorerBackendContext()
+      fileExplorerPathBackendContext(basePath)
     );
     if (requestId !== FILE_EXPLORER_STATE.graphSearchRequestId) return;
     if (typeof r === 'string') throw new Error(r);
@@ -2554,7 +2575,13 @@ function closeGraphicalFileExplorer() {
 }
 
 async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
-  if (FILE_EXPLORER_STATE.loading) return false;
+  if (FILE_EXPLORER_STATE.loading) {
+    FILE_EXPLORER_STATE.pendingReload = {
+      path: normalizeExplorerPath(path),
+      options: { ...(options || {}), silent: options.silent !== false }
+    };
+    return false;
+  }
   FILE_EXPLORER_STATE.loading = true;
   const nextPath = normalizeExplorerPath(path);
   const pathChanged = nextPath !== FILE_EXPLORER_STATE.path;
@@ -2567,7 +2594,7 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
     if (isFileExplorerThisPcPath(FILE_EXPLORER_STATE.path)) {
-      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext());
+      const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerFullAccessBackendContext());
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '读取本机磁盘失败');
       const entries = syncFileExplorerLocalDrives(Array.isArray(r.entries) ? r.entries : []);
@@ -2578,7 +2605,7 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
       renderFileExplorer();
       return true;
     }
-    const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerBackendContext());
+    const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerPathBackendContext(FILE_EXPLORER_STATE.path));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取目录失败');
     noteFileExplorerAbsolutePath(r.path, FILE_EXPLORER_STATE.path);
@@ -2600,6 +2627,11 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
     return false;
   } finally {
     FILE_EXPLORER_STATE.loading = false;
+    const pending = FILE_EXPLORER_STATE.pendingReload;
+    FILE_EXPLORER_STATE.pendingReload = null;
+    if (pending && isFileExplorerViewActive()) {
+      setTimeout(() => loadFileExplorer(pending.path, pending.options), 0);
+    }
   }
 }
 
@@ -2627,8 +2659,8 @@ async function pollFileExplorerChanges() {
   try {
     if (typeof callAgentBackend !== 'function') return;
     const r = isFileExplorerThisPcPath(path)
-      ? await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerBackendContext())
-      : await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerBackendContext());
+      ? await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerFullAccessBackendContext())
+      : await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerPathBackendContext(path));
     if (typeof r === 'string' || !r || !r.ok) return;
     if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !isFileExplorerViewActive()) return;
     if (!isFileExplorerThisPcPath(path)) noteFileExplorerAbsolutePath(r.path, path);
@@ -2680,6 +2712,8 @@ function refreshFileExplorer() {
 function resetFileExplorerToRoot() {
   FILE_EXPLORER_STATE.path = '.';
   FILE_EXPLORER_STATE.entries = [];
+  FILE_EXPLORER_STATE.absolutePath = '';
+  FILE_EXPLORER_STATE.workspaceRoot = '';
   if (isFileExplorerViewActive()) loadFileExplorer('.');
   else renderFileExplorer();
 }
@@ -2765,7 +2799,7 @@ async function uploadExplorerFileInChunks(file, targetFilePath, progress = {}) {
       },
       undefined,
       undefined,
-      fileExplorerBackendContext({ skipConfirm: true })
+      fileExplorerPathBackendContext(targetFilePath, { skipConfirm: true })
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '上传失败');
@@ -3290,7 +3324,7 @@ async function openTextInMainPanel(path, initialContent = null, initialSize = nu
   setInlineFileStatus('正在读取...', 'loading');
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath));
     if (!isCurrentOpen()) return false;
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
@@ -3419,7 +3453,7 @@ async function saveInlineFilePanel() {
       { path, content },
       '保存主页面文件修改',
       `[保存文件] ${path}\n\n字符数：${content.length}\n\n${preview}`,
-      fileExplorerBackendContext()
+      fileExplorerPathBackendContext(path, { skipConfirm: true })
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
@@ -3527,7 +3561,7 @@ async function openFileEditor(path) {
   setFileEditorStatus('正在读取...', 'loading');
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    const r = await callAgentBackend('read_file', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取文件失败');
     if (!isCurrentOpen()) return;
@@ -3585,7 +3619,7 @@ async function saveFileEditor() {
       { path, content },
       '保存文本文件修改',
       `[保存文件] ${path}\n\n字符数：${content.length}\n\n${preview}`,
-      fileExplorerBackendContext()
+      fileExplorerPathBackendContext(path, { skipConfirm: true })
     );
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '保存失败');
@@ -3637,7 +3671,7 @@ async function openFileWithSystemDefault(path) {
   }
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('open_file_default', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    const r = await callAgentBackend('open_file_default', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '系统默认应用打开失败');
     fileExplorerToast(`已使用系统默认应用打开：${fileExplorerBasename(normalizedPath)}`);
@@ -3692,7 +3726,7 @@ async function compileTexFile(path = FILE_EXPLORER_STATE.contextPath) {
   try {
     fileExplorerToast('正在调用 xelatex 编译...');
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('compile_tex', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+    const r = await callAgentBackend('compile_tex', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) {
       const installHint = r && r.install_hint ? `\n${r.install_hint}` : '';
@@ -4175,7 +4209,7 @@ async function createFileExplorerFile(basePath = FILE_EXPLORER_STATE.contextPath
     return;
   }
   try {
-    const r = await callAgentBackend('create_file', { path, content: '' }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+    const r = await callAgentBackend('create_file', { path, content: '' }, undefined, undefined, fileExplorerPathBackendContext(path, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '新建文件失败');
     fileExplorerToast('已新建文件');
@@ -4195,7 +4229,7 @@ async function createFileExplorerFolder(basePath = FILE_EXPLORER_STATE.contextPa
     return;
   }
   try {
-    const r = await callAgentBackend('create_dir', { path }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+    const r = await callAgentBackend('create_dir', { path }, undefined, undefined, fileExplorerPathBackendContext(path, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '新建文件夹失败');
     fileExplorerToast('已新建文件夹');
@@ -4208,7 +4242,7 @@ async function createFileExplorerFolder(basePath = FILE_EXPLORER_STATE.contextPa
 async function switchFileExplorerWorkspace(path = FILE_EXPLORER_STATE.contextPath) {
   const normalizedPath = normalizeExplorerPath(path || FILE_EXPLORER_STATE.path);
   try {
-    const r = await callAgentBackend('set_workspace', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+    const r = await callAgentBackend('set_workspace', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '切换工作区失败');
     if (typeof noteRemoteWorkspaceChanged === 'function') noteRemoteWorkspaceChanged(r.workspace || r.cwd || normalizedPath);
@@ -4463,7 +4497,7 @@ async function showFileExplorerDetails(path = FILE_EXPLORER_STATE.contextPath) {
   modal.classList.add('show');
   try {
     if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
-    const r = await callAgentBackend('file_info', { path: normalizedPath }, undefined, undefined, fileExplorerBackendContext());
+    const r = await callAgentBackend('file_info', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取详情失败');
     renderFileExplorerDetails(r);
@@ -4594,7 +4628,7 @@ async function moveFileExplorerItemsToDirectory(items, targetDir, options = {}) 
         { path: item.path, target_dir: normalizedTargetDir, dedupe: true },
         undefined,
         undefined,
-        fileExplorerBackendContext({ skipConfirm: true })
+        fileExplorerPathBackendContext(item.path, { skipConfirm: true })
       );
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '移动失败');
@@ -4649,7 +4683,7 @@ async function pasteFileExplorerItem(targetDir = FILE_EXPLORER_STATE.contextPath
         { path: item.path, target_dir: normalizedTargetDir, dedupe: true },
         undefined,
         undefined,
-        fileExplorerBackendContext({ skipConfirm: true })
+        fileExplorerPathBackendContext(item.path, { skipConfirm: true })
       );
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '粘贴失败');
@@ -4713,7 +4747,7 @@ async function renameFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
   }
   if (newPath === normalizedPath) return;
   try {
-    const r = await callAgentBackend('rename_file', { path: normalizedPath, new_path: newPath }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+    const r = await callAgentBackend('rename_file', { path: normalizedPath, new_path: newPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '重命名失败');
     if (FILE_EXPLORER_STATE.editorPath === normalizedPath) FILE_EXPLORER_STATE.editorPath = newPath;
@@ -4747,7 +4781,7 @@ async function deleteFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, ty
   try {
     for (const item of items) {
       const normalizedPath = normalizeExplorerPath(item.path);
-      const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, undefined, undefined, fileExplorerBackendContext({ skipConfirm: true }));
+      const r = await callAgentBackend('delete_file', { path: normalizedPath, recursive: true }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true }));
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '删除失败');
       closeDeletedExplorerReferences(normalizedPath);

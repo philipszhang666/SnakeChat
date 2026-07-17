@@ -909,7 +909,7 @@ function _toolContextChatId(context = {}) {
   if (typeof context === 'string') return context;
   if (context && context.chatId) return context.chatId;
   if (context && context.chat && context.chat.id) return context.chat.id;
-  return (toolsState && (toolsState.activeTaskChatId || toolsState.currentId)) || '';
+  return (toolsState && toolsState.currentId) || '';
 }
 
 function _ctxToolFn(name, context) {

@@ -335,7 +335,41 @@ function migrateRetrySettings() {
   state.settings.retryPolicyVersion = RETRY_POLICY_VERSION;
 }
 
+function normalizeChatBackendBinding(chat) {
+  if (!chat || typeof chat !== 'object') return false;
+  let changed = false;
+  if (!chat.backend || typeof chat.backend !== 'object' || Array.isArray(chat.backend)) {
+    chat.backend = { type: 'local' };
+    changed = true;
+  } else if (chat.backend.type !== 'remote') {
+    if (chat.backend.type !== 'local' || Object.keys(chat.backend).length !== 1) {
+      chat.backend = { type: 'local' };
+      changed = true;
+    }
+  } else {
+    const next = { ...chat.backend, type: 'remote' };
+    if ((chat.workspace || chat.cwd) && !next.remoteWorkspace) {
+      next.remoteWorkspace = chat.workspace || chat.cwd;
+      changed = true;
+    }
+    if (JSON.stringify(next) !== JSON.stringify(chat.backend)) {
+      chat.backend = next;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function normalizeLoadedChatBackends() {
+  let changed = false;
+  for (const chat of [...(state.chats || []), state.temporaryChat].filter(Boolean)) {
+    if (normalizeChatBackendBinding(chat)) changed = true;
+  }
+  return changed;
+}
+
 function loadData() {
+  let changed = false;
   try {
     const d = storage.get(STORAGE_KEYS.store);
     if (d) {
@@ -352,10 +386,12 @@ function loadData() {
       state._lastSavedAt = p.savedAt || null;
     }
   } catch (e) {}
+  changed = normalizeLoadedChatBackends() || changed;
   try { const s = storage.get(STORAGE_KEYS.settings); if (s) state.settings = { ...state.settings, ...JSON.parse(s) }; } catch (e) {}
   migrateRetrySettings();
   try { const t = storage.get(STORAGE_KEYS.tools); if (t) state.tools = JSON.parse(t); } catch (e) {}
   injectBuiltinTools();
+  if (changed) saveData();
 }
 
 const MSG_TIMER_ORPHAN_FALLBACK_MS = 10 * 60 * 1000;
