@@ -824,6 +824,7 @@ function remoteControlCreateChat(remoteId, opts = {}) {
   remoteControlState.currentId = id;
   remoteControlKnownChats.set(String(remoteId), id);
   remoteControlSyncGlobalTaskState(id);
+  if (typeof restoreWorkspaceForChat === 'function') restoreWorkspaceForChat(chat);
   return chat;
 }
 
@@ -847,6 +848,7 @@ function remoteControlEnsureTemporaryChat(parsed) {
   remoteControlSaveData();
   remoteControlRenderChatList();
   remoteControlRenderMessagesIfCurrent(chat);
+  if (typeof restoreWorkspaceForChat === 'function') restoreWorkspaceForChat(chat);
   return chat;
 }
 

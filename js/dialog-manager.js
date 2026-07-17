@@ -1132,8 +1132,9 @@ function dialogExplorerDeleteFolder(folderId) {
   if (typeof remoteControlForgetChat === 'function') {
     for (const chat of affectedChats) remoteControlForgetChat(chat);
   }
+  const wasCurrentDeleted = deleteIds.has(dialogManagerState.currentId);
   dialogManagerState.chats = (dialogManagerState.chats || []).filter(c => !deleteIds.has(c.id));
-  if (deleteIds.has(dialogManagerState.currentId)) {
+  if (wasCurrentDeleted) {
     dialogManagerState.currentId = ((dialogManagerState.chats || []).find(c => c && !c._hiddenFromUI) || {}).id || null;
   }
   dialogManagerCleanupTaskQueueDeletedChats(affectedChats);
@@ -1151,6 +1152,7 @@ function dialogExplorerDeleteFolder(folderId) {
   dialogManagerUpdateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   renderDialogManagerFolders();
+  if (wasCurrentDeleted && typeof restoreWorkspaceForCurrentChat === 'function') restoreWorkspaceForCurrentChat();
 }
 
 // --- Chat CRUD (syncs with sidebar) ---
@@ -1241,10 +1243,12 @@ function dialogExplorerRefreshAfterVisibilityChange(folderId) {
 
 function dialogExplorerAfterHideChats(hiddenIds, folderId) {
   if (!hiddenIds || !hiddenIds.size) return;
-  if (dialogManagerState.currentId && hiddenIds.has(dialogManagerState.currentId)) {
+  const wasCurrentHidden = dialogManagerState.currentId && hiddenIds.has(dialogManagerState.currentId);
+  if (wasCurrentHidden) {
     dialogManagerState.currentId = (typeof sidebarChats === 'function' ? sidebarChats() : (dialogManagerState.chats || []).filter(c => c && !c._hiddenFromUI))[0]?.id || null;
   }
   dialogExplorerRefreshAfterVisibilityChange(folderId);
+  if (wasCurrentHidden && typeof restoreWorkspaceForCurrentChat === 'function') restoreWorkspaceForCurrentChat();
 }
 
 function dialogExplorerHideChat(chatId) {
@@ -1309,11 +1313,13 @@ function dialogExplorerDeleteChat(chatId) {
     deleteChat(chatId);
   } else {
     if (!confirm(`删除对话"${chat.title || '新对话'}"？`)) return;
+    const wasCurrentDeleted = dialogManagerState.currentId === chatId;
     dialogManagerState.chats = (dialogManagerState.chats || []).filter(c => c.id !== chatId);
-    if (dialogManagerState.currentId === chatId) dialogManagerState.currentId = ((dialogManagerState.chats || [])[0] && dialogManagerState.chats[0].id) || '';
+    if (wasCurrentDeleted) dialogManagerState.currentId = ((dialogManagerState.chats || [])[0] && dialogManagerState.chats[0].id) || '';
     dialogManagerSaveData();
     dialogManagerRenderChatList();
     dialogManagerToast('已删除');
+    if (wasCurrentDeleted && typeof restoreWorkspaceForCurrentChat === 'function') restoreWorkspaceForCurrentChat();
   }
   touchFolder(folderId);
   renderDialogManagerFolders();

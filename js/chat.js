@@ -929,8 +929,9 @@ function deleteTaskQueueGroup(groupId, e) {
   if (typeof remoteControlForgetChat === 'function') {
     for (const chat of chats) remoteControlForgetChat(chat);
   }
+  const wasCurrentDeleted = chatState.currentId && ids.has(chatState.currentId);
   chatState.chats = chatState.chats.filter(c => !ids.has(c.id));
-  if (chatState.currentId && ids.has(chatState.currentId)) chatState.currentId = sidebarChats()[0]?.id || null;
+  if (wasCurrentDeleted) chatState.currentId = sidebarChats()[0]?.id || null;
   if (chatState.taskQueue && Array.isArray(chatState.taskQueue.items)) {
     for (const item of chatState.taskQueue.items) {
       if (!item || !ids.has(item.chatId)) continue;
@@ -950,8 +951,12 @@ function deleteTaskQueueGroup(groupId, e) {
   chatSaveData();
   renderChatList();
   renderMessages();
+  syncPendingAttachmentMirror(chatState.currentId);
+  if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
+  if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
+  if (wasCurrentDeleted) restoreWorkspaceForChat(chatCurrentChat());
 }
 
 function togglePinChat(id, e) {
@@ -1036,14 +1041,19 @@ function deleteChat(id, e) {
   }
   const removedChat = chatByIdFromState(id);
   if (typeof remoteControlForgetChat === 'function') remoteControlForgetChat(removedChat || id);
+  const wasCurrentDeleted = chatState.currentId === id;
   chatState.chats = chatState.chats.filter(c => c.id !== id);
-  if (chatState.currentId === id) chatState.currentId = sidebarChats()[0]?.id || null;
+  if (wasCurrentDeleted) chatState.currentId = sidebarChats()[0]?.id || null;
   if (chatSyncGlobalTaskState) chatSyncGlobalTaskState(chatState.currentId);
+  syncPendingAttachmentMirror(chatState.currentId);
   chatSaveData();
   renderChatList();
   renderMessages();
+  if (typeof renderPendingAtts === 'function') renderPendingAtts();
   if (typeof updateSendBtn === 'function') updateSendBtn();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
+  if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
+  if (wasCurrentDeleted) restoreWorkspaceForChat(chatCurrentChat());
 }
 
 function clearCurrentChat() {

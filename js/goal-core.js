@@ -917,12 +917,14 @@ function ensureGoalChat(goal) {
   if (!chat) chat = goalCurrentChat();
   if (!chat) chat = createFallbackGoalChat(goal);
   bindGoalToChat(goal, chat);
+  const switchedCurrentChat = goalState.currentId !== chat.id;
   goalState.currentId = chat.id;
   persistGoals();
   goalSaveData();
   GoalCoreUiService.renderChatList();
   GoalCoreUiService.renderMessages();
   GoalCoreUiService.updateSendBtn();
+  if (switchedCurrentChat && typeof restoreWorkspaceForChat === 'function') restoreWorkspaceForChat(chat);
   return chat;
 }
 
@@ -1395,7 +1397,7 @@ async function continueGoal(goalId) {
         // A goal tool intentionally changed the status, e.g. update_goal
         // reached complete/blocked. Preserve the status-specific reason.
       } else {
-        if (controller.signal.aborted && latestGoal.status === 'active') {
+        if (latestGoal.status === 'active') {
           goalStopRunClock(latestGoal);
           latestGoal.status = 'paused';
         }
@@ -1411,6 +1413,13 @@ async function continueGoal(goalId) {
     goalClearChatTask(chat.id);
     updateGoalButton();
     const latestAfterRun = goalById(goal.id);
+    if (latestAfterRun && latestAfterRun.status === 'active' && controller.signal.aborted && !restartAfterGuidance) {
+      goalStopRunClock(latestAfterRun);
+      latestAfterRun.status = 'paused';
+      latestAfterRun.lastError = latestAfterRun.lastError || 'Goal run stopped unexpectedly.';
+      pushGoalEvent(latestAfterRun, 'paused', { reason: latestAfterRun.lastError });
+      saveGoals();
+    }
     if (latestAfterRun && latestAfterRun.scheduled && latestAfterRun.scheduled.status === SCHEDULED_GOAL_STATUS.RUNNING) {
       latestAfterRun.scheduled.status = GOAL_TERMINAL_STATUSES.has(latestAfterRun.status)
         ? SCHEDULED_GOAL_STATUS.DONE

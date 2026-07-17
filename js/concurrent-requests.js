@@ -512,10 +512,12 @@ async function startConcurrentRound(chat, prompt, useTools, attachments = []) {
     status: 'running'
   });
   meta.updatedAt = startedAt;
+  const switchedCurrentChat = concurrentRequestsState.currentId !== chat.id;
   concurrentRequestsState.currentId = chat.id;
   concurrentRequestsSaveData();
   ConcurrentRequestsUiService.renderChatList();
   ConcurrentRequestsUiService.renderMessages();
+  if (switchedCurrentChat && typeof restoreWorkspaceForChat === 'function') restoreWorkspaceForChat(chat);
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
 
   const runtime = {
