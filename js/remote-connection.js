@@ -255,9 +255,33 @@ function normalizeRemoteConnectionInfo(info = {}) {
   };
 }
 
+function remoteConnectionIdentityKey(connection) {
+  const c = normalizeRemoteConnectionInfo(connection);
+  if (c.sshCommand) return `${c.sshCommand}\0${c.remoteAgentPort || 8765}`;
+  return c.connectionId || c.serverUrl || '';
+}
+
+function dedupeRemoteConnections(connections = []) {
+  const byKey = new Map();
+  const activeServerUrl = String((typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl) || '');
+  (Array.isArray(connections) ? connections : []).map(normalizeRemoteConnectionInfo).forEach(connection => {
+    const key = remoteConnectionIdentityKey(connection);
+    if (!key) return;
+    const current = byKey.get(key);
+    if (
+      !current
+      || (connection.connected && !current.connected)
+      || (activeServerUrl && connection.serverUrl === activeServerUrl)
+    ) {
+      byKey.set(key, connection);
+    }
+  });
+  return Array.from(byKey.values());
+}
+
 function remoteStatusPayloadConnections(payload = {}) {
   const list = Array.isArray(payload && payload.connections) ? payload.connections : [];
-  REMOTE_CONNECTIONS_CACHE = list.map(normalizeRemoteConnectionInfo);
+  REMOTE_CONNECTIONS_CACHE = dedupeRemoteConnections(list);
   return REMOTE_CONNECTIONS_CACHE;
 }
 
@@ -265,11 +289,10 @@ function remoteConnectionMatchesBinding(connection, binding) {
   const c = normalizeRemoteConnectionInfo(connection);
   const b = normalizeBackendBinding(binding);
   if (b.type !== 'remote') return false;
-  if (b.connectionId && c.connectionId && b.connectionId !== c.connectionId) return false;
+  if (b.serverUrl && c.serverUrl && b.serverUrl === c.serverUrl) return true;
+  if (b.connectionId && c.connectionId && b.connectionId === c.connectionId) return true;
   if (!b.sshCommand || !c.sshCommand || remoteProfileKey(b.sshCommand) !== remoteProfileKey(c.sshCommand)) return false;
   if (b.remoteAgentPort && c.remoteAgentPort && parseInt(b.remoteAgentPort, 10) !== parseInt(c.remoteAgentPort, 10)) return false;
-  if (b.remoteWorkspace && c.remoteWorkspace && String(b.remoteWorkspace) !== String(c.remoteWorkspace)) return false;
-  if (b.serverUrl && c.serverUrl && b.serverUrl !== c.serverUrl) return false;
   return true;
 }
 
@@ -428,8 +451,7 @@ function activeRemoteMatchesBinding(binding) {
   if (!cfgServerUrl || cfgServerUrl !== activeServerUrl) return false;
   if (b.connectionId && cfg.connectionId && b.connectionId === cfg.connectionId) return true;
   return remoteProfileKey(cfg.sshCommand) === remoteProfileKey(b.sshCommand)
-    && (parseInt(cfg.remoteAgentPort, 10) || 8765) === (parseInt(b.remoteAgentPort, 10) || 8765)
-    && (!b.remoteWorkspace || !cfg.remoteWorkspace || String(cfg.remoteWorkspace) === String(b.remoteWorkspace));
+    && (parseInt(cfg.remoteAgentPort, 10) || 8765) === (parseInt(b.remoteAgentPort, 10) || 8765);
 }
 
 function currentChatBackendBinding() {

@@ -437,7 +437,13 @@ async function restoreWorkspaceForChat(chat, options = {}) {
       }
       return null;
     }
-    const r = await workspaceBackendAction(action, params);
+    const backendServerUrl = (backendResult && backendResult.serverUrl)
+      || (chat.backend && chat.backend.serverUrl)
+      || '';
+    const r = await workspaceBackendAction(action, {
+      ...params,
+      _backendServerUrl: backendServerUrl
+    });
     if (!r || r.ok === false) throw new Error((r && r.error) || '切换沙箱目录失败');
     if (!isCurrentRestore()) return r;
     if (typeof updateWorkspaceDisplay === 'function') updateWorkspaceDisplay(r, { persistToChat: false });
@@ -467,15 +473,24 @@ async function initializeAutoCreatedChatWorkspace(chat, options = {}) {
     : { type: 'local' };
   chat.backend = desiredBackend.type === 'remote' ? { ...desiredBackend } : { type: 'local' };
   const session_id = chatWorkspaceSessionId(chat);
+  const restoreGlobalBackend = chatState.currentId !== chat.id && typeof TERMINAL_CONFIG !== 'undefined'
+    ? {
+        serverUrl: TERMINAL_CONFIG.serverUrl,
+        remoteGitProxyUrl: TERMINAL_CONFIG.remoteGitProxyUrl || ''
+      }
+    : null;
   try {
-    await restoreBackendForChat(chat, {
+    const backendResult = await restoreBackendForChat(chat, {
       forceAgentHome: !desiredWorkspace,
       forceLocal: chat.backend.type !== 'remote'
     });
     if (typeof workspaceBackendAction !== 'function') return null;
+    const backendServerUrl = (backendResult && backendResult.serverUrl)
+      || (chat.backend && chat.backend.serverUrl)
+      || '';
     const r = desiredWorkspace
-      ? await workspaceBackendAction('set_workspace', { path: desiredWorkspace, session_id })
-      : await workspaceBackendAction('reset_workspace_to_agent_home', { session_id });
+      ? await workspaceBackendAction('set_workspace', { path: desiredWorkspace, session_id, _backendServerUrl: backendServerUrl })
+      : await workspaceBackendAction('reset_workspace_to_agent_home', { session_id, _backendServerUrl: backendServerUrl });
     if (!r || r.ok === false) throw new Error((r && r.error) || '初始化自动新建对话沙箱失败');
     recordChatWorkspace(chat, r, { preserveBackend: true });
     if (options.updateUi && chatState.currentId === chat.id && typeof updateWorkspaceDisplay === 'function') {
@@ -486,6 +501,11 @@ async function initializeAutoCreatedChatWorkspace(chat, options = {}) {
   } catch (e) {
     console.warn('[workspace] initialize auto-created chat workspace failed:', e);
     return null;
+  } finally {
+    if (restoreGlobalBackend && typeof TERMINAL_CONFIG !== 'undefined') {
+      TERMINAL_CONFIG.serverUrl = restoreGlobalBackend.serverUrl;
+      TERMINAL_CONFIG.remoteGitProxyUrl = restoreGlobalBackend.remoteGitProxyUrl;
+    }
   }
 }
 

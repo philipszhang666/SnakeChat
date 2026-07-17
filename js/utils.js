@@ -163,13 +163,19 @@ function updateWorkspaceDisplay(info, options = {}) {
 }
 
 async function workspaceBackendAction(action, params = {}) {
-  const url = (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
-    ? TERMINAL_CONFIG.serverUrl : 'http://localhost:8765';
+  const requestParams = params && typeof params === 'object' ? { ...params } : {};
+  const explicitServerUrl = requestParams._backendServerUrl || '';
+  delete requestParams._backendServerUrl;
+  const url = explicitServerUrl || (
+    (typeof TERMINAL_CONFIG !== 'undefined' && TERMINAL_CONFIG.serverUrl)
+      ? TERMINAL_CONFIG.serverUrl
+      : 'http://localhost:8765'
+  );
 
   const body = {
     action,
-    ...params,
-    session_id: params.session_id || currentWorkspaceSessionId()
+    ...requestParams,
+    session_id: requestParams.session_id || currentWorkspaceSessionId()
   };
   const doPost = () => fetch(url, {
     method: 'POST',

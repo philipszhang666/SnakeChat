@@ -1067,8 +1067,7 @@ function normalizeMockRemoteWorkspace(workspace) {
 
 function mockRemoteConnectionId(sshCommand, remoteWorkspace, remoteAgentPort) {
   const command = normalizeMockSshCommand(sshCommand).replace(/[^A-Za-z0-9_.@-]+/g, '_') || 'remote';
-  const workspace = normalizeMockRemoteWorkspace(remoteWorkspace).replace(/[^A-Za-z0-9_.@-]+/g, '_') || 'workspace';
-  return `mock-${command}-${workspace}-${Number(remoteAgentPort) || 8765}`;
+  return `mock-${command}-${Number(remoteAgentPort) || 8765}`;
 }
 
 function mockRemoteConnections(state = {}) {
@@ -1100,18 +1099,19 @@ function normalizeMockRemoteConnection(connection = {}) {
 function mockRemoteConnectionMatches(connection, body = {}) {
   const c = normalizeMockRemoteConnection(connection);
   const connectionId = body.connection_id || body.connectionId || '';
-  if (connectionId && connectionId !== c.connection_id) return false;
+  if (connectionId && connectionId === c.connection_id) return true;
   const serverUrl = normalizeMockBackendUrl(body.server_url || body.serverUrl || '');
+  if (serverUrl && serverUrl === c.server_url) return true;
   const sshCommand = normalizeMockSshCommand(body.ssh_command || body.sshCommand || '');
-  if (sshCommand && sshCommand !== c.ssh_command) return false;
   const remoteAgentPort = Number(body.remote_agent_port || body.remoteAgentPort || 0) || 0;
-  if (remoteAgentPort && remoteAgentPort !== c.remote_agent_port) return false;
-  const remoteWorkspace = normalizeMockRemoteWorkspace(body.remote_workspace || body.remoteWorkspace || '');
-  if (remoteWorkspace !== '~/project' && remoteWorkspace !== c.remote_workspace) return false;
-  if (serverUrl && serverUrl !== c.server_url && !sshCommand && !remoteAgentPort && remoteWorkspace === '~/project') return false;
   const localPort = Number(body.local_port || body.localPort || 0) || 0;
+  const hasSelector = !!(connectionId || serverUrl || sshCommand || remoteAgentPort || localPort);
+  if (connectionId && !serverUrl && !sshCommand && !remoteAgentPort && !localPort) return false;
+  if (serverUrl && !sshCommand && !remoteAgentPort && !localPort) return false;
+  if (sshCommand && sshCommand !== c.ssh_command) return false;
+  if (remoteAgentPort && remoteAgentPort !== c.remote_agent_port) return false;
   if (localPort && !sshCommand && !remoteAgentPort && localPort !== c.local_port) return false;
-  return !!(connectionId || serverUrl || sshCommand || remoteAgentPort || localPort || remoteWorkspace !== '~/project');
+  return hasSelector;
 }
 
 function findMockRemoteConnection(state = {}, body = {}) {
@@ -1130,7 +1130,7 @@ function upsertMockRemoteConnection(state = {}, patch = {}) {
   const index = connections.findIndex(connection => {
     const c = normalizeMockRemoteConnection(connection);
     return c.connection_id === next.connection_id
-      || (c.ssh_command === next.ssh_command && c.remote_agent_port === next.remote_agent_port && c.remote_workspace === next.remote_workspace);
+      || (c.ssh_command === next.ssh_command && c.remote_agent_port === next.remote_agent_port);
   });
   if (index >= 0) connections[index] = { ...connections[index], ...next };
   else connections.push(next);
@@ -1228,8 +1228,7 @@ function agentBackendPayload(action, body, state = {}, context = {}) {
       .map(normalizeMockRemoteConnection)
       .find(connection => connection.connected
         && connection.ssh_command === normalizeMockSshCommand(body.ssh_command || 'ssh e2e@example.test')
-        && connection.remote_agent_port === remoteAgentPort
-        && connection.remote_workspace === normalizeMockRemoteWorkspace(body.remote_workspace || '~/project'));
+        && connection.remote_agent_port === remoteAgentPort);
     const connection = upsertMockRemoteConnection(state, {
       ...(existing || {}),
       connected: true,

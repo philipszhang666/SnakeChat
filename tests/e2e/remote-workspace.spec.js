@@ -10,7 +10,6 @@ function remoteBackend({ serverUrl, sshCommand, workspace, localPort = 18765, re
   const connectionId = [
     'mock',
     sshCommand.replace(/[^A-Za-z0-9_.@-]+/g, '_'),
-    workspace.replace(/[^A-Za-z0-9_.@-]+/g, '_'),
     remoteAgentPort
   ].join('-');
   return {
@@ -71,14 +70,6 @@ test.describe('remote workspace restoration', () => {
         connected: true,
         ssh_command: sshA,
         remote_workspace: '/srv/a',
-        remote_agent_port: 8765,
-        local_port: 18765,
-        server_url: 'http://127.0.0.1:18765'
-      },
-      {
-        connected: true,
-        ssh_command: sshA,
-        remote_workspace: '/srv/a2',
         remote_agent_port: 8765,
         local_port: 18765,
         server_url: 'http://127.0.0.1:18765'
@@ -160,6 +151,7 @@ test.describe('remote workspace restoration', () => {
 
     await page.evaluate(() => window.AgentApp.require('chat').restoreWorkspaceForCurrentChat());
     await expect(page.locator('#workspacePath')).toHaveText('/srv/a');
+    const remoteConnectsAfterInitialRestore = backend.backendCalls.filter(call => call.action === 'remote_connect').length;
 
     await page.evaluate(() => window.AgentApp.require('chat').switchChat('remote-a2'));
     await expect(page.locator('#workspacePath')).toHaveText('/srv/a2');
@@ -167,16 +159,24 @@ test.describe('remote workspace restoration', () => {
       const cfg = JSON.parse(window.storage.get('snake_remote_connection_v1'));
       return cfg.profiles['ssh e2e-a@example.test'].remoteWorkspace;
     })).toBe('/srv/a2');
-    expect(backend.backendCalls.filter(call =>
-      call.action === 'remote_connect' && call.body.remote_workspace === '/srv/a2'
-    ).length).toBeLessThanOrEqual(1);
+    expect(backend.backendCalls.filter(call => call.action === 'remote_connect').length)
+      .toBe(remoteConnectsAfterInitialRestore);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'set_workspace'
+      && call.body.path === '/srv/a2'
+      && call.serverUrl === 'http://127.0.0.1:18765'
+    )).toBe(true);
 
     await page.evaluate(() => window.AgentApp.require('chat').switchChat('remote-b'));
     await expect.poll(() => page.evaluate(() => window.AgentApp.require('terminal').TERMINAL_CONFIG.serverUrl)).toBe('http://127.0.0.1:18766');
     await expect(page.locator('#workspacePath')).toHaveText('/srv/b');
-    expect(backend.backendCalls.filter(call =>
-      call.action === 'remote_connect' && call.body.remote_workspace === '/srv/b'
-    ).length).toBeLessThanOrEqual(1);
+    expect(backend.backendCalls.filter(call => call.action === 'remote_connect').length)
+      .toBe(remoteConnectsAfterInitialRestore);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'set_workspace'
+      && call.body.path === '/srv/b'
+      && call.serverUrl === 'http://127.0.0.1:18766'
+    )).toBe(true);
 
     await page.evaluate(() => window.AgentApp.require('chat').switchChat('remote-a'));
     await expect.poll(() => page.evaluate(() => window.AgentApp.require('terminal').TERMINAL_CONFIG.serverUrl)).toBe('http://127.0.0.1:18765');
@@ -185,16 +185,15 @@ test.describe('remote workspace restoration', () => {
       const cfg = JSON.parse(window.storage.get('snake_remote_connection_v1'));
       return cfg.profiles['ssh e2e-a@example.test'].remoteWorkspace;
     })).toBe('/srv/a');
-    expect(backend.backendCalls.filter(call =>
-      call.action === 'remote_connect' && call.body.remote_workspace === '/srv/a'
-    ).length).toBeLessThanOrEqual(1);
+    expect(backend.backendCalls.filter(call => call.action === 'remote_connect').length)
+      .toBe(remoteConnectsAfterInitialRestore);
 
     await page.locator('[data-action="openRemoteConnection"]').click();
     await expect(page.locator('#remoteConnectionModal')).toHaveClass(/show/);
     const sshAWorkspaces = await page.locator('#remoteConnectionsList .remote-connection-item').filter({ hasText: sshA }).locator('.remote-connection-workspace').allTextContents();
-    expect(sshAWorkspaces).toContain('/srv/a');
+    expect(sshAWorkspaces).toEqual(['/srv/a']);
     const sshBWorkspaces = await page.locator('#remoteConnectionsList .remote-connection-item').filter({ hasText: sshB }).locator('.remote-connection-workspace').allTextContents();
-    expect(sshBWorkspaces).toContain('/srv/b');
+    expect(sshBWorkspaces).toEqual(['/srv/b']);
 
     clientErrors.expectNoErrors();
   });
@@ -226,6 +225,84 @@ test.describe('remote workspace restoration', () => {
       .filter(call => call.action === 'list_dir')
       .map(call => call.serverUrl);
     expect(listDirServers).toContain('http://127.0.0.1:18765');
+
+    clientErrors.expectNoErrors();
+  });
+
+  test('initializes a non-current remote chat workspace on its own backend', async ({ page }) => {
+    const { backend, clientErrors } = await gotoApp(page);
+    const sshA = 'ssh active@example.test';
+    const sshB = 'ssh background@example.test';
+    const activeBackend = remoteBackend({ serverUrl: 'http://127.0.0.1:18765', sshCommand: sshA, workspace: '/srv/active', localPort: 18765 });
+    const backgroundBackend = remoteBackend({ serverUrl: 'http://127.0.0.1:18766', sshCommand: sshB, workspace: '/srv/background', localPort: 18766 });
+
+    backend.remoteConnections = [
+      {
+        connected: true,
+        ssh_command: sshA,
+        remote_workspace: '/srv/active',
+        remote_agent_port: 8765,
+        local_port: 18765,
+        server_url: 'http://127.0.0.1:18765'
+      },
+      {
+        connected: true,
+        ssh_command: sshB,
+        remote_workspace: '/srv/background',
+        remote_agent_port: 8765,
+        local_port: 18766,
+        server_url: 'http://127.0.0.1:18766'
+      }
+    ];
+
+    await page.evaluate(({ activeBackend, backgroundBackend }) => {
+      const stateModule = window.AgentApp.require('state');
+      const terminalConfig = window.AgentApp.require('terminal').TERMINAL_CONFIG;
+      stateModule.state.chats = [
+        {
+          id: 'active-remote',
+          title: 'Active remote',
+          messages: [],
+          workspace: '/srv/active',
+          cwd: '/srv/active',
+          backend: activeBackend
+        },
+        {
+          id: 'background-remote',
+          title: 'Background remote',
+          messages: [],
+          backend: backgroundBackend
+        }
+      ];
+      stateModule.state.currentId = 'active-remote';
+      terminalConfig.serverUrl = 'http://127.0.0.1:18765';
+      terminalConfig.workspace = '/srv/active';
+      terminalConfig.cwd = '/srv/active';
+      stateModule.saveData();
+    }, { activeBackend, backgroundBackend });
+
+    await page.evaluate(() => {
+      const stateModule = window.AgentApp.require('state');
+      const chatModule = window.AgentApp.require('chat');
+      const chat = stateModule.chatById('background-remote');
+      return chatModule.initializeAutoCreatedChatWorkspace(chat, {
+        workspace: '/srv/background',
+        backend: chat.backend
+      });
+    });
+
+    await expect.poll(() => page.evaluate(() => window.AgentApp.require('terminal').TERMINAL_CONFIG.serverUrl))
+      .toBe('http://127.0.0.1:18765');
+    expect(backend.backendCalls.some(call =>
+      call.action === 'set_workspace'
+      && call.body.path === '/srv/background'
+      && call.serverUrl === 'http://127.0.0.1:18766'
+    )).toBe(true);
+    expect(backend.backendCalls.some(call =>
+      call.action === 'set_workspace'
+      && call.body.path === '/srv/background'
+      && call.serverUrl === 'http://127.0.0.1:18765'
+    )).toBe(false);
 
     clientErrors.expectNoErrors();
   });
