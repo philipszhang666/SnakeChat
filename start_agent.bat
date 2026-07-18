@@ -23,6 +23,12 @@ set "WORKSPACE=%~dp0"
 REM Strip trailing backslash (argparse can be picky)
 if "%WORKSPACE:~-1%"=="\" set "WORKSPACE=%WORKSPACE:~0,-1%"
 
+REM Browser used to open the frontend. Leave empty to use the Windows default browser.
+REM To force a browser, uncomment and edit one of these examples:
+REM set "AGENT_BROWSER=C:\Program Files\Google\Chrome\Application\chrome.exe"
+REM set "AGENT_BROWSER=C:\Program Files\Microsoft Edge\Application\msedge.exe"
+REM set "AGENT_BROWSER=C:\Program Files\Mozilla Firefox\firefox.exe"
+
 echo.
 echo ============================================================
 echo   Agent Launcher
@@ -46,7 +52,11 @@ for %%F in ("%AGENT_HOME%\AI-Chat-*.html") do (
 )
 if defined HTML_FILE (
     echo Opening frontend: %HTML_FILE%
-    start "" "%HTML_FILE%"
+    if defined AGENT_BROWSER (
+        start "" "%AGENT_BROWSER%" "%HTML_FILE%"
+    ) else (
+        start "" "%HTML_FILE%"
+    )
 ) else (
     echo [WARN] Cannot find frontend HTML: %AGENT_HOME%\AI-Chat-*.html
 )

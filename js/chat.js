@@ -48,6 +48,74 @@ function _abortCurrentTaskIfAny(chatId) {
   // 其他运行态旗标不在这里硬清：让 catch/finally 分支自己收尾。
 }
 
+function chatMessagesScroller() {
+  return document.getElementById('messages');
+}
+
+function saveChatScrollPosition(chat, options = {}) {
+  const c = chat || chatCurrentChat();
+  const el = chatMessagesScroller();
+  if (!c || !el) return false;
+  const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  c.scrollTop = Math.max(0, Math.min(el.scrollTop || 0, maxTop));
+  c.scrollHeight = el.scrollHeight || 0;
+  c.scrollClientHeight = el.clientHeight || 0;
+  c.scrollAtBottom = maxTop <= 0 || (maxTop - c.scrollTop) < 120;
+  c.scrollSavedAt = Date.now();
+  if (options.persist && chatSaveData) chatSaveData();
+  return true;
+}
+
+function restoreChatScrollPosition(chat) {
+  const c = chat || chatCurrentChat();
+  const el = chatMessagesScroller();
+  if (!c || !el) return false;
+  const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  const hasSavedTop = Number.isFinite(Number(c.scrollTop));
+  const shouldGoBottom = !hasSavedTop || c.scrollAtBottom === true;
+  el.scrollTop = shouldGoBottom ? el.scrollHeight : Math.max(0, Math.min(Number(c.scrollTop) || 0, maxTop));
+  return true;
+}
+
+let _pendingScrollRestoreChatId = null;
+let _initialScrollRestoreDone = false;
+let _scrollSaveTimer = null;
+
+function requestRestoreChatScrollPosition(chat) {
+  const c = chat || chatCurrentChat();
+  if (!c || !c.id) return;
+  _pendingScrollRestoreChatId = c.id;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (_pendingScrollRestoreChatId !== c.id || chatState.currentId !== c.id) return;
+      restoreChatScrollPosition(c);
+      _pendingScrollRestoreChatId = null;
+    });
+  });
+}
+
+function maybeRestorePendingChatScrollPosition(chat) {
+  const c = chat || chatCurrentChat();
+  if (!c || !c.id || _pendingScrollRestoreChatId !== c.id) return false;
+  requestRestoreChatScrollPosition(c);
+  return true;
+}
+
+function bindChatScrollPositionTracker() {
+  const el = chatMessagesScroller();
+  if (!el || el._chatScrollPositionBound) return;
+  el._chatScrollPositionBound = true;
+  el.addEventListener('scroll', () => {
+    const c = chatCurrentChat();
+    if (!c) return;
+    saveChatScrollPosition(c);
+    clearTimeout(_scrollSaveTimer);
+    _scrollSaveTimer = setTimeout(() => {
+      saveChatScrollPosition(c, { persist: true });
+    }, 600);
+  }, { passive: true });
+}
+
 // ⭐ "一次性模式"消费：选定走哪条分支后立刻关闭对应开关 + 熄灭按钮
 //   下次发送将默认走普通对话，除非用户重新点亮开关
 //   返回值：'outline' | 'plan' | 'reflection' | 'normal'
@@ -664,6 +732,7 @@ async function submitEditResend(input) {
 }
 
 function newChat() {
+  saveChatScrollPosition(chatCurrentChat(), { persist: true });
   const workspaceSnapshot = currentWorkspaceSnapshotForNewChat();
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: null });
   const id = 'c_' + Date.now();
@@ -684,6 +753,7 @@ function newChat() {
 }
 
 function switchChat(id) {
+  saveChatScrollPosition(chatCurrentChat(), { persist: true });
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: id });
   chatState.currentId = id;
   const chat = chatCurrentChat();
@@ -697,6 +767,7 @@ function switchChat(id) {
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
   restoreWorkspaceForChat(chat);
+  requestRestoreChatScrollPosition(chat);
 }
 
 function updateTemporaryChatButton() {
@@ -707,6 +778,7 @@ function updateTemporaryChatButton() {
 }
 
 function startTemporaryChat() {
+  saveChatScrollPosition(chatCurrentChat(), { persist: true });
   if (typeof isTemporaryChat === 'function' && isTemporaryChat(chatState.currentId)) {
     updateTemporaryChatButton();
     return;
@@ -991,6 +1063,238 @@ function renameChat(id, e) {
   if (typeof toast === 'function') toast('已重命名');
 }
 
+let _chatDetailsLastFocus = null;
+
+function chatDetailsHasValue(value) {
+  return value !== undefined && value !== null && value !== '';
+}
+
+function chatDetailsTimestamp(value) {
+  if (!chatDetailsHasValue(value)) return 0;
+  if (value instanceof Date) {
+    const t = value.getTime();
+    return Number.isFinite(t) ? t : 0;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return value < 1000000000000 ? value * 1000 : value;
+  }
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  if (/^\d+(\.\d+)?$/.test(raw)) return chatDetailsTimestamp(Number(raw));
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function chatDetailsFormatTime(value) {
+  const ts = chatDetailsTimestamp(value);
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+  } catch (_) {
+    return '';
+  }
+}
+
+function chatDetailsMessageTime(msg) {
+  if (!msg || typeof msg !== 'object') return 0;
+  return Math.max(
+    chatDetailsTimestamp(msg._endTime),
+    chatDetailsTimestamp(msg._lastActivityAt),
+    chatDetailsTimestamp(msg.updatedAt),
+    chatDetailsTimestamp(msg.createdAt),
+    chatDetailsTimestamp(msg.timestamp),
+    chatDetailsTimestamp(msg.time),
+    chatDetailsTimestamp(msg.ts),
+    chatDetailsTimestamp(msg._startTime)
+  );
+}
+
+function chatDetailsLatestMessageTime(chat, predicate) {
+  const messages = Array.isArray(chat && chat.messages) ? chat.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg._hiddenFromUI) continue;
+    if (predicate && !predicate(msg)) continue;
+    const ts = chatDetailsMessageTime(msg);
+    if (ts) return ts;
+  }
+  return 0;
+}
+
+function chatDetailsTypeText(chat) {
+  const parts = [];
+  if (chat && chat.temporary) parts.push('临时会话');
+  if (chat && chat.taskQueue) parts.push('队列任务');
+  if (chat && chat.concurrent && chat.concurrent.type === 'concurrent_requests') parts.push('并发请求');
+  if (chat && chat.debate && chat.debate.type === 'debate_mode') parts.push('辩论模式');
+  return parts.length ? parts.join(' · ') : '普通对话';
+}
+
+function chatDetailsBackendText(backend) {
+  if (backend && backend.type === 'remote') return '远程连接';
+  return '本地';
+}
+
+function chatDetailsCountStats(chat) {
+  const messages = Array.isArray(chat && chat.messages) ? chat.messages : [];
+  const visible = messages.filter(m => m && !m._hiddenFromUI);
+  const countRole = role => visible.filter(m => m.role === role).length;
+  const toolCallCount = messages.reduce((sum, m) => {
+    const calls = Array.isArray(m && m.tool_calls) ? m.tool_calls.length : 0;
+    return sum + calls;
+  }, 0);
+  const attachmentCount = messages.reduce((sum, m) => {
+    const atts = Array.isArray(m && m.attachments) ? m.attachments.filter(a => a && !a._stripped).length : 0;
+    return sum + atts;
+  }, 0);
+  return {
+    total: messages.length,
+    visible: visible.length,
+    user: countRole('user'),
+    assistant: countRole('assistant'),
+    tool: countRole('tool'),
+    system: countRole('system'),
+    toolCallCount,
+    attachmentCount
+  };
+}
+
+function chatDetailsRowsHtml(rows) {
+  return rows
+    .filter(row => row && chatDetailsHasValue(row.value))
+    .map(row => {
+      const value = String(row.value);
+      const valueHtml = row.code
+        ? `<code title="${escapeHtml(value)}">${escapeHtml(value)}</code>`
+        : escapeHtml(value);
+      return `
+        <div class="chat-details-row">
+          <div class="chat-details-label">${escapeHtml(row.label)}</div>
+          <div class="chat-details-value">${valueHtml}</div>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function chatDetailsSectionHtml(title, rows) {
+  const body = chatDetailsRowsHtml(rows);
+  if (!body) return '';
+  return `
+    <section class="chat-details-section">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="chat-details-grid">${body}</div>
+    </section>
+  `;
+}
+
+function ensureChatDetailsModal() {
+  let mask = document.getElementById('chatDetailsMask');
+  if (mask) return mask;
+  mask = document.createElement('div');
+  mask.id = 'chatDetailsMask';
+  mask.className = 'modal-mask chat-details-mask';
+  mask.innerHTML = `
+    <div class="modal chat-details-modal" role="dialog" aria-modal="true" aria-labelledby="chatDetailsTitle">
+      <h2 id="chatDetailsTitle">
+        <span>对话详情</span>
+        <button class="modal-close" type="button" data-chat-details-close aria-label="关闭">×</button>
+      </h2>
+      <div class="chat-details-content" id="chatDetailsContent"></div>
+      <div class="modal-footer chat-details-footer">
+        <button class="btn" type="button" data-chat-details-close>关闭</button>
+      </div>
+    </div>
+  `;
+  mask.addEventListener('click', e => {
+    if (e.target === mask || e.target.closest('[data-chat-details-close]')) hideChatDetails();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && mask.classList.contains('show')) hideChatDetails();
+  });
+  document.body.appendChild(mask);
+  return mask;
+}
+
+function hideChatDetails() {
+  const mask = document.getElementById('chatDetailsMask');
+  if (mask) mask.classList.remove('show');
+  if (_chatDetailsLastFocus && typeof _chatDetailsLastFocus.focus === 'function' && document.contains(_chatDetailsLastFocus)) {
+    try { _chatDetailsLastFocus.focus(); } catch (_) {}
+  }
+  _chatDetailsLastFocus = null;
+}
+
+function showChatDetails(id, e) {
+  if (e) e.stopPropagation();
+  const chat = chatByIdFromState(id);
+  if (!chat) return;
+  closeChatItemMenus();
+  const mask = ensureChatDetailsModal();
+  const content = mask.querySelector('#chatDetailsContent');
+  if (!content) return;
+
+  const backend = chat.backend && typeof chat.backend === 'object' ? chat.backend : { type: 'local' };
+  const stats = chatDetailsCountStats(chat);
+  const title = _chatDisplayTitle(chat) || chat.title || '新对话';
+  const sandbox = chat.workspace || chat.cwd || (backend.type === 'remote' ? backend.remoteWorkspace : '') || '';
+  const latestAssistantAt = chatDetailsLatestMessageTime(chat, m => m.role === 'assistant');
+  const latestMessageAt = chatDetailsLatestMessageTime(chat);
+  const statusParts = [];
+  if (chat.id === chatState.currentId) statusParts.push('当前对话');
+  if (chat.pinnedAt) statusParts.push('已置顶');
+  if (chatIsChatGenerating && chatIsChatGenerating(chat.id)) statusParts.push('正在回答');
+  if (!statusParts.length) statusParts.push('空闲');
+
+  content.innerHTML = `
+    <div class="chat-details-head">
+      <div class="chat-details-type">${escapeHtml(chatDetailsTypeText(chat))} · ${escapeHtml(chatDetailsBackendText(backend))}</div>
+      <div class="chat-details-name" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+      ${sandbox ? `<code title="${escapeHtml(sandbox)}">${escapeHtml(sandbox)}</code>` : ''}
+    </div>
+    ${chatDetailsSectionHtml('基础信息', [
+      { label: '对话 ID', value: chat.id, code: true },
+      { label: '状态', value: statusParts.join(' · ') },
+      { label: '创建时间', value: chatDetailsFormatTime(chat.createdAt) },
+      { label: '最近回答时间', value: chatDetailsFormatTime(latestAssistantAt) },
+      { label: '最近消息时间', value: chatDetailsFormatTime(latestMessageAt) },
+      { label: '置顶时间', value: chatDetailsFormatTime(chat.pinnedAt) }
+    ])}
+    ${chatDetailsSectionHtml('沙箱绑定', [
+      { label: '沙箱目录', value: sandbox, code: true },
+      { label: '工作目录', value: chat.cwd && chat.cwd !== sandbox ? chat.cwd : '', code: true },
+      { label: 'Agent Home', value: chat.agentHome, code: true },
+      { label: '绑定更新时间', value: chatDetailsFormatTime(chat.workspaceUpdatedAt) }
+    ])}
+    ${chatDetailsSectionHtml('后端连接', [
+      { label: '后端类型', value: chatDetailsBackendText(backend) },
+      { label: 'SSH 命令', value: backend.sshCommand, code: true },
+      { label: '远程目录', value: backend.remoteWorkspace && backend.remoteWorkspace !== sandbox ? backend.remoteWorkspace : '', code: true },
+      { label: '远程 Agent 端口', value: backend.remoteAgentPort },
+      { label: '本地转发端口', value: backend.localPort },
+      { label: '后端地址', value: backend.serverUrl, code: true },
+      { label: 'Git 代理', value: backend.remoteGitProxyUrl, code: true },
+      { label: '连接更新时间', value: chatDetailsFormatTime(backend.updatedAt) }
+    ])}
+    ${chatDetailsSectionHtml('内容统计', [
+      { label: '消息总数', value: stats.total },
+      { label: '可见消息', value: stats.visible },
+      { label: '用户消息', value: stats.user },
+      { label: 'AI 回答', value: stats.assistant },
+      { label: '工具消息', value: stats.tool },
+      { label: '系统消息', value: stats.system },
+      { label: '工具调用', value: stats.toolCallCount },
+      { label: '附件', value: stats.attachmentCount }
+    ])}
+  `;
+
+  _chatDetailsLastFocus = document.activeElement;
+  mask.classList.add('show');
+  const closeBtn = mask.querySelector('[data-chat-details-close]');
+  if (closeBtn) closeBtn.focus();
+}
+
 let _chatMenuCloseTimer = null;
 
 function closeChatItemMenus(keepWrap) {
@@ -1006,7 +1310,7 @@ function positionChatItemMenu(wrap) {
   if (!btn || !menu) return;
   const rect = btn.getBoundingClientRect();
   const width = menu.offsetWidth || 136;
-  const height = menu.offsetHeight || 118;
+  const height = menu.offsetHeight || 154;
   const margin = 8;
   let left = rect.right - width;
   let top = rect.bottom + 4;
@@ -1134,6 +1438,7 @@ function renderSidebarChatItem(c, options = {}) {
         <span class="chat-item-menu" role="menu">
           <button class="chat-item-menu-entry" type="button" data-chat-action="pin" role="menuitem"><span class="chat-item-menu-icon">📌</span><span class="chat-item-menu-label">${isPinned ? '取消置顶' : '置顶'}</span></button>
           <button class="chat-item-menu-entry" type="button" data-chat-action="rename" role="menuitem"><span class="chat-item-menu-icon">✏️</span><span class="chat-item-menu-label">重命名</span></button>
+          <button class="chat-item-menu-entry" type="button" data-chat-action="details" role="menuitem"><span class="chat-item-menu-icon">ℹ</span><span class="chat-item-menu-label">详情</span></button>
           <button class="chat-item-menu-entry danger" type="button" data-chat-action="delete" role="menuitem"><span class="chat-item-menu-icon">🗑</span><span class="chat-item-menu-label">删除</span></button>
         </span>
       </span>`;
@@ -1184,6 +1489,7 @@ function handleChatListClick(e) {
     const action = actionBtn.dataset.chatAction;
     if (action === 'pin') togglePinChat(id, e);
     else if (action === 'rename') renameChat(id, e);
+    else if (action === 'details') showChatDetails(id, e);
     else if (action === 'delete') deleteChat(id, e);
     return;
   }
@@ -1233,12 +1539,19 @@ function handleChatListKeydown(e) {
   }
 }
 
+function refreshChatSearchHighlightsIfAvailable() {
+  if (typeof refreshChatSearchHighlights === 'function') {
+    requestAnimationFrame(refreshChatSearchHighlights);
+  }
+}
+
 function syncChatStartState(isStartState) {
   const main = document.querySelector('.main');
   if (main) main.classList.toggle('chat-start-state', !!isStartState);
 }
 
 function renderMessages() {
+  bindChatScrollPositionTracker();
   const inner = document.getElementById('messagesInner');
   const c = chatCurrentChat();
   const hasVisibleMessages = !!(c && Array.isArray(c.messages) && c.messages.some(m => m && !m._hiddenFromUI));
@@ -1250,16 +1563,24 @@ function renderMessages() {
         <h1><span class="welcome-icon" aria-hidden="true">👋</span><span class="welcome-title">你好，我是你的 AI 助手</span></h1>
       </div>`;
     if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
+    refreshChatSearchHighlightsIfAvailable();
     return;
   }
-  
+
+  if (!_initialScrollRestoreDone && c && c.id) {
+    _initialScrollRestoreDone = true;
+    _pendingScrollRestoreChatId = c.id;
+  }
   // ⭐ 渲染前先记录滚动位置：用户在底部时才自动跟随
-  const stickToBottom = isNearBottom();
+  const restoringSavedPosition = !!(c && c.id && _pendingScrollRestoreChatId === c.id);
+  const stickToBottom = !restoringSavedPosition && isNearBottom();
 
   if (c.debate && c.debate.type === 'debate_mode' && c.debate.status === 'completed' && typeof renderDebateCompletedChat === 'function') {
     inner.innerHTML = renderDebateCompletedChat(c);
     postRender(inner);
+    refreshChatSearchHighlightsIfAvailable();
     if (stickToBottom) scrollBottom();
+    maybeRestorePendingChatScrollPosition(c);
     if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
     return;
   }
@@ -1275,7 +1596,9 @@ function renderMessages() {
   inner.innerHTML = visibleIndices.map(i => renderMsg(c.messages[i], i)).join('');
   postRender(inner);
   if (typeof groupToolFlows === 'function') groupToolFlows();
+  refreshChatSearchHighlightsIfAvailable();
   if (stickToBottom) scrollBottom();
+  maybeRestorePendingChatScrollPosition(c);
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
 }
 
@@ -1317,6 +1640,7 @@ function refreshMsgNode(idx, targetChat) {
   
   postRender(newNode);
   if (typeof groupToolFlows === 'function') groupToolFlows();
+  refreshChatSearchHighlightsIfAvailable();
   if (stickToBottom) scrollBottom();
   if (typeof updateDialogTimeline === 'function') requestAnimationFrame(updateDialogTimeline);
   return true;
@@ -1353,6 +1677,7 @@ function appendMsgNode(idx, targetChat) {
   inner.appendChild(newNode);
   postRender(newNode);
   if (typeof groupToolFlows === 'function') groupToolFlows();
+  refreshChatSearchHighlightsIfAvailable();
   if (stickToBottom) scrollBottom();
   if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
   if (typeof updateDialogTimeline === 'function') requestAnimationFrame(updateDialogTimeline);
@@ -1394,6 +1719,7 @@ function updateMsgContentNode(idx, targetChat, options = {}) {
     else delete timer.dataset.frozen;
   }
   postRender(msgNode, { skipMath: isStreaming });
+  refreshChatSearchHighlightsIfAvailable();
   if (shouldFollow) scrollBottom();
   if (typeof updateDialogTimeline === 'function') requestAnimationFrame(updateDialogTimeline);
   return true;
@@ -2487,6 +2813,7 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     initializeAutoCreatedChatWorkspace,
     restoreWorkspaceForCurrentChat,
     restoreWorkspaceForChat,
+    showChatDetails,
     deleteMessageTurn,
     _findMessageTurnBounds,
     addAttachment,

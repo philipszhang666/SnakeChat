@@ -110,7 +110,9 @@ const FILE_EXPLORER_EDITOR_FONT_SIZE_MAX = 24;
 
 function fileExplorerBackendContext(options = {}) {
   return {
-    ...(options && typeof options === 'object' ? options : {})
+    ...(options && typeof options === 'object' ? options : {}),
+    skipConfirm: true,
+    allowFullAccess: true
   };
 }
 
@@ -1378,6 +1380,12 @@ function setFileEditorSyntaxMode(path) {
     return;
   }
   setPythonEditorMode(false);
+  const gutter = fileEditorCodeGutter();
+  const highlight = fileEditorCodeHighlight();
+  const pre = document.getElementById('fileEditorCodeHighlight');
+  if (gutter) gutter.innerHTML = '';
+  if (highlight) highlight.innerHTML = '';
+  if (pre) pre.style.transform = '';
   const mode = fileExplorerCodeMirrorMode(normalizedPath);
   if (!mode || !hasFileEditorCodeMirror()) return;
   const cm = ensureFileEditorCodeMirror(normalizedPath);
@@ -4924,6 +4932,9 @@ window.toggleInlineFileSide = toggleInlineFileSide;
 
 window.AgentApp.define('fileExplorer', {
   FILE_EXPLORER_STATE,
+  fileExplorerBackendContext,
+  fileExplorerFullAccessBackendContext,
+  fileExplorerPathBackendContext,
   normalizeExplorerPath,
   resolveFileExplorerOpenPath,
   isBareFileExplorerFileReference,

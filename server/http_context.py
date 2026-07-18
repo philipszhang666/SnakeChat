@@ -134,7 +134,7 @@ class ResponseWriter:
         return self._handler.headers.get('Origin', '')
 
     def _workspace(self):
-        return (self._context.workspace if self._context else '') or config.get_current_workspace()
+        return config.get_current_workspace() or (self._context.workspace if self._context else '')
 
     def _cwd(self):
-        return (self._context.cwd if self._context else '') or config.get_current_cwd()
+        return config.get_current_cwd() or (self._context.cwd if self._context else '')

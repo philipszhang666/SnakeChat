@@ -887,8 +887,18 @@ function applyImport() {
 }
 
 async function resetAllData() {
-  if (!confirm('⚠️ 清空所有数据？建议先备份！')) return;
-  if (!confirm('再次确认：不可恢复！')) return;
+  const warning = [
+    '确认清空所有本地数据？',
+    '',
+    '风险：',
+    '- 会清空浏览器 IndexedDB 和 localStorage 中的 Agent 数据。',
+    '- 对话历史、设置、API 配置、工具、工具输出归档、权限记录等本地数据都会被删除。',
+    '- 页面会立即刷新，删除后无法从应用内恢复。',
+    '',
+    '建议先下载备份。'
+  ].join('\n');
+  if (!confirm(warning)) return;
+  if (!confirm('最后确认：这会永久删除本浏览器内保存的所有 Agent 数据，继续吗？')) return;
   // ⭐ 一键清空：storage.clearAll() 会把 IndexedDB 和 localStorage 一起清掉
   if (typeof storage !== 'undefined' && storage.clearAll) {
     await Promise.resolve(storage.clearAll());

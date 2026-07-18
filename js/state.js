@@ -553,7 +553,7 @@ function injectBuiltinTools() {
   const existingNames = new Set(state.tools.map(t => t.name));
   const currentSignatures = STATE_BUILTIN_TOOLS.map(t => t.name);
   const builtinByName = new Map(STATE_BUILTIN_TOOLS.map(t => [t.name, t]));
-  const BUILTIN_TOOL_REFRESH_NAMES = new Set(['execute_action']);
+  const BUILTIN_TOOL_REFRESH_NAMES = new Set(['execute_action', 'web_search', 'fetch_url']);
   
   // ⭐ 可选工具组：首次安装默认不注入（用户在工具面板手动一键启用）
   // 既减少给模型的工具数量，也降低对外暴露的工具特征
