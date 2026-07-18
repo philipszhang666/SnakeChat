@@ -254,6 +254,29 @@ function updateDialogTimeline() {
       <span class="dialog-timeline-point-dot"></span>
     </button>
   `).join('');
+  syncDialogTimelineListScroll(list);
+}
+
+function syncDialogTimelineListScroll(list) {
+  const wrap = list || document.getElementById('dialogTimelineList');
+  if (!wrap) return;
+  const active = wrap.querySelector('.dialog-timeline-point.active');
+  if (!active) return;
+
+  requestAnimationFrame(() => {
+    if (!active.isConnected || active.closest('#dialogTimelineList') !== wrap) return;
+    const activeTop = active.offsetTop;
+    const activeBottom = activeTop + active.offsetHeight;
+    const visibleTop = wrap.scrollTop;
+    const visibleBottom = visibleTop + wrap.clientHeight;
+    const margin = 12;
+
+    if (activeTop < visibleTop + margin) {
+      wrap.scrollTop = Math.max(0, activeTop - margin);
+    } else if (activeBottom > visibleBottom - margin) {
+      wrap.scrollTop = Math.max(0, activeBottom - wrap.clientHeight + margin);
+    }
+  });
 }
 
 function getNearestDialogTimelineIndex(anchors) {

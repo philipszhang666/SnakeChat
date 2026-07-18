@@ -89,6 +89,7 @@ function requestRestoreChatScrollPosition(chat) {
     requestAnimationFrame(() => {
       if (_pendingScrollRestoreChatId !== c.id || chatState.currentId !== c.id) return;
       restoreChatScrollPosition(c);
+      if (typeof updateDialogTimeline === 'function') updateDialogTimeline();
       _pendingScrollRestoreChatId = null;
     });
   });
