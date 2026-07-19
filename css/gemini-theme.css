@@ -1689,6 +1689,7 @@ input::placeholder{
 .git-init-form,
 .git-inline-config,
 .backup-lede,
+.backup-storage-row,
 .pricing-config-box,
 .api-profile-box,
 .json-help{
@@ -2990,6 +2991,7 @@ body.settings-page-open .settings-docked-mask.show{
 [data-theme="dark"] .git-init-form,
 [data-theme="dark"] .git-inline-config,
 [data-theme="dark"] .backup-lede,
+[data-theme="dark"] .backup-storage-row,
 [data-theme="dark"] .pricing-config-box,
 [data-theme="dark"] .context-limit-status,
 [data-theme="dark"] .token-usage-card,

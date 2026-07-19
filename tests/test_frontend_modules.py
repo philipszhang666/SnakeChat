@@ -3546,7 +3546,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertNotIn('function shouldUseBackgroundCommand(command, timeoutSec, timeoutSpecified, newWindow)', terminal_js)
         self.assertIn("'command_task_output'", terminal_js)
         self.assertIn("'command_task_cancel'", terminal_js)
-        self.assertIn("const BUILTIN_TOOL_REFRESH_NAMES = new Set(['execute_action']);", state_js)
+        self.assertIn("const BUILTIN_TOOL_REFRESH_NAMES = new Set(['execute_action', 'web_search', 'fetch_url']);", state_js)
 
     def test_command_task_output_tool_is_exposed(self):
         config_js = (ROOT / 'js' / 'config.js').read_text(encoding='utf-8')

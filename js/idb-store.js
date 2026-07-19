@@ -259,6 +259,65 @@
     return _flushInFlight;
   }
 
+  function idbStringByteLength(value) {
+    const str = value == null ? '' : String(value);
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(str).length;
+    }
+    try {
+      return unescape(encodeURIComponent(str)).length;
+    } catch (e) {
+      return str.length;
+    }
+  }
+
+  function approximateIndexedDBUsageBytes() {
+    let total = 0;
+    for (const [key, value] of kvCache) {
+      total += idbStringByteLength(key) + idbStringByteLength(value);
+    }
+    return total;
+  }
+
+  function indexedDBUsageFromDetails(details) {
+    if (!details || typeof details !== 'object') return null;
+    for (const key of ['indexedDB', 'indexedDb', 'indexeddb']) {
+      const value = Number(details[key]);
+      if (Number.isFinite(value) && value >= 0) return Math.round(value);
+    }
+    return null;
+  }
+
+  async function estimateIndexedDBUsage() {
+    try {
+      await flushNow();
+    } catch (e) {
+      console.warn('[idb-store] flush before usage estimate failed:', e);
+    }
+
+    const approximateBytes = approximateIndexedDBUsageBytes();
+    let estimate = null;
+    try {
+      if (typeof navigator !== 'undefined'
+        && navigator.storage
+        && typeof navigator.storage.estimate === 'function') {
+        estimate = await navigator.storage.estimate();
+      }
+    } catch (e) {
+      console.warn('[idb-store] storage usage estimate failed:', e);
+    }
+
+    const detailedBytes = estimate ? indexedDBUsageFromDetails(estimate.usageDetails) : null;
+    return {
+      bytes: detailedBytes == null ? approximateBytes : detailedBytes,
+      approximate: detailedBytes == null,
+      approximateBytes,
+      entries: kvCache.size,
+      quota: estimate && Number.isFinite(Number(estimate.quota)) ? Number(estimate.quota) : null,
+      originUsage: estimate && Number.isFinite(Number(estimate.usage)) ? Number(estimate.usage) : null
+    };
+  }
+
   // ============ 对外的 storage 同步 API ============
   // 与 localStorage 行为对齐：get 返回 string 或 null；set/remove 同步反映到内存，异步落盘
   const storage = {
@@ -318,6 +377,8 @@
     },
     // 立即落盘（重要操作后可主动调用）
     flush: flushNow,
+    estimateIndexedDBUsage,
+    approximateIndexedDBUsageBytes,
     // ⭐ 注册配额超限回调：业务层（state.js）在这里注册清理函数
     //   回调内可以同步调用 storage.set 进行收缩，然后异步落盘自动重试
     onQuotaError(cb) {
@@ -332,6 +393,7 @@
   window.storage = storage;
   window.idbInit = idbInit;
   window.idbFlush = flushNow;
+  window.idbEstimateUsage = estimateIndexedDBUsage;
 
   // ⭐ 兼容垫片：把"未来希望全部用 storage"的代码，
   //   和"还在用 localStorage 的旧代码"桥接起来。

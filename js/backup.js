@@ -22,6 +22,66 @@ function backupGetPendingImportData() {
   return BackupStateModule.pendingImportData;
 }
 
+let _backupIndexedDbUsageRequest = 0;
+
+function backupFormatStorageSize(bytes) {
+  const safeBytes = Math.max(0, Math.round(Number(bytes) || 0));
+  if (typeof formatSize === 'function') return formatSize(safeBytes);
+  if (safeBytes < 1024) return safeBytes + ' B';
+  if (safeBytes < 1024 * 1024) return (safeBytes / 1024).toFixed(1) + ' KB';
+  if (safeBytes < 1024 * 1024 * 1024) return (safeBytes / 1024 / 1024).toFixed(2) + ' MB';
+  return (safeBytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+function backupSetIndexedDbUsageStatus(valueText, noteText, titleText) {
+  const valueEl = document.getElementById('indexedDbUsageValue');
+  const noteEl = document.getElementById('indexedDbUsageNote');
+  if (valueEl) {
+    valueEl.textContent = valueText || '';
+    if (titleText) valueEl.title = titleText;
+    else valueEl.removeAttribute('title');
+  }
+  if (noteEl) noteEl.textContent = noteText || '';
+}
+
+async function updateBackupIndexedDbUsage() {
+  const valueEl = document.getElementById('indexedDbUsageValue');
+  if (!valueEl) return;
+
+  const requestId = ++_backupIndexedDbUsageRequest;
+  backupSetIndexedDbUsageStatus('计算中...', '正在读取浏览器本地存储用量', '');
+
+  try {
+    let result = null;
+    if (typeof storage !== 'undefined' && storage && typeof storage.estimateIndexedDBUsage === 'function') {
+      result = await storage.estimateIndexedDBUsage();
+    } else if (typeof idbEstimateUsage === 'function') {
+      result = await idbEstimateUsage();
+    } else {
+      throw new Error('IndexedDB usage estimator unavailable');
+    }
+    if (requestId !== _backupIndexedDbUsageRequest) return;
+
+    const bytes = typeof result === 'number' ? Number(result) : Number(result && result.bytes);
+    if (!Number.isFinite(bytes) || bytes < 0) throw new Error('Invalid IndexedDB usage estimate');
+
+    const approximate = !!(result && result.approximate);
+    const valueText = (approximate ? '约 ' : '') + backupFormatStorageSize(bytes);
+    const noteText = approximate
+      ? '按当前应用缓存估算，不含浏览器内部索引开销'
+      : '浏览器提供的 IndexedDB 用量';
+    const titleParts = [`IndexedDB：${valueText}`];
+    if (result && Number.isFinite(Number(result.entries))) titleParts.push(`记录数：${Number(result.entries)}`);
+    if (result && Number.isFinite(Number(result.originUsage))) titleParts.push(`当前来源总用量：${backupFormatStorageSize(result.originUsage)}`);
+    if (result && Number.isFinite(Number(result.quota))) titleParts.push(`浏览器配额：${backupFormatStorageSize(result.quota)}`);
+    backupSetIndexedDbUsageStatus(valueText, noteText, titleParts.join('\n'));
+  } catch (e) {
+    if (requestId !== _backupIndexedDbUsageRequest) return;
+    console.warn('[backup] IndexedDB usage estimate failed:', e);
+    backupSetIndexedDbUsageStatus('无法读取', '当前浏览器未返回 IndexedDB 用量', e && e.message ? e.message : '');
+  }
+}
+
 function openBackup() {
   document.getElementById('backupModal').classList.add('show');
   document.getElementById('importText').value = '';
@@ -29,6 +89,7 @@ function openBackup() {
   document.getElementById('importPreview').className = 'test-result';
   document.getElementById('importPreview').textContent = '';
   backupSetPendingImportData(null);
+  updateBackupIndexedDbUsage();
 }
 
 function closeBackup() {
@@ -914,6 +975,7 @@ async function resetAllData() {
 }
 window.openBackup = openBackup;
 window.closeBackup = closeBackup;
+window.updateBackupIndexedDbUsage = updateBackupIndexedDbUsage;
 window.renderExportTxtChatSelect = renderExportTxtChatSelect;
 window.exportSelectedChatTxt = exportSelectedChatTxt;
 window.exportSelectedChatDoc = exportSelectedChatDoc;
@@ -928,6 +990,7 @@ window.resetAllData = resetAllData;
 window.AgentApp.define('backup', {
   openBackup,
   closeBackup,
+  updateBackupIndexedDbUsage,
   backupJsonClone,
   backupSettingsKeysByPrefixFrom,
   backupSettingsKeysByPrefix,
