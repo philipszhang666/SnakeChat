@@ -27,7 +27,9 @@ function dialogManagerUpdateSendBtn() {
 }
 
 const DIALOG_MANAGER_ROOT_ID = '__root';
+const DIALOG_FAVORITE_SORT_MODES = ['newest', 'oldest', 'source', 'title'];
 let dialogManagerSelectedChatId = '';
+let dialogFavoriteAnswerSearch = '';
 
 function ensureDialogManagerSettings() {
   if (!dialogManagerState.settings.dialogManager || typeof dialogManagerState.settings.dialogManager !== 'object') {
@@ -39,6 +41,8 @@ function ensureDialogManagerSettings() {
   if (!dm.explorerSortMode || !['created','name','recent'].includes(dm.explorerSortMode)) dm.explorerSortMode = 'created';
   if (!Array.isArray(dm.folders)) dm.folders = [];
   if (!Array.isArray(dm.prompts)) dm.prompts = [];
+  if (!Array.isArray(dm.favoriteAnswers)) dm.favoriteAnswers = [];
+  if (!DIALOG_FAVORITE_SORT_MODES.includes(dm.favoriteAnswerSortMode)) dm.favoriteAnswerSortMode = 'newest';
   dm.folders = dm.folders
     .filter(folder => folder && typeof folder === 'object')
     .map(folder => ({
@@ -62,6 +66,25 @@ function ensureDialogManagerSettings() {
       createdAt: Number(prompt.createdAt) || Date.now(),
       updatedAt: Number(prompt.updatedAt) || Date.now()
     }));
+  dm.favoriteAnswers = dm.favoriteAnswers
+    .filter(answer => answer && typeof answer === 'object')
+    .map((answer, index) => {
+      const content = dialogManagerPlainText(answer.content).trim();
+      return {
+        id: answer.id || ('fav_' + Date.now().toString(36) + '_' + index + '_' + Math.random().toString(36).slice(2, 6)),
+        title: String(answer.title || favoriteAnswerTitle(content)).trim() || '收藏回答',
+        content,
+        sourceChatId: String(answer.sourceChatId || ''),
+        sourceChatTitle: String(answer.sourceChatTitle || ''),
+        sourceMessageIndex: Number.isFinite(Number(answer.sourceMessageIndex)) ? Number(answer.sourceMessageIndex) : -1,
+        sourceQuestion: String(answer.sourceQuestion || ''),
+        sourceCreatedAt: Number(answer.sourceCreatedAt) || 0,
+        messageCreatedAt: Number(answer.messageCreatedAt) || 0,
+        createdAt: Number(answer.createdAt) || Date.now(),
+        updatedAt: Number(answer.updatedAt) || Number(answer.createdAt) || Date.now()
+      };
+    })
+    .filter(answer => answer.content);
   return dm;
 }
 
@@ -86,6 +109,233 @@ function dialogManagerPlainText(value) {
     }).filter(Boolean).join('\n');
   }
   try { return JSON.stringify(value, null, 2); } catch (e) { return String(value); }
+}
+
+function favoriteAnswerTitle(content) {
+  const text = String(content || '').replace(/\s+/g, ' ').trim();
+  return (text ? text.slice(0, 64) : '收藏回答') || '收藏回答';
+}
+
+function favoriteAnswerDate(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '';
+  try { return new Date(n).toLocaleString(); } catch (e) { return ''; }
+}
+
+function favoriteAnswerById(favoriteId, dm = ensureDialogManagerSettings()) {
+  return (dm.favoriteAnswers || []).find(item => item && item.id === favoriteId) || null;
+}
+
+function favoriteAnswerSourceQuestion(chat, msgIdx) {
+  if (!chat || !Array.isArray(chat.messages)) return '';
+  for (let i = Math.min(Number(msgIdx) || 0, chat.messages.length - 1); i >= 0; i--) {
+    const msg = chat.messages[i];
+    if (!msg || msg._hiddenFromUI || msg.role !== 'user') continue;
+    return dialogManagerPlainText(msg.content).replace(/\s+/g, ' ').trim().slice(0, 500);
+  }
+  return '';
+}
+
+function favoriteAnswerSourceExists(answer) {
+  return !!(answer && answer.sourceChatId && dialogManagerChatById(answer.sourceChatId));
+}
+
+function clearFavoriteAnswerMessageRefs(favoriteId) {
+  if (!favoriteId) return false;
+  let changed = false;
+  const chats = [...(dialogManagerState.chats || []), dialogManagerState.temporaryChat].filter(Boolean);
+  chats.forEach(chat => {
+    (chat.messages || []).forEach(msg => {
+      if (msg && msg._favoriteAnswerId === favoriteId) {
+        delete msg._favoriteAnswerId;
+        changed = true;
+      }
+    });
+  });
+  return changed;
+}
+
+function createFavoriteAnswerFromMessage(chat, msg, idx) {
+  const dm = ensureDialogManagerSettings();
+  const content = dialogManagerPlainText(msg && msg.content).trim();
+  if (!content) return null;
+  const now = Date.now();
+  const id = 'fav_' + now.toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  const answer = {
+    id,
+    title: favoriteAnswerTitle(content),
+    content,
+    sourceChatId: chat && chat.id ? chat.id : '',
+    sourceChatTitle: dialogManagerChatTitle(chat),
+    sourceMessageIndex: Number(idx),
+    sourceQuestion: favoriteAnswerSourceQuestion(chat, idx),
+    sourceCreatedAt: Number(chat && chat.createdAt) || 0,
+    messageCreatedAt: Number((msg && (msg._startTime || msg.createdAt || msg._endTime)) || 0),
+    createdAt: now,
+    updatedAt: now
+  };
+  dm.favoriteAnswers.unshift(answer);
+  msg._favoriteAnswerId = id;
+  dialogManagerPersistSettings();
+  dialogManagerSaveData();
+  return answer;
+}
+
+function toggleFavoriteAnswer(idx) {
+  const chat = dialogManagerCurrentChat();
+  if (!chat || !Array.isArray(chat.messages)) return;
+  const msg = chat.messages[idx];
+  if (!msg || msg.role !== 'assistant') return;
+
+  const dm = ensureDialogManagerSettings();
+  const existing = msg._favoriteAnswerId ? favoriteAnswerById(msg._favoriteAnswerId, dm) : null;
+  if (existing) {
+    removeFavoriteAnswer(existing.id, { silent: true });
+    dialogManagerToast('已取消收藏回答', 1800);
+    return;
+  }
+
+  if (msg._favoriteAnswerId) delete msg._favoriteAnswerId;
+  const answer = createFavoriteAnswerFromMessage(chat, msg, idx);
+  if (!answer) {
+    dialogManagerToast('空回答不能收藏', 2000);
+    return;
+  }
+  dialogManagerRenderMessages();
+  renderFavoriteAnswers();
+  dialogManagerToast('已收藏回答', 1800);
+}
+
+function removeFavoriteAnswer(favoriteId, options = {}) {
+  const dm = ensureDialogManagerSettings();
+  const before = dm.favoriteAnswers.length;
+  dm.favoriteAnswers = dm.favoriteAnswers.filter(item => item && item.id !== favoriteId);
+  if (dm.favoriteAnswers.length === before) return;
+  const refsChanged = clearFavoriteAnswerMessageRefs(favoriteId);
+  dialogManagerPersistSettings();
+  if (refsChanged) dialogManagerSaveData();
+  dialogManagerRenderMessages();
+  renderFavoriteAnswers();
+  if (!options.silent) dialogManagerToast('已取消收藏回答', 1800);
+}
+
+function copyFavoriteAnswer(favoriteId) {
+  const answer = favoriteAnswerById(favoriteId);
+  if (!answer) return;
+  navigator.clipboard.writeText(answer.content || '')
+    .then(() => dialogManagerToast('已复制收藏回答', 1600))
+    .catch(e => alert('复制失败：' + e.message));
+}
+
+function openFavoriteAnswerSource(favoriteId) {
+  const answer = favoriteAnswerById(favoriteId);
+  if (!answer) return;
+  if (typeof openFavoriteAnswerPreview === 'function') {
+    openFavoriteAnswerPreview(answer.id);
+    return;
+  }
+  dialogManagerToast('暂时无法打开收藏回答预览', 2400);
+}
+
+function setFavoriteAnswerSearch(value) {
+  dialogFavoriteAnswerSearch = String(value || '');
+  renderFavoriteAnswers();
+}
+
+function setFavoriteAnswerSortMode(mode) {
+  const dm = ensureDialogManagerSettings();
+  dm.favoriteAnswerSortMode = DIALOG_FAVORITE_SORT_MODES.includes(mode) ? mode : 'newest';
+  dialogManagerPersistSettings();
+  renderFavoriteAnswers();
+}
+
+function sortedFavoriteAnswers(list, mode) {
+  const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+  const items = (list || []).slice();
+  items.sort((a, b) => {
+    if (mode === 'oldest') return (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0);
+    if (mode === 'source') {
+      const sourceCmp = collator.compare(a.sourceChatTitle || '', b.sourceChatTitle || '');
+      if (sourceCmp) return sourceCmp;
+      return (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0);
+    }
+    if (mode === 'title') {
+      const titleCmp = collator.compare(a.title || '', b.title || '');
+      if (titleCmp) return titleCmp;
+      return (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0);
+    }
+    return (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0);
+  });
+  return items;
+}
+
+function favoriteAnswerMatchesSearch(answer, query) {
+  if (!query) return true;
+  const haystack = [
+    answer.title,
+    answer.content,
+    answer.sourceChatTitle,
+    answer.sourceQuestion,
+    favoriteAnswerDate(answer.createdAt)
+  ].join('\n').toLowerCase();
+  return haystack.includes(query.toLowerCase());
+}
+
+function renderFavoriteAnswerCard(answer) {
+  const sourceExists = favoriteAnswerSourceExists(answer);
+  const sourceTitle = answer.sourceChatTitle || (sourceExists ? '未命名对话' : '来源对话已删除');
+  const sourceQuestion = String(answer.sourceQuestion || '').trim();
+  const created = favoriteAnswerDate(answer.createdAt);
+  const contentHtml = typeof renderMarkdown === 'function'
+    ? renderMarkdown(answer.content || '')
+    : escapeHtml(answer.content || '');
+  return `
+    <div class="prompt-card favorite-answer-card" data-favorite-answer-id="${escapeHtml(answer.id)}">
+      <div class="prompt-card-head favorite-answer-head">
+        <strong title="${escapeHtml(answer.title || '')}">${escapeHtml(answer.title || '收藏回答')}</strong>
+        <span>${escapeHtml(created || '')}</span>
+      </div>
+      <div class="favorite-answer-meta">
+        <span class="${sourceExists ? '' : 'missing'}">${escapeHtml(sourceTitle)}</span>
+        ${sourceQuestion ? `<span title="${escapeHtml(sourceQuestion)}">问题：${escapeHtml(sourceQuestion.slice(0, 80))}${sourceQuestion.length > 80 ? '...' : ''}</span>` : ''}
+      </div>
+      <div class="favorite-answer-content msg-content">${contentHtml}</div>
+      <div class="prompt-card-actions favorite-answer-actions">
+        <button class="btn" type="button" data-action="valueClick" data-handler="openFavoriteAnswerSource" data-value="${escapeHtml(answer.id)}">查看回答</button>
+        ${sourceExists ? '' : `<span class="favorite-answer-source-missing">来源已删除</span>`}
+        <button class="btn" type="button" data-action="valueClick" data-handler="copyFavoriteAnswer" data-value="${escapeHtml(answer.id)}">复制</button>
+        <button class="btn btn-danger-outline" type="button" data-action="valueClick" data-handler="removeFavoriteAnswer" data-value="${escapeHtml(answer.id)}">取消收藏</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderFavoriteAnswers() {
+  const dm = ensureDialogManagerSettings();
+  const list = document.getElementById('favoriteAnswerList');
+  const count = document.getElementById('favoriteAnswerCount');
+  const input = document.getElementById('favoriteAnswerSearchInput');
+  const sort = document.getElementById('favoriteAnswerSortSelect');
+  if (input && input.value !== dialogFavoriteAnswerSearch) input.value = dialogFavoriteAnswerSearch;
+  if (sort) sort.value = dm.favoriteAnswerSortMode || 'newest';
+
+  const query = dialogFavoriteAnswerSearch.trim();
+  const filtered = sortedFavoriteAnswers(
+    dm.favoriteAnswers.filter(answer => favoriteAnswerMatchesSearch(answer, query)),
+    dm.favoriteAnswerSortMode
+  );
+  if (count) count.textContent = query ? `${filtered.length} / ${dm.favoriteAnswers.length}` : String(dm.favoriteAnswers.length);
+  if (!list) return;
+  if (!dm.favoriteAnswers.length) {
+    list.innerHTML = '<div class="dialog-empty">还没有收藏回答。点击 AI 回答下方的“收藏”即可保存到这里。</div>';
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = '<div class="dialog-empty">没有匹配的收藏回答</div>';
+    return;
+  }
+  list.innerHTML = filtered.map(renderFavoriteAnswerCard).join('');
+  if (typeof postRender === 'function') postRender(list);
 }
 
 function dialogManagerMessageTitle(msg, index) {
@@ -156,6 +406,7 @@ function renderDialogManager() {
   renderDialogManagerFolders();
   renderDialogManagerExport();
   renderPromptLibrary();
+  renderFavoriteAnswers();
 }
 
 function renderDialogManagerSettings(dm) {
@@ -1660,6 +1911,13 @@ window.clearPromptEditor = clearPromptEditor;
 window.editPrompt = editPrompt;
 window.deletePrompt = deletePrompt;
 window.applyPromptToChat = applyPromptToChat;
+window.toggleFavoriteAnswer = toggleFavoriteAnswer;
+window.removeFavoriteAnswer = removeFavoriteAnswer;
+window.copyFavoriteAnswer = copyFavoriteAnswer;
+window.openFavoriteAnswerSource = openFavoriteAnswerSource;
+window.setFavoriteAnswerSearch = setFavoriteAnswerSearch;
+window.setFavoriteAnswerSortMode = setFavoriteAnswerSortMode;
+window.renderFavoriteAnswers = renderFavoriteAnswers;
 window.initDialogManager = initDialogManager;
 
 // Explorer functions
@@ -1699,6 +1957,13 @@ window.AgentApp.define('dialogManager', {
   editPrompt,
   deletePrompt,
   applyPromptToChat,
+  toggleFavoriteAnswer,
+  removeFavoriteAnswer,
+  copyFavoriteAnswer,
+  openFavoriteAnswerSource,
+  setFavoriteAnswerSearch,
+  setFavoriteAnswerSortMode,
+  renderFavoriteAnswers,
   initDialogManager,
   dialogExplorerEnterFolder,
   dialogExplorerGoUp,

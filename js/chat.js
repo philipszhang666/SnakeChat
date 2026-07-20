@@ -607,6 +607,21 @@ function renderUserMsgActions(idx) {
     </div>`;
 }
 
+function chatMessageFavoriteAnswer(m) {
+  const favoriteId = m && m._favoriteAnswerId;
+  const list = chatState.settings
+    && chatState.settings.dialogManager
+    && Array.isArray(chatState.settings.dialogManager.favoriteAnswers)
+    ? chatState.settings.dialogManager.favoriteAnswers
+    : [];
+  return !!(favoriteId && list.some(item => item && item.id === favoriteId));
+}
+
+function renderFavoriteAnswerAction(m, idx) {
+  const active = chatMessageFavoriteAnswer(m);
+  return `<button class="msg-action favorite ${active ? 'active' : ''}" data-action="valueClick" data-handler="toggleFavoriteAnswer" data-value="${idx}" data-value-type="number" title="${active ? '取消收藏回答' : '收藏回答'}">${active ? '★ 已收藏' : '☆ 收藏'}</button>`;
+}
+
 function renderUserPlainTextContent(text) {
   return escapeHtml(String(text || ''));
 }
@@ -733,6 +748,7 @@ async function submitEditResend(input) {
 }
 
 function newChat() {
+  chatState.favoriteAnswerPreviewId = null;
   saveChatScrollPosition(chatCurrentChat(), { persist: true });
   const workspaceSnapshot = currentWorkspaceSnapshotForNewChat();
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: null });
@@ -754,6 +770,7 @@ function newChat() {
 }
 
 function switchChat(id) {
+  chatState.favoriteAnswerPreviewId = null;
   saveChatScrollPosition(chatCurrentChat(), { persist: true });
   if (typeof discardTemporaryChat === 'function') discardTemporaryChat({ nextCurrentId: id });
   chatState.currentId = id;
@@ -779,6 +796,7 @@ function updateTemporaryChatButton() {
 }
 
 function startTemporaryChat() {
+  chatState.favoriteAnswerPreviewId = null;
   saveChatScrollPosition(chatCurrentChat(), { persist: true });
   if (typeof isTemporaryChat === 'function' && isTemporaryChat(chatState.currentId)) {
     updateTemporaryChatButton();
@@ -1551,9 +1569,100 @@ function syncChatStartState(isStartState) {
   if (main) main.classList.toggle('chat-start-state', !!isStartState);
 }
 
+function favoriteAnswerPreviewList() {
+  return chatState.settings
+    && chatState.settings.dialogManager
+    && Array.isArray(chatState.settings.dialogManager.favoriteAnswers)
+    ? chatState.settings.dialogManager.favoriteAnswers
+    : [];
+}
+
+function favoriteAnswerPreviewById(favoriteId) {
+  return favoriteAnswerPreviewList().find(item => item && item.id === favoriteId) || null;
+}
+
+function currentFavoriteAnswerPreview() {
+  return chatState.favoriteAnswerPreviewId
+    ? favoriteAnswerPreviewById(chatState.favoriteAnswerPreviewId)
+    : null;
+}
+
+function isFavoriteAnswerPreviewActive() {
+  return !!currentFavoriteAnswerPreview();
+}
+
+function favoriteAnswerPreviewDate(ts) {
+  const n = Number(ts || 0);
+  if (!n) return '';
+  try { return new Date(n).toLocaleString(); } catch (e) { return ''; }
+}
+
+function renderFavoriteAnswerPreview(answer) {
+  const savedAt = favoriteAnswerPreviewDate(answer.createdAt);
+  const contentHtml = typeof renderMarkdown === 'function'
+    ? renderMarkdown(answer.content || '')
+    : escapeHtml(answer.content || '');
+  return `
+    <div class="favorite-preview-shell">
+      <div class="favorite-preview-head">
+        <div class="favorite-preview-title">
+          <strong>收藏回答预览</strong>
+          <span>只读展示，不会带入对话上下文</span>
+        </div>
+        <div class="favorite-preview-actions">
+          <button class="btn" type="button" data-action="valueClick" data-handler="copyFavoriteAnswer" data-value="${escapeHtml(answer.id)}">复制</button>
+          <button class="btn btn-primary" type="button" data-action="closeFavoriteAnswerPreview">返回对话</button>
+        </div>
+      </div>
+      <div class="message favorite-preview-message" data-favorite-preview-id="${escapeHtml(answer.id)}">
+        <div class="avatar assistant">🐍</div>
+        <div class="msg-body">
+          <div class="msg-role">收藏的 AI 回答${savedAt ? `<span class="msg-badge favorite-preview-badge">${escapeHtml(savedAt)}</span>` : ''}</div>
+          <div class="msg-content">${contentHtml}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function openFavoriteAnswerPreview(favoriteId) {
+  const answer = favoriteAnswerPreviewById(favoriteId);
+  if (!answer) {
+    if (typeof toast === 'function') toast('这条收藏回答不存在或已被取消收藏', 2200);
+    return;
+  }
+  chatState.favoriteAnswerPreviewId = answer.id;
+  if (typeof closeSettingsPage === 'function') closeSettingsPage();
+  renderMessages();
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+  const scroller = document.getElementById('messages');
+  if (scroller) scroller.scrollTop = 0;
+}
+
+function closeFavoriteAnswerPreview() {
+  if (!chatState.favoriteAnswerPreviewId) return;
+  chatState.favoriteAnswerPreviewId = null;
+  renderMessages();
+  if (typeof updateSendBtn === 'function') updateSendBtn();
+}
+
+window.openFavoriteAnswerPreview = openFavoriteAnswerPreview;
+window.closeFavoriteAnswerPreview = closeFavoriteAnswerPreview;
+window.isFavoriteAnswerPreviewActive = isFavoriteAnswerPreviewActive;
+
 function renderMessages() {
   bindChatScrollPositionTracker();
   const inner = document.getElementById('messagesInner');
+  const previewAnswer = currentFavoriteAnswerPreview();
+  if (chatState.favoriteAnswerPreviewId && !previewAnswer) chatState.favoriteAnswerPreviewId = null;
+  if (previewAnswer) {
+    syncChatStartState(false);
+    inner.innerHTML = renderFavoriteAnswerPreview(previewAnswer);
+    postRender(inner);
+    refreshChatSearchHighlightsIfAvailable();
+    if (typeof updateDialogTimeline === 'function') requestAnimationFrame(updateDialogTimeline);
+    if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
+    return;
+  }
   const c = chatCurrentChat();
   const hasVisibleMessages = !!(c && Array.isArray(c.messages) && c.messages.some(m => m && !m._hiddenFromUI));
   syncChatStartState(!hasVisibleMessages);
@@ -1945,6 +2054,7 @@ function renderMsg(m, idx) {
         <div class="msg-actions">
           <button class="msg-action" data-action="valueClick" data-handler="copyMsg" data-value="${idx}" data-value-type="number">📋 复制</button>
           ${m.role !== 'tool' ? `<button class="msg-action" data-action="valueClick" data-handler="regenerate" data-value="${idx}" data-value-type="number">🔄 重新生成</button>` : ''}
+          ${m.role !== 'tool' ? renderFavoriteAnswerAction(m, idx) : ''}
           ${m.role !== 'tool' ? `<button class="msg-action danger" data-action="valueClick" data-handler="deleteMessageTurn" data-value="${idx}" data-value-type="number" title="删除这轮问答">🗑 删除</button>` : ''}
         </div>` : ''}
       </div>
@@ -2131,6 +2241,10 @@ function markAttachmentReadResult(chatId, attId, patch) {
 }
 
 function addAttachment(file, type) {
+  if (isFavoriteAnswerPreviewActive()) {
+    if (typeof toast === 'function') toast('收藏回答预览是只读展示，不能添加附件', 2200);
+    return;
+  }
   if (file.size > 20 * 1024 * 1024) {
     alert(`文件 ${file.name} 超过 20MB`);
     return;
@@ -2235,6 +2349,10 @@ function setupDrag() {
   }));
   wrap.addEventListener('drop', e => {
     e.preventDefault();
+    if (isFavoriteAnswerPreviewActive()) {
+      if (typeof toast === 'function') toast('收藏回答预览是只读展示，不能添加附件', 2200);
+      return;
+    }
     if (chatDropContainsDirectory(e.dataTransfer)) {
       if (typeof toast === 'function') toast('文件夹请拖到资源管理器上传', 3000);
       return;
@@ -2255,6 +2373,11 @@ function setupPaste() {
 }
 
 async function onSend() {
+  if (isFavoriteAnswerPreviewActive()) {
+    if (typeof toast === 'function') toast('收藏回答预览是只读展示，不能继续对话', 2200);
+    if (typeof updateSendBtn === 'function') updateSendBtn();
+    return;
+  }
   // 状态保护
   const currentId = chatState.currentId;
   const currentGenerating = chatIsChatGenerating ? chatIsChatGenerating(currentId) : !!chatState.isGenerating;
@@ -2801,6 +2924,9 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     renderChatList,
     renderMessages,
     onSend,
+    openFavoriteAnswerPreview,
+    closeFavoriteAnswerPreview,
+    isFavoriteAnswerPreviewActive,
     copyMsg,
     regenerate,
     _findRegenerateCutIndex,

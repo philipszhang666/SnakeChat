@@ -94,6 +94,53 @@ test.describe('tooling, dialog, JSON, and music workflows without real services'
     clientErrors.expectNoErrors();
   });
 
+  test('favorite answers can be searched, sorted, retained after source chat deletion, and removed', async ({ page }) => {
+    const { clientErrors } = await gotoAppWithClipboard(page);
+    await configureMockProvider(page);
+    await sendMessage(page, 'favorite persistence seed');
+    await waitForAssistantReply(page, 'Mock reply #1: favorite persistence seed');
+
+    await page.locator('[data-handler="toggleFavoriteAnswer"]').last().click();
+    await expect.poll(() => page.evaluate(() => state.settings.dialogManager.favoriteAnswers.length)).toBe(1);
+
+    await openSettingsSection(page, 'dialogManager');
+    await expect(page.locator('#favoriteAnswerList')).toContainText('Mock reply #1: favorite persistence seed');
+    await page.fill('#favoriteAnswerSearchInput', 'persistence');
+    await expect(page.locator('#favoriteAnswerCount')).toHaveText('1 / 1');
+    await page.fill('#favoriteAnswerSearchInput', 'no-match-value');
+    await expect(page.locator('#favoriteAnswerList')).toContainText('没有匹配的收藏回答');
+    await page.fill('#favoriteAnswerSearchInput', '');
+    await setHiddenSelect(page, '#favoriteAnswerSortSelect', 'oldest');
+    await expect.poll(() => page.evaluate(() => state.settings.dialogManager.favoriteAnswerSortMode)).toBe('oldest');
+
+    await page.locator('[data-action="closeSettingsPage"]').click();
+    await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
+    await page.locator('.chat-item.active .chat-item-menu-wrap').hover();
+    await page.locator('.chat-item.active [data-chat-action="delete"]').click();
+    await expect.poll(() => page.evaluate(() => state.chats.length)).toBe(0);
+
+    await openSettingsSection(page, 'dialogManager');
+    await expect(page.locator('#favoriteAnswerList')).toContainText('Mock reply #1: favorite persistence seed');
+    await expect(page.locator('#favoriteAnswerList')).toContainText('来源已删除');
+    await page.locator('#favoriteAnswerList [data-handler="openFavoriteAnswerSource"]').click();
+    await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
+    await expect(page.locator('#messagesInner')).toContainText('收藏回答预览');
+    await expect(page.locator('#messagesInner')).toContainText('Mock reply #1: favorite persistence seed');
+    await expect(page.locator('#messagesInner .message')).toHaveCount(1);
+    await expect(page.locator('#input')).toBeDisabled();
+    await expect(page.locator('#sendBtn')).toBeDisabled();
+    await expect.poll(() => page.evaluate(() => state.chats.length)).toBe(0);
+    await page.locator('[data-action="closeFavoriteAnswerPreview"]').click();
+    await expect(page.locator('#messagesInner')).not.toContainText('收藏回答预览');
+
+    await openSettingsSection(page, 'dialogManager');
+    await page.locator('#favoriteAnswerList [data-handler="removeFavoriteAnswer"]').click();
+    await expect.poll(() => page.evaluate(() => state.settings.dialogManager.favoriteAnswers.length)).toBe(0);
+    await expect(page.locator('#favoriteAnswerList')).toContainText('还没有收藏回答');
+
+    clientErrors.expectNoErrors();
+  });
+
   test('JSON viewer copy, reset, clear-response, and clear-history actions work with a fake provider', async ({ page }) => {
     const { clientErrors } = await gotoAppWithClipboard(page);
     await configureMockProvider(page);

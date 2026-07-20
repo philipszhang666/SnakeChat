@@ -154,6 +154,40 @@ function updateSendBtn() {
   if (!btn) return;
   if (typeof syncPptComposerHint === 'function') syncPptComposerHint();
   const privacySuffix = typeof getPrivacyGuardInputInfoSuffix === 'function' ? getPrivacyGuardInputInfoSuffix() : '';
+  const input = document.getElementById('input');
+  const inputInfo = document.getElementById('inputInfo');
+  const inputInner = document.getElementById('inputInner');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const fileInput = document.getElementById('fileInput');
+  if (typeof isFavoriteAnswerPreviewActive === 'function' && isFavoriteAnswerPreviewActive()) {
+    btn.textContent = '↑';
+    btn.classList.remove('stop');
+    btn.disabled = true;
+    if (input) {
+      if (!input.dataset.defaultPlaceholder) {
+        input.dataset.defaultPlaceholder = input.getAttribute('placeholder') || '输入消息，Enter 发送 / Shift+Enter 换行 / 可拖拽或粘贴图片...';
+      }
+      input.disabled = true;
+      input.readOnly = true;
+      input.placeholder = '收藏回答预览为只读';
+    }
+    if (uploadBtn) uploadBtn.disabled = true;
+    if (fileInput) fileInput.disabled = true;
+    if (inputInner) inputInner.classList.add('favorite-preview-readonly');
+    if (inputInfo) inputInfo.textContent = '收藏回答预览：只读展示，不能继续对话' + privacySuffix;
+    return;
+  }
+  btn.disabled = false;
+  if (input) {
+    input.disabled = false;
+    input.readOnly = false;
+    if (input.placeholder === '收藏回答预览为只读') {
+      input.placeholder = input.dataset.defaultPlaceholder || '输入消息，Enter 发送 / Shift+Enter 换行 / 可拖拽或粘贴图片...';
+    }
+  }
+  if (uploadBtn) uploadBtn.disabled = false;
+  if (fileInput) fileInput.disabled = false;
+  if (inputInner) inputInner.classList.remove('favorite-preview-readonly');
   apiStreamSyncGlobalTaskState(apiStreamState.currentId);
   const c = apiStreamCurrentChat();
   const debateWaitingManual = !!(c && c.debate && c.debate.type === 'debate_mode'
@@ -166,7 +200,6 @@ function updateSendBtn() {
   }
   const currentGenerating = apiStreamIsCurrentChatGenerating();
   if (currentGenerating) {
-    const input = document.getElementById('input');
     const hasDraft = typeof hasComposerDraftForChat === 'function'
       ? hasComposerDraftForChat(c && c.id, input ? input.value : '')
       : (!!(input && input.value.trim()) || !!(apiStreamState.pendingAttachments && apiStreamState.pendingAttachments.length));

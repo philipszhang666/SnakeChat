@@ -73,6 +73,7 @@
     'closeHealthCheckModal',
     'toggleRemoteControl',
     'onSend',
+    'closeFavoriteAnswerPreview',
     'toggleInlineFileSide',
     'closeInlineFilePanel',
     'copyInlineFileContent',
@@ -364,6 +365,10 @@
     'applyPromptToChat',
     'editPrompt',
     'deletePrompt',
+    'toggleFavoriteAnswer',
+    'openFavoriteAnswerSource',
+    'copyFavoriteAnswer',
+    'removeFavoriteAnswer',
     'finishOutlineNow',
     'resumeOutline',
     'cancelOutline',
@@ -438,6 +443,7 @@
     'musicSetGenerationBgmLoop',
     'debateProfileChanged',
     'dialogExplorerToggleSort',
+    'setFavoriteAnswerSortMode',
     'onTogglePermission',
     'toggleSkill'
   ]);
@@ -450,7 +456,8 @@
     'musicSetGenerationBgmVolume',
     'musicSetTrackSearch',
     'debateTimeoutSliderChanged',
-    'debateTimeoutInputChanged'
+    'debateTimeoutInputChanged',
+    'setFavoriteAnswerSearch'
   ]);
 
   const valueInputTargetActions = new Set([

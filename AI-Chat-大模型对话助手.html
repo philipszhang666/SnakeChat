@@ -2040,6 +2040,29 @@
         </div>
         <div class="prompt-library-list" id="promptLibraryList"></div>
       </section>
+
+      <section class="dialog-manager-section">
+        <div class="dialog-section-head">
+          <div>
+            <h3>收藏回答</h3>
+            <p>保存重要 AI 回答；即使原对话被删除，这里的内容也会继续保留。</p>
+          </div>
+          <span class="favorite-answer-count" id="favoriteAnswerCount">0</span>
+        </div>
+        <div class="favorite-answer-toolbar">
+          <label class="favorite-answer-search">
+            <span>搜索</span>
+            <input id="favoriteAnswerSearchInput" type="search" placeholder="搜索回答、问题或来源对话" data-input-action="valueInput" data-handler="setFavoriteAnswerSearch">
+          </label>
+          <select id="favoriteAnswerSortSelect" class="dialog-explorer-sort favorite-answer-sort" data-change-action="valueChange" data-handler="setFavoriteAnswerSortMode">
+            <option value="newest">最新收藏</option>
+            <option value="oldest">最早收藏</option>
+            <option value="source">来源对话</option>
+            <option value="title">标题</option>
+          </select>
+        </div>
+        <div class="favorite-answer-list" id="favoriteAnswerList"></div>
+      </section>
     </div>
   </div>
 </div>

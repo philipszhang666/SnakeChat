@@ -257,7 +257,9 @@ let state = {
     dialogManager: {
       timelineEnabled: true,
       folders: [],
-      prompts: []
+      prompts: [],
+      favoriteAnswers: [],
+      favoriteAnswerSortMode: 'newest'
     },
     remoteControl: {
       enabled: false,
@@ -278,6 +280,7 @@ let state = {
   abortCtrl: null,
   activeTaskChatId: null,
   isGenerating: false,
+  favoriteAnswerPreviewId: null,
   chatTasks: {},
   editingToolIdx: -1
 };
