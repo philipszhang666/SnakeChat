@@ -1004,15 +1004,24 @@ function takeGoalPendingGuidance(goal) {
 }
 
 function normalizeGoalContextMessage(message) {
-  if (!message || message._hiddenFromUI) return null;
+  if (!message || message._hiddenFromUI || message._hiddenFromAI) return null;
   const role = message.role;
   if (!['user', 'assistant', 'tool', 'system'].includes(role)) return null;
+  // 目标模式每轮都会重新通过 get_goal 读取权威目标状态；旧的目标运行时工具结果
+  // 只是动态快照，继续带入下一轮会污染 prompt cache，且容易重复上下文。
+  if (role === 'tool' && GOAL_RUNTIME_TOOL_NAMES.has(String(message.name || ''))) return null;
   const out = { role };
   if (typeof message.content === 'string') out.content = message.content;
   else if (Array.isArray(message.content)) out.content = message.content.map(part => ({ ...part }));
   else out.content = '';
   if (Array.isArray(message.tool_calls) && message.tool_calls.length) {
-    out.tool_calls = message.tool_calls.map(tc => JSON.parse(JSON.stringify(tc)));
+    const toolCalls = message.tool_calls
+      .filter(tc => {
+        const name = tc && tc.function && tc.function.name;
+        return !GOAL_RUNTIME_TOOL_NAMES.has(String(name || ''));
+      })
+      .map(tc => JSON.parse(JSON.stringify(tc)));
+    if (toolCalls.length) out.tool_calls = toolCalls;
   }
   if (Array.isArray(message.attachments) && message.attachments.length) {
     out.attachments = message.attachments.map(att => ({ ...att }));
@@ -1285,7 +1294,8 @@ async function continueGoal(goalId) {
         content: '目标第 ' + turnNo + ' 轮：继续推进「' + freshGoal.objective + '」',
         createdAt: Date.now(),
         goalId: freshGoal.id,
-        _goalTurn: turnNo
+        _goalTurn: turnNo,
+        _hiddenFromAI: true
       };
       chat.messages.push(goalTurnMessage);
       const userMsgIdx = chat.messages.length - 1;
@@ -1563,8 +1573,6 @@ function getGoal(args = {}, toolContext = {}) {
   const goal = goalById(id);
   if (!goal) return { ok: false, error: 'No active goal.' };
   if (syncGoalToolContextChat(goal, toolContext)) goalSaveData();
-  pushGoalEvent(goal, 'get_goal', { progress: 'Goal context read.' });
-  saveGoals();
   return {
     ok: true,
     goal: summarizeGoalForTool(goal),
@@ -1675,6 +1683,24 @@ function updateGoal(args = {}, toolContext = {}) {
   };
 }
 
+function summarizeGoalEventForTool(event) {
+  if (!event || typeof event !== 'object') return null;
+  const out = { type: String(event.type || '') };
+  const copyText = (key, max = 500) => {
+    const value = String(event[key] || '').trim();
+    if (value) out[key] = clipGoalText(value, max);
+  };
+  copyText('progress');
+  copyText('evidence');
+  copyText('next_step');
+  copyText('reason');
+  copyText('result');
+  if (Number.isFinite(Number(event.count))) out.count = Number(event.count);
+  if (Number.isFinite(Number(event.turn))) out.turn = Number(event.turn);
+  if (!out.type && Object.keys(out).length <= 1) return null;
+  return out;
+}
+
 function summarizeGoalForTool(goal) {
   return {
     id: goal.id,
@@ -1689,7 +1715,9 @@ function summarizeGoalForTool(goal) {
     nextStep: goal.nextStep,
     lastError: goal.lastError,
     blockerAudit: goal.blockerAudit,
-    recentEvents: (goal.events || []).slice(-8)
+    recentEvents: (goal.events || [])
+      .slice(-8)
+      .map(summarizeGoalEventForTool).filter(Boolean)
   };
 }
 
