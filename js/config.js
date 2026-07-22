@@ -126,7 +126,7 @@ const DEFAULT_GOAL_SYSTEM_PROMPT = [
   '不要用 update_goal 暂停或取消目标；暂停和取消只能由用户或系统保护逻辑触发。'
 ].join('\n');
 
-const DEFAULT_GOAL_TURN_PROMPT = [
+const LEGACY_DEFAULT_GOAL_TURN_PROMPT = [
   '目标：{{objective}}',
   '当前状态：{{status}}',
   '轮次：{{turn}} / {{maxTurns}}',
@@ -141,6 +141,24 @@ const DEFAULT_GOAL_TURN_PROMPT = [
   '3. 必要时调用文件、终端、搜索等工具，避免空转。',
   '4. 结束前调用 update_goal 写入 progress、evidence、next_step；只有目标完整达成才标记 complete。',
   '5. 最终回复只简要说明本轮做了什么和下一步。'
+].join('\n');
+
+const DEFAULT_GOAL_TURN_PROMPT = [
+  '目标模式固定执行协议：',
+  '1. 第一件事调用 get_goal。',
+  '2. 选择一个最小可验证步骤执行。',
+  '3. 必要时调用文件、终端、搜索等工具，避免空转。',
+  '4. 结束前调用 update_goal 写入 progress、evidence、next_step；只有目标完整达成才标记 complete。',
+  '5. 最终回复只简要说明本轮做了什么和下一步。',
+  '',
+  '本轮目标与状态：',
+  '目标：{{objective}}',
+  '当前状态：{{status}}',
+  '轮次：{{turn}} / {{maxTurns}}',
+  'Token 预算：{{tokenUsed}} / {{tokenBudget}}',
+  '最近总结：{{summary}}',
+  '最近结果：{{lastResult}}',
+  '下一步提示：{{nextStep}}'
 ].join('\n');
 
 const PRESET_TOOLS = {
@@ -847,6 +865,7 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     PLAN_REVIEWER_PROMPT,
     PLAN_RESULT_VERIFIER_PROMPT,
     DEFAULT_GOAL_SYSTEM_PROMPT,
+    LEGACY_DEFAULT_GOAL_TURN_PROMPT,
     DEFAULT_GOAL_TURN_PROMPT,
     PRESET_TOOLS,
     BUILTIN_TOOLS,

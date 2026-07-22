@@ -9,6 +9,7 @@ const STATE_PLAN_PRESETS = StateConfig ? StateConfig.PLAN_PRESETS : PLAN_PRESETS
 const STATE_BUILTIN_TOOLS = StateConfig ? StateConfig.BUILTIN_TOOLS : BUILTIN_TOOLS;
 const STATE_DEFAULT_GOAL_SYSTEM_PROMPT = StateConfig ? StateConfig.DEFAULT_GOAL_SYSTEM_PROMPT : '';
 const STATE_DEFAULT_GOAL_TURN_PROMPT = StateConfig ? StateConfig.DEFAULT_GOAL_TURN_PROMPT : '';
+const STATE_LEGACY_DEFAULT_GOAL_TURN_PROMPT = StateConfig ? StateConfig.LEGACY_DEFAULT_GOAL_TURN_PROMPT : '';
 const STORAGE_KEYS = StateConfig
   ? {
       store: StateConfig.STORE_KEY,
@@ -333,9 +334,21 @@ function setRetryMaxAttemptsLabel(value) {
 }
 
 function migrateRetrySettings() {
-  if (!state.settings || state.settings.retryPolicyVersion === RETRY_POLICY_VERSION) return;
+  if (!state.settings || state.settings.retryPolicyVersion === RETRY_POLICY_VERSION) return false;
   state.settings.retryMaxAttempts = RETRY_UNLIMITED;
   state.settings.retryPolicyVersion = RETRY_POLICY_VERSION;
+  return true;
+}
+
+function migrateGoalTurnPromptSettings() {
+  if (!state.settings) return false;
+  const current = String(state.settings.goalTurnPrompt || '');
+  if (!current || (STATE_LEGACY_DEFAULT_GOAL_TURN_PROMPT && current === STATE_LEGACY_DEFAULT_GOAL_TURN_PROMPT)) {
+    if (current === STATE_DEFAULT_GOAL_TURN_PROMPT) return false;
+    state.settings.goalTurnPrompt = STATE_DEFAULT_GOAL_TURN_PROMPT;
+    return true;
+  }
+  return false;
 }
 
 function normalizeChatBackendBinding(chat) {
@@ -391,7 +404,10 @@ function loadData() {
   } catch (e) {}
   changed = normalizeLoadedChatBackends() || changed;
   try { const s = storage.get(STORAGE_KEYS.settings); if (s) state.settings = { ...state.settings, ...JSON.parse(s) }; } catch (e) {}
-  migrateRetrySettings();
+  const retrySettingsChanged = migrateRetrySettings();
+  const goalTurnPromptChanged = migrateGoalTurnPromptSettings();
+  const settingsChanged = !!(retrySettingsChanged || goalTurnPromptChanged);
+  if (settingsChanged) persistSettings();
   try { const t = storage.get(STORAGE_KEYS.tools); if (t) state.tools = JSON.parse(t); } catch (e) {}
   injectBuiltinTools();
   if (changed) saveData();

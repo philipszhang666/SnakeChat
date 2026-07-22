@@ -44,17 +44,21 @@ function goalDefaultSystemPrompt() {
 
 function goalDefaultTurnPrompt() {
   return GoalCoreConfig.DEFAULT_GOAL_TURN_PROMPT || [
-    'Goal objective: {{objective}}',
-    'Goal status: {{status}}',
-    'Turn: {{turn}} / {{maxTurns}}',
-    'Token budget: {{tokenUsed}} / {{tokenBudget}}',
-    '',
-    'Protocol:',
+    'Goal mode fixed execution protocol:',
     '1. First call get_goal.',
     '2. Choose one minimal verifiable next step.',
     '3. Use available tools only when they materially advance or verify that step.',
     '4. Before your final reply, call update_goal with progress, evidence, next_step, and status when appropriate.',
-    '5. Stop after that step and summarize the result briefly.'
+    '5. Stop after that step and summarize the result briefly.',
+    '',
+    'Current goal runtime snapshot:',
+    'Goal objective: {{objective}}',
+    'Goal status: {{status}}',
+    'Turn: {{turn}} / {{maxTurns}}',
+    'Token budget: {{tokenUsed}} / {{tokenBudget}}',
+    'Summary: {{summary}}',
+    'Last result: {{lastResult}}',
+    'Next step: {{nextStep}}'
   ].join('\n');
 }
 

@@ -2114,6 +2114,30 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('data-action="deleteActiveGoal"', html)
         self.assertIn('data-handler="deleteGoalById"', goal_core_js)
 
+    def test_goal_mode_keeps_cache_friendly_prompt_prefixes(self):
+        goal_core_js = (ROOT / 'js' / 'goal-core.js').read_text(encoding='utf-8')
+        config_js = (ROOT / 'js' / 'config.js').read_text(encoding='utf-8')
+        state_js = (ROOT / 'js' / 'state.js').read_text(encoding='utf-8')
+
+        prompt_start = config_js.index('const DEFAULT_GOAL_TURN_PROMPT = [')
+        prompt_end = config_js.index("].join('\\n');", prompt_start)
+        default_prompt_block = config_js[prompt_start:prompt_end]
+        self.assertLess(default_prompt_block.index('目标模式固定执行协议：'), default_prompt_block.index('本轮目标与状态：'))
+        self.assertLess(default_prompt_block.index('目标模式固定执行协议：'), default_prompt_block.index('当前状态：{{status}}'))
+        self.assertLess(default_prompt_block.index('目标模式固定执行协议：'), default_prompt_block.index('最近结果：{{lastResult}}'))
+
+        fallback_start = goal_core_js.index('function goalDefaultTurnPrompt()')
+        fallback_end = goal_core_js.index('function normalizeGoalStatus', fallback_start)
+        fallback_block = goal_core_js[fallback_start:fallback_end]
+        self.assertLess(fallback_block.index('Goal mode fixed execution protocol:'), fallback_block.index('Current goal runtime snapshot:'))
+        self.assertLess(fallback_block.index('Goal mode fixed execution protocol:'), fallback_block.index('Goal status: {{status}}'))
+
+        self.assertIn('const LEGACY_DEFAULT_GOAL_TURN_PROMPT = [', config_js)
+        self.assertIn('LEGACY_DEFAULT_GOAL_TURN_PROMPT,', config_js)
+        self.assertIn('function migrateGoalTurnPromptSettings()', state_js)
+        self.assertIn('STATE_LEGACY_DEFAULT_GOAL_TURN_PROMPT && current === STATE_LEGACY_DEFAULT_GOAL_TURN_PROMPT', state_js)
+        self.assertIn('if (settingsChanged) persistSettings();', state_js)
+
     def test_goal_settings_jump_closes_goal_panel(self):
         settings_page_js = (ROOT / 'js' / 'settings-page.js').read_text(encoding='utf-8')
         event_delegation_js = (ROOT / 'js' / 'event-delegation.js').read_text(encoding='utf-8')
