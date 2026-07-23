@@ -2945,6 +2945,68 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             msg=f'file editor stale read runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
         )
 
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_markdown_file_links_do_not_absorb_leading_sentence_text(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const root = process.cwd();
+            const sandbox = {
+              console,
+              document: {
+                addEventListener() {}
+              },
+              escapeHtml(s) {
+                return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+              }
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            vm.createContext(sandbox);
+
+            function run(file) {
+              const code = fs.readFileSync(path.join(root, file), 'utf8');
+              vm.runInContext(code, sandbox, { filename: file });
+            }
+
+            run('js/app-context.js');
+            run('js/ui-service.js');
+            run('js/markdown.js');
+
+            const html = sandbox.renderMarkdown('要不要看看 TFCE.py 的代码');
+            assert(html.includes('要不要看看 '), html);
+            assert(html.includes('data-explorer-file="TFCE.py"'), html);
+            assert(html.includes('>TFCE.py</a>'), html);
+            assert(!html.includes('data-explorer-file="要不要看看 TFCE.py"'), html);
+
+            const listHtml = sandbox.renderMarkdown('- TFCE.py');
+            assert(listHtml.includes('data-explorer-file="TFCE.py"'), listHtml);
+            assert(!listHtml.includes('data-explorer-file="- TFCE.py"'), listHtml);
+            assert(!listHtml.includes('- - <a'), listHtml);
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / 'markdown_file_link_sentence_test.js'
+            script_path.write_text(script, encoding='utf-8')
+            completed = subprocess.run(
+                ['node', str(script_path)],
+                cwd=ROOT,
+                text=True,
+                encoding='utf-8',
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f'markdown file link sentence runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

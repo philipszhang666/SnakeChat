@@ -143,11 +143,13 @@
         window.addEventListener('beforeunload', () => {
           // 注意：beforeunload 里只能发同步操作，IDB 是异步的，无法保证落盘
           // 但 200ms debounce 期间用户多半已经停止操作，绝大多数情况都能落
-          flushNow();
+          flushNow().catch(e => console.warn('[idb-store] beforeunload flush failed:', e));
         });
         // 切到后台时主动 flush，避免移动端被 kill
         document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'hidden') flushNow();
+          if (document.visibilityState === 'hidden') {
+            flushNow().catch(e => console.warn('[idb-store] visibility flush failed:', e));
+          }
         });
         console.log(`[idb-store] 🚀 IndexedDB 就绪，缓存 ${kvCache.size} 项`);
       } catch (e) {
@@ -243,6 +245,10 @@
               window.toast('⚠️ 存储空间已满，部分数据未能保存', 6000);
             }
           } catch (e) {}
+          const flushErr = new Error('IndexedDB flush failed: quota exceeded');
+          flushErr.name = 'StorageFlushError';
+          flushErr.cause = err;
+          throw flushErr;
         }
       } else {
         // 非配额错误（如临时 IO 失败）：保守重试一次，放回 dirty
@@ -252,6 +258,7 @@
           else if (!dirty.has(e.key)) dirty.set(e.key, e.value);
         }
         // 不立刻重试，留给下一次 scheduleFlush 触发（避免快错快重试打爆）
+        throw err;
       }
     }).finally(() => {
       _flushInFlight = null;

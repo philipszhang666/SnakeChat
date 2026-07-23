@@ -289,6 +289,14 @@ function splitMarkdownSpacedFileRefs(text) {
   return parts.every(part => isLikelyMarkdownFileLinkPath(part)) ? parts : [];
 }
 
+function markdownInlineFileLinkCandidate(rawPath) {
+  let pathText = String(rawPath || '');
+  if (!pathText || pathText.includes('/') || pathText.includes('\\') || !/\s/.test(pathText)) return pathText;
+  const parts = pathText.trim().split(/\s+/);
+  const tail = parts[parts.length - 1] || '';
+  return isBareMarkdownFileLinkPath(tail) ? tail : pathText;
+}
+
 function isLikelyMarkdownFileLinkPath(path) {
   const p = normalizeMarkdownFileLinkPath(path);
   if (!p || p.length > 240) return false;
@@ -315,16 +323,18 @@ function renderFilePathLinks(text) {
     'g'
   );
   return String(text || '').replace(fileRefPattern, (match, prefix, rawPath) => {
-    let listMarker = '';
-    let pathText = rawPath;
     const markerMatch = String(rawPath || '').match(/^((?:[-*+]|\d+[.)])\s+)(.+)$/);
     if (markerMatch && isLikelyMarkdownFileLinkPath(markerMatch[2])) {
-      listMarker = markerMatch[1];
-      pathText = markerMatch[2];
+      const listMarker = markerMatch[1];
+      const pathText = markerMatch[2];
+      const normalized = normalizeMarkdownFileLinkPath(pathText);
+      return `${prefix}${listMarker}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(pathText)}</a>`;
     }
+    const pathText = markdownInlineFileLinkCandidate(rawPath);
+    const preservedPrefix = rawPath.slice(0, rawPath.length - pathText.length);
     if (!isLikelyMarkdownFileLinkPath(pathText)) return match;
     const normalized = normalizeMarkdownFileLinkPath(pathText);
-    return `${prefix}${listMarker}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(pathText)}</a>`;
+    return `${prefix}${escapeHtml(preservedPrefix)}<a href="#" class="file-path-link" data-explorer-file="${escapeHtml(normalized)}" title="Open in file explorer ${escapeHtml(normalized)}">${escapeHtml(pathText)}</a>`;
   });
 }
 

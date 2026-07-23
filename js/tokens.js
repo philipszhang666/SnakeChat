@@ -294,6 +294,11 @@ function getChatTokenStats(chat) {
   return chat.tokenStats;
 }
 
+function tokenStatsApiMessageCount(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return 0;
+  return compressedMessagesForApi(chat).length;
+}
+
 function tokenUsageNumber(...values) {
   for (const value of values) {
     const n = Number(value);
@@ -449,7 +454,7 @@ function recordUsageFromResponse(chat, usage, meta = {}) {
   const model = meta.model || tokensState.settings.currentModel || 'unknown';
   
   // 累计统计（注意：累加，不是覆盖）
-  stats.msgCount = compressedMessagesForApi(chat).length;
+  stats.msgCount = tokenStatsApiMessageCount(chat);
   stats.inputTokens += inputTokens;
   stats.outputTokens += outputTokens;
   stats.lastInputTokens = inputTokens;
@@ -549,7 +554,8 @@ async function refreshAccurateTokenCount(force = false, chatId) {
   const stats = getChatTokenStats(c);
   const isConcurrentChat = !!(c.concurrent && c.concurrent.type === 'concurrent_requests');
   if (isConcurrentChat) return;
-  if (!force && stats.msgCount === c.messages.length
+  const apiMsgCount = tokenStatsApiMessageCount(c);
+  if (!force && stats.msgCount === apiMsgCount
       && Date.now() - stats.time < 30000) return;
   if (_tokenFetchInflightByChat[targetChatId]) return;
   if (tokensState.settings.apiFormat !== 'anthropic') return;
@@ -560,7 +566,7 @@ async function refreshAccurateTokenCount(force = false, chatId) {
     if (tokens !== null) {
       // 只更新输入快照，不动累计输出
       stats.lastInputTokens = tokens;
-      stats.msgCount = c.messages.length;
+      stats.msgCount = apiMsgCount;
       stats.time = Date.now();
       if (!stats.source) stats.source = 'anthropic_count_api';
       if (tokensIsCurrentChat(c.id)) {
@@ -598,12 +604,13 @@ function updateTokenDisplay() {
   const isConcurrentChat = !!(c.concurrent && c.concurrent.type === 'concurrent_requests');
   const isDebateChat = !!(c.debate && c.debate.type === 'debate_mode');
   // 看是否有当前对话的精确统计
-  const hasAccurate = stats.totalRequests > 0;
+  const hasRecordedCurrentInput = stats.totalRequests > 0
+    && (isConcurrentChat || isDebateChat || stats.lastInputTokens > 0);
   
   let inputTokens, outputTokens, cacheRead, thinking, totalRequests;
   let isAccurate, sourceLabel;
   
-  if (hasAccurate) {
+  if (hasRecordedCurrentInput) {
     inputTokens = (isConcurrentChat || isDebateChat) ? stats.inputTokens : stats.lastInputTokens;     // 普通对话显示当前输入；并发/辩论显示所有 AI 累计输入
     outputTokens = stats.outputTokens;        // 累计输出
     cacheRead = stats.cacheReadTokens;
@@ -624,10 +631,10 @@ function updateTokenDisplay() {
     sourceLabel = '精确值（来自 count_tokens API）';
   } else {
     inputTokens = estimateChatTokens(c);
-    outputTokens = 0;
-    cacheRead = 0;
-    thinking = 0;
-    totalRequests = 0;
+    outputTokens = stats.outputTokens || 0;
+    cacheRead = stats.cacheReadTokens || 0;
+    thinking = stats.thinkingTokens || 0;
+    totalRequests = stats.totalRequests || 0;
     isAccurate = false;
     sourceLabel = '估算值（可能误差 ±20%）';
   }
@@ -635,7 +642,7 @@ function updateTokenDisplay() {
   const limitInfo = getContextLimitInfo(tokensState.settings.currentModel);
   const limit = limitInfo.limit;
   const pct = Math.min(100, Math.round(inputTokens / limit * 100));
-  const msgCount = c.messages.filter(m => m.role !== 'tool').length;
+  const msgCount = compressedMessagesForApi(c).filter(m => m.role !== 'tool').length;
   
   let pctClass = 'safe';
   if (pct >= 80) pctClass = 'danger';
@@ -656,10 +663,10 @@ function updateTokenDisplay() {
   }
   
   const showRefreshBtn = tokensState.settings.apiFormat === 'anthropic';
-  const inputTitle = isDebateChat && hasAccurate
+  const inputTitle = isDebateChat && hasRecordedCurrentInput
     ? `累计输入 token · ${sourceLabel} · 费用统计口径，不代表单次上下文占用`
     : `输入 token · ${sourceLabel} · 上下文${limitInfo.label}`;
-  const barTitle = isDebateChat && hasAccurate
+  const barTitle = isDebateChat && hasRecordedCurrentInput
     ? `累计输入 token 相当于上下文上限 ${pct}%（费用统计口径，不代表单次上下文占用）`
     : `输入 token 占上下文 ${pct}%`;
   
@@ -719,7 +726,12 @@ function showTokenDetails() {
     : '自动识别';
   html += `<div class="token-detail-info-row"><span>上下文限制</span><strong>${formatNumber(limit)} tokens</strong></div>`;
   html += `<div class="token-detail-meta">${limitModeText}<a class="token-detail-link" href="javascript:void(0)" data-action="hideModalAndCall" data-target="tokenDetailModal" data-handler="openContextLimitSettings">设置</a></div>`;
-  html += `<div class="token-detail-info-row"><span>消息数</span><strong>${c.messages.length}</strong></div>`;
+  const storedMsgCount = c.messages.filter(m => !(m && m._compressionSummaryMarker)).length;
+  const apiMsgCount = tokenStatsApiMessageCount(c);
+  html += `<div class="token-detail-info-row"><span>实际请求消息数</span><strong>${apiMsgCount}</strong></div>`;
+  if (storedMsgCount !== apiMsgCount) {
+    html += `<div class="token-detail-info-row"><span>本地保留消息数</span><strong>${storedMsgCount}</strong></div>`;
+  }
   html += `</div>`;
   
   if (stats && stats.totalRequests > 0) {
@@ -1061,7 +1073,7 @@ function undoCompressionSnapshot(undoId) {
 
     const stats = getChatTokenStats(c);
     stats.lastInputTokens = 0;
-    stats.msgCount = compressedMessagesForApi(c).length;
+    stats.msgCount = tokenStatsApiMessageCount(c);
     stats.time = 0;
 
     tokensSaveData();
@@ -1086,7 +1098,7 @@ function undoCompressionSnapshot(undoId) {
   
   const stats = getChatTokenStats(c);
   stats.lastInputTokens = 0;
-  stats.msgCount = compressedMessagesForApi(c).length;
+  stats.msgCount = tokenStatsApiMessageCount(c);
   stats.time = 0;
   
   tokensSaveData();
@@ -1249,6 +1261,7 @@ function compressionShortErrorMessage(error) {
   if (!raw) return '未知错误';
   const firstLine = raw.split(/\r?\n/).map(s => s.trim()).find(Boolean) || raw;
   if (error && error.name === 'AbortError') return '已停止压缩';
+  if (error && error.name === 'StorageFlushError') return '压缩结果未能保存到本地，已回滚本次压缩';
   if (/请求超时|timeout|timed out/i.test(raw)) {
     const timeoutMatch = raw.match(/(\d+)\s*s|(\d+)\s*秒/);
     const duration = timeoutMatch ? (timeoutMatch[1] || timeoutMatch[2]) : '';
@@ -1724,6 +1737,7 @@ async function compressChat(chat, options = {}) {
     const idx = chat.messages.findIndex(m => m._isCompressing);
     if (idx >= 0) chat.messages.splice(idx, 1);
   };
+  let compressionApplied = false;
   
   try {
     if (shouldTouchGlobalGenerating) {
@@ -1828,18 +1842,19 @@ ${feedback}
       estimatedBefore
     };
     applyCompressionSummaryMarkers(chat);
+    compressionApplied = true;
     summaryMsg._estimatedAfter = estimateChatTokens(chat);
     chat.compressedContext.estimatedAfter = summaryMsg._estimatedAfter;
     
     // 清除精确统计缓存（消息变了）
     const compStats = getChatTokenStats(chat);
     compStats.lastInputTokens = 0;
-    compStats.msgCount = compressedMessagesForApi(chat).length;
+    compStats.msgCount = tokenStatsApiMessageCount(chat);
     compStats.time = 0;
     
     tokensSaveData();
     if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
-      try { await storage.flush(); } catch (e) { console.warn('[compression] flush failed:', e); }
+      await storage.flush();
     }
     renderCompressionView();
     if (isVisible && typeof updateTokenDisplay === 'function') updateTokenDisplay();
@@ -1850,6 +1865,19 @@ ${feedback}
   } catch (e) {
     delete _compressionUndoSnapshots[undoId];
     removeCompressingPlaceholder();
+    if (compressionApplied) {
+      if (previousCompressedContext) {
+        chat.compressedContext = compressionJsonClone(previousCompressedContext);
+      } else {
+        delete chat.compressedContext;
+      }
+      applyCompressionSummaryMarkers(chat);
+      const rollbackStats = getChatTokenStats(chat);
+      rollbackStats.lastInputTokens = 0;
+      rollbackStats.msgCount = tokenStatsApiMessageCount(chat);
+      rollbackStats.time = 0;
+      tokensSaveData();
+    }
     renderCompressionView();
     if (e && e.name === 'AbortError') {
       TokensUiService.toast('已停止压缩', 2000);

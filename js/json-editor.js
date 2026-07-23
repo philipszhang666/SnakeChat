@@ -88,6 +88,34 @@ function _jsonSafeClone(value) {
   catch (e) { return value; }
 }
 
+function jsonEditorBodyMessageCount(body) {
+  if (!body || typeof body !== 'object') return 0;
+  if (Array.isArray(body.messages)) return body.messages.length;
+  if (Array.isArray(body.input)) return body.input.length;
+  return 0;
+}
+
+function jsonEditorStoredMessageCount(chat) {
+  return Array.isArray(chat && chat.messages)
+    ? chat.messages.filter(m => !(m && m._compressionSummaryMarker)).length
+    : 0;
+}
+
+function jsonEditorCompressionMeta(chat, body) {
+  const ctx = chat && chat.compressedContext;
+  const summaryCount = ctx && Array.isArray(ctx.summaryMessages) ? ctx.summaryMessages.length : 0;
+  const active = summaryCount > 0;
+  return {
+    active,
+    apiMessageCount: jsonEditorBodyMessageCount(body),
+    storedMessageCount: jsonEditorStoredMessageCount(chat),
+    summaryMessageCount: summaryCount,
+    note: active
+      ? 'preview body uses compressed API context; full local history is retained for UI/search/undo before refresh'
+      : 'preview body uses full current chat context'
+  };
+}
+
 const DEFAULT_JSON_TEMPLATE_OPENAI = `{
   "model": "{{model}}",
   "messages": {{messages}},
@@ -146,6 +174,7 @@ function refreshJsonPreview() {
       return;
     }
     const body = jsonEditorBuildRequestBody(c.messages, undefined, undefined, { chat: c });
+    const compressionMeta = jsonEditorCompressionMeta(c, body);
     const url = jsonEditorBuildFullUrl(jsonEditorState.settings.baseUrl, jsonEditorState.settings.apiPath);
     const headers = jsonEditorBuildHeaders();
     const safeHeaders = { ...headers };
@@ -158,6 +187,7 @@ function refreshJsonPreview() {
         method: 'POST',
         format: jsonEditorState.settings.apiFormat,
         model: jsonEditorState.settings.currentModel,
+        compression: compressionMeta,
         '注意': '_meta 字段仅用于展示，不会真的发送'
       },
       _headers: safeHeaders,
@@ -166,7 +196,7 @@ function refreshJsonPreview() {
     const json = JSON.stringify(fullRequest, null, 2);
     previewEl.value = json;
     const tokens = estimateTokens(JSON.stringify(body));
-    const msgCount = body.messages ? body.messages.length : 0;
+    const msgCount = compressionMeta.apiMessageCount;
     updateJsonStats(tokens, msgCount, JSON.stringify(body).length);
   } catch (e) {
     previewEl.value = '❌ 构造请求出错：\n' + e.message + '\n\n' + e.stack;

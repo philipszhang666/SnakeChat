@@ -536,7 +536,7 @@ function sealOpenMsgTimersForPageExit() {
   if (changed && typeof saveData === 'function') {
     saveData();
     if (typeof storage !== 'undefined' && typeof storage.flush === 'function') {
-      try { storage.flush(); } catch (e) {}
+      try { Promise.resolve(storage.flush()).catch(e => console.warn('[state] page-exit flush failed:', e)); } catch (e) {}
     }
   }
 }
