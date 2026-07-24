@@ -28,6 +28,7 @@ const SETTINGS_PAGE_SECTIONS = {
   permissions: { open: 'openPermissions', close: 'closePermissions', modalId: 'permissionsModal' },
   pricing: { open: 'openPricingManager', close: 'closePricingManager', modalId: 'pricingModal' },
   tokenUsage: { open: 'openTokenUsageStats', close: 'closeTokenUsageStats', modalId: 'tokenUsageModal' },
+  compression: { open: 'openCompressionSettings', close: 'closeCompressionSettings', modalId: 'compressionSettingsModal' },
   contextLimit: { open: 'openContextLimitSettings', close: 'closeContextLimitSettings', modalId: 'contextLimitModal' },
   git: { open: 'openGitPanel', close: 'closeGitPanel', modalId: 'gitModal' }
 };
@@ -75,6 +76,7 @@ function initSettingsPage() {
     'openPermissions',
     'openPricingManager',
     'openTokenUsageStats',
+    'openCompressionSettings',
     'openContextLimitSettings',
     'openGitPanel',
     'closeSettings',
@@ -100,6 +102,7 @@ function initSettingsPage() {
     'closePermissions',
     'closePricingManager',
     'closeTokenUsageStats',
+    'closeCompressionSettings',
     'closeContextLimitSettings',
     'closeGitPanel'
   ].forEach(name => {
@@ -132,6 +135,7 @@ function initSettingsPage() {
   window.openPermissions = function() { openSettingsPage('permissions'); };
   window.openPricingManager = function() { openSettingsPage('pricing'); };
   window.openTokenUsageStats = function() { openSettingsPage('tokenUsage'); };
+  window.openCompressionSettings = function() { openSettingsPage('compression'); };
   window.openContextLimitSettings = function() { openSettingsPage('contextLimit'); };
   window.openGitPanel = function() { openSettingsPage('git'); };
 
@@ -158,6 +162,7 @@ function initSettingsPage() {
   window.closePermissions = function() { closeSettingsProxy('permissions'); };
   window.closePricingManager = function() { closeSettingsProxy('pricing'); };
   window.closeTokenUsageStats = function() { closeSettingsProxy('tokenUsage'); };
+  window.closeCompressionSettings = function() { closeSettingsProxy('compression'); };
   window.closeContextLimitSettings = function() { closeSettingsProxy('contextLimit'); };
   window.closeGitPanel = function() { closeSettingsProxy('git'); };
 

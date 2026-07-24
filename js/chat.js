@@ -1899,6 +1899,7 @@ function renderMsg(m, idx) {
       : '';
     const layerText = m._summaryLayer === 'delta' ? '增量摘要' : '基础摘要';
     const countText = Number(m._originalCount || 0) ? `已压缩 ${m._originalCount} 条` : '已压缩';
+    const validationHint = m._compressionValidationOk === false ? '点击展开完整摘要 · 校验未通过，已按设置放行' : '点击展开完整摘要';
     return `
       <div class="message summary-msg" data-idx="${idx}">
         <div class="avatar">🗜️</div>
@@ -1908,7 +1909,7 @@ function renderMsg(m, idx) {
               <span class="compression-summary-title">压缩摘要</span>
               <span class="summary-badge">${escapeHtml(countText)}</span>
               <span class="compression-summary-layer">${escapeHtml(layerText)}</span>
-              <span class="compression-summary-hint">点击展开完整摘要</span>
+              <span class="compression-summary-hint">${escapeHtml(validationHint)}</span>
             </summary>
             <div class="compression-summary-body">
               <div class="msg-content compression-summary-content">${renderMarkdown(m.content || '')}</div>

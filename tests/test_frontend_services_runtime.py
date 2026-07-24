@@ -453,6 +453,21 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
             sandbox.closeContextLimitSettings = () => {
               sandbox.contextLimitClosed = true;
             };
+            sandbox.openCompressionSettings = () => {
+              sandbox.compressionOpened = true;
+            };
+            sandbox.closeCompressionSettings = () => {
+              sandbox.compressionClosed = true;
+            };
+            sandbox.saveCompressionSettingsFromUI = () => {
+              sandbox.compressionSaved = true;
+            };
+            sandbox.resetCompressionPromptTemplate = () => {
+              sandbox.compressionPromptReset = true;
+            };
+            sandbox.clearCompressionHistoryFromUI = () => {
+              sandbox.compressionHistoryCleared = true;
+            };
             sandbox.removeContextLimitRow = (idx) => {
               sandbox.contextLimitRemovedIdx = idx;
             };
@@ -577,6 +592,30 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
               preventDefault() {}
             });
             assert.strictEqual(sandbox.settingsClosed, true);
+
+            listeners.click({
+              target: eventTarget({ action: 'saveCompressionSettingsFromUI' }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.compressionSaved, true);
+
+            listeners.click({
+              target: eventTarget({ action: 'resetCompressionPromptTemplate' }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.compressionPromptReset, true);
+
+            listeners.click({
+              target: eventTarget({ action: 'clearCompressionHistoryFromUI' }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.compressionHistoryCleared, true);
+
+            listeners.click({
+              target: eventTarget({ action: 'closeCompressionSettings' }, 'data-action'),
+              preventDefault() {}
+            });
+            assert.strictEqual(sandbox.compressionClosed, true);
 
             listeners.click({
               target: eventTarget({ action: 'openCurrentFileInMainPanel', kind: 'pdf' }, 'data-action'),

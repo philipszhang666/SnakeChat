@@ -4,6 +4,7 @@ const TokensStateModule = window.AgentApp.require('state');
 const TokensUiService = window.AgentApp.require('uiService');
 const tokensState = TokensStateModule.state;
 const tokensSaveData = TokensStateModule.saveData;
+const tokensPersistSettings = TokensStateModule.persistSettings;
 const tokensCurrentChat = TokensStateModule.currentChat;
 const tokensChatById = TokensStateModule.chatById;
 const tokensIsCurrentChat = TokensStateModule.isCurrentChat;
@@ -842,6 +843,7 @@ const COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS = 0;
 const COMPRESSION_MAX_DELTA_SUMMARIES = 2;
 const COMPRESSION_VALIDATION_REPAIR_ATTEMPTS = 1;
 const COMPRESSION_AUTO_VALIDATION_REPAIR_ATTEMPTS = 3;
+const COMPRESSION_HISTORY_LIMIT = 10;
 
 function isCompressionSummaryMessage(m) {
   return !!(m && (m._isSummary || m._isTransientSummary));
@@ -868,31 +870,10 @@ function compressionWrapSummaryContent(summary, layer = 'base', transientLabel =
   return `${title}\n\n${String(summary || '').trim()}`;
 }
 
-function compressionBuildSummaryPrompt({
-  previousSummary = '',
-  conversationText = '',
-  layer = 'base',
-  label = '',
-  transient = false
-} = {}) {
-  const target = transient
-    ? `长流程 agent 压缩“${label || '内部工具循环'}”中的内部历史`
-    : '会调用工具、读写项目文件的 AI agent 压缩上下文';
-  const summaryKind = layer === 'delta' ? '近期增量摘要' : '稳定基础摘要';
-  const previousBlock = previousSummary
-    ? `【已有摘要，仅作去重和衔接参考，不要改写】\n${previousSummary}\n\n`
-    : '';
-  const layerGuidance = layer === 'delta'
-    ? `本次要输出“${summaryKind}”：只总结下面“需要总结的新内容”，不要重复改写已有摘要；只在必要时用已有摘要补足衔接关系。`
-    : `本次要输出“${summaryKind}”：把已有摘要和下面的新内容合并成一份可独立继续执行的摘要。`;
-  const historyLabel = layer === 'delta' ? '【需要总结的新内容】' : '【需要总结的对话】';
-  const continuation = transient
-    ? '这个摘要会替代旧的内部工具循环记录，并继续参与后续模型请求。'
-    : '目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、关键工作集文件、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。';
-
-  return `${previousBlock}你正在为一个${target}。
-${continuation}
-${layerGuidance}
+function compressionDefaultPromptTemplate() {
+  return `{{previousBlock}}你正在为一个{{target}}。
+{{continuation}}
+{{layerGuidance}}
 
 要求：
 - 不要编造；不知道或没有就写“无”。
@@ -918,10 +899,67 @@ ${layerGuidance}
 ## 下一步建议
 ## 可丢弃上下文
 
-${historyLabel}
-${conversationText}
+{{historyLabel}}
+{{conversationText}}
 
-请输出结构化${summaryKind}：`;
+请输出结构化{{summaryKind}}：`;
+}
+
+function compressionPromptTemplateValues({
+  previousSummary = '',
+  conversationText = '',
+  layer = 'base',
+  label = '',
+  transient = false
+} = {}) {
+  const target = transient
+    ? `长流程 agent 压缩“${label || '内部工具循环'}”中的内部历史`
+    : '会调用工具、读写项目文件的 AI agent 压缩上下文';
+  const summaryKind = layer === 'delta' ? '近期增量摘要' : '稳定基础摘要';
+  const previousBlock = previousSummary
+    ? `【已有摘要，仅作去重和衔接参考，不要改写】\n${previousSummary}\n\n`
+    : '';
+  const layerGuidance = layer === 'delta'
+    ? `本次要输出“${summaryKind}”：只总结下面“需要总结的新内容”，不要重复改写已有摘要；只在必要时用已有摘要补足衔接关系。`
+    : `本次要输出“${summaryKind}”：把已有摘要和下面的新内容合并成一份可独立继续执行的摘要。`;
+  const historyLabel = layer === 'delta' ? '【需要总结的新内容】' : '【需要总结的对话】';
+  const continuation = transient
+    ? '这个摘要会替代旧的内部工具循环记录，并继续参与后续模型请求。'
+    : '目标：丢弃噪声，但保留之后继续执行任务所需的事实、约束、关键工作集文件、命令结果、用户决定、权限/拒绝记录、计划/大纲状态和验证状态。';
+
+  return {
+    previousSummary,
+    previousBlock,
+    conversationText,
+    layer,
+    label,
+    transient: transient ? 'true' : 'false',
+    target,
+    summaryKind,
+    layerGuidance,
+    historyLabel,
+    continuation
+  };
+}
+
+function compressionPromptTemplateForUse(transient = false) {
+  if (!transient && tokensState.settings && typeof tokensState.settings.compressionPromptTemplate === 'string') {
+    const custom = tokensState.settings.compressionPromptTemplate.trim();
+    if (custom) return custom;
+  }
+  return compressionDefaultPromptTemplate();
+}
+
+function renderCompressionPromptTemplate(template, values = {}) {
+  return String(template || '').replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (match, key) => {
+    if (!Object.prototype.hasOwnProperty.call(values, key)) return match;
+    return String(values[key] ?? '');
+  });
+}
+
+function compressionBuildSummaryPrompt(options = {}) {
+  const values = compressionPromptTemplateValues(options);
+  return renderCompressionPromptTemplate(compressionPromptTemplateForUse(!!options.transient), values);
 }
 
 function compressionJsonClone(value) {
@@ -1256,6 +1294,13 @@ function compressionValidationRepairAttempts(options = {}) {
   return Math.min(8, n);
 }
 
+function compressionAllowInvalidSummary(options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'allowInvalidSummary')) {
+    return !!options.allowInvalidSummary;
+  }
+  return !!(tokensState.settings && tokensState.settings.compressionAllowInvalidSummary);
+}
+
 function compressionShortErrorMessage(error) {
   const raw = String((error && error.message) || error || '未知错误').trim();
   if (!raw) return '未知错误';
@@ -1272,6 +1317,129 @@ function compressionShortErrorMessage(error) {
   if (/JSON\s*解析失败|非 JSON 响应/i.test(firstLine)) return firstLine.slice(0, 180);
   if (/Failed to fetch|NetworkError|网络请求失败/i.test(raw)) return '压缩请求网络失败，请检查 API 地址、代理或网络连接';
   return firstLine.length > 180 ? firstLine.slice(0, 177) + '...' : firstLine;
+}
+
+function compressionHistoryArray() {
+  if (!tokensState.settings) tokensState.settings = {};
+  if (!Array.isArray(tokensState.settings.compressionHistory)) tokensState.settings.compressionHistory = [];
+  return tokensState.settings.compressionHistory;
+}
+
+function normalizeCompressionHistoryAttempt(attempt = {}) {
+  return {
+    id: String(attempt.id || `cmp_att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`),
+    kind: String(attempt.kind || 'initial'),
+    title: String(attempt.title || ''),
+    prompt: String(attempt.prompt || ''),
+    response: String(attempt.response || ''),
+    error: String(attempt.error || ''),
+    validationOk: attempt.validationOk === true ? true : (attempt.validationOk === false ? false : null),
+    validationFeedback: String(attempt.validationFeedback || ''),
+    createdAt: Number(attempt.createdAt || Date.now()),
+    updatedAt: Number(attempt.updatedAt || attempt.createdAt || Date.now())
+  };
+}
+
+function normalizeCompressionHistoryRecord(record = {}) {
+  return {
+    id: String(record.id || `cmp_hist_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`),
+    createdAt: Number(record.createdAt || Date.now()),
+    updatedAt: Number(record.updatedAt || record.createdAt || Date.now()),
+    status: String(record.status || 'running'),
+    reason: String(record.reason || 'manual'),
+    model: String(record.model || ''),
+    chatId: String(record.chatId || ''),
+    chatTitle: String(record.chatTitle || ''),
+    summaryLayer: String(record.summaryLayer || ''),
+    originalCount: Number(record.originalCount || 0),
+    estimatedBefore: Number(record.estimatedBefore || 0),
+    estimatedAfter: Number(record.estimatedAfter || 0),
+    savedTokens: Number(record.savedTokens || 0),
+    finalSummary: String(record.finalSummary || ''),
+    finalValidationOk: record.finalValidationOk === true ? true : (record.finalValidationOk === false ? false : null),
+    validationFeedback: String(record.validationFeedback || ''),
+    error: String(record.error || ''),
+    attempts: Array.isArray(record.attempts)
+      ? record.attempts.map(normalizeCompressionHistoryAttempt)
+      : []
+  };
+}
+
+function readCompressionHistory() {
+  const list = compressionHistoryArray();
+  return list.map(normalizeCompressionHistoryRecord).slice(0, COMPRESSION_HISTORY_LIMIT);
+}
+
+function persistCompressionHistoryRecord(record) {
+  if (!record) return null;
+  const normalized = normalizeCompressionHistoryRecord(record);
+  const list = readCompressionHistory();
+  const idx = list.findIndex(item => item.id === normalized.id);
+  if (idx >= 0) list[idx] = normalized;
+  else list.unshift(normalized);
+  list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  tokensState.settings.compressionHistory = list.slice(0, COMPRESSION_HISTORY_LIMIT);
+  tokensPersistSettings();
+  return normalized;
+}
+
+function clearCompressionHistory() {
+  compressionHistoryArray().splice(0);
+  tokensPersistSettings();
+  if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+    storage.flush().catch(() => {});
+  }
+  if (typeof window.renderCompressionSettingsHistory === 'function') {
+    window.renderCompressionSettingsHistory();
+  }
+}
+
+function createCompressionHistoryRecord(chat, options = {}, meta = {}) {
+  return normalizeCompressionHistoryRecord({
+    id: `cmp_hist_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    status: 'running',
+    reason: options.reason || 'manual',
+    model: tokensState.settings.currentModel || '',
+    chatId: (chat && chat.id) || options.chatId || '',
+    chatTitle: (chat && chat.title) || '',
+    summaryLayer: meta.summaryLayer || '',
+    originalCount: meta.originalCount || 0,
+    estimatedBefore: meta.estimatedBefore || options.estimatedBefore || 0,
+    attempts: []
+  });
+}
+
+function addCompressionHistoryAttempt(record, data = {}) {
+  if (!record) return null;
+  const attempt = normalizeCompressionHistoryAttempt({
+    id: `cmp_att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    kind: data.kind || 'initial',
+    title: data.title || '',
+    prompt: data.prompt || '',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
+  });
+  record.attempts.push(attempt);
+  record.updatedAt = Date.now();
+  persistCompressionHistoryRecord(record);
+  return attempt;
+}
+
+function updateCompressionHistoryAttempt(record, attempt, patch = {}) {
+  if (!record || !attempt) return;
+  Object.assign(attempt, patch);
+  attempt.updatedAt = Date.now();
+  record.updatedAt = Date.now();
+  persistCompressionHistoryRecord(record);
+}
+
+function finalizeCompressionHistoryRecord(record, patch = {}) {
+  if (!record) return;
+  Object.assign(record, patch);
+  record.updatedAt = Date.now();
+  persistCompressionHistoryRecord(record);
 }
 
 function compressionBudgetInfo(chat, extraMessages = [], options = {}) {
@@ -1408,8 +1576,11 @@ ${feedback}
     finalSummary = patchedSummary.summary;
     validation = patchedSummary.validation;
   }
-  if (!validation.ok) {
+  if (!validation.ok && !compressionAllowInvalidSummary(options)) {
     throw new Error(`${label} 内部摘要校验失败：${compressionValidationFeedback(validation)}`);
+  }
+  if (!validation.ok) {
+    console.warn(`[compression] ${label} 内部摘要校验失败，已按设置放行：`, compressionValidationFeedback(validation));
   }
   
   const summaryMsg = {
@@ -1418,7 +1589,9 @@ ${feedback}
     _isTransientSummary: true,
     _originalCount: summaryLayer === 'delta' ? realMessages.length : toCompress.length,
     _compressTime: Date.now(),
-    _summaryLayer: summaryLayer
+    _summaryLayer: summaryLayer,
+    _compressionValidationOk: validation.ok,
+    _compressionValidationFeedback: validation.ok ? '' : compressionValidationFeedback(validation)
   };
   const replacementSummaries = summaryLayer === 'delta'
     ? [...preservedSummaries, summaryMsg]
@@ -1718,6 +1891,16 @@ async function compressChat(chat, options = {}) {
   const undoCompressedMessages = summaryLayer === 'delta'
     ? rawToCompress.filter(m => !isCompressionSummaryMessage(m) && !m._isCompressing)
     : rawToCompress;
+  const historyRecord = createCompressionHistoryRecord(chat, options, {
+    summaryLayer,
+    originalCount: compressedCount,
+    estimatedBefore
+  });
+  const initialHistoryAttempt = addCompressionHistoryAttempt(historyRecord, {
+    kind: 'initial',
+    title: '首次摘要',
+    prompt: compressPrompt
+  });
   const undoId = rememberCompressionUndo(chat, undoCompressedMessages, {
     originalCount: compressedCount,
     reason: options.reason || 'manual',
@@ -1725,14 +1908,21 @@ async function compressChat(chat, options = {}) {
     estimatedBefore,
     previousCompressedContext
   });
-  chat.messages.push({
+  const compressingPlaceholder = {
     role: 'assistant',
     content: `🗜️ 正在压缩对话历史...（最长等待 ${Math.round(helperOptions.timeoutMs / 1000)} 秒，可点停止中断）`,
     _isCompressing: true
-  });
+  };
+  chat.messages.push(compressingPlaceholder);
   renderCompressionView();
   
   // ⭐ 用闭包函数代替 pop()，避免误删用户消息
+  const updateCompressingPlaceholder = (content) => {
+    const msg = chat.messages.find(m => m && m._isCompressing);
+    if (!msg) return;
+    msg.content = content;
+    renderCompressionView();
+  };
   const removeCompressingPlaceholder = () => {
     const idx = chat.messages.findIndex(m => m._isCompressing);
     if (idx >= 0) chat.messages.splice(idx, 1);
@@ -1751,12 +1941,23 @@ async function compressChat(chat, options = {}) {
       }
       TokensUiService.updateSendBtn();
     }
-    const summary = await tokensApiCore().callOnceWithRole(
-      [{ role: 'user', content: compressPrompt }],
-      tokensState.settings.currentModel,
-      '你是一个严谨的上下文压缩器，专门为长任务 agent 保留可继续执行的关键信息。',
-      helperOptions
-    );
+    let summary;
+    try {
+      summary = await tokensApiCore().callOnceWithRole(
+        [{ role: 'user', content: compressPrompt }],
+        tokensState.settings.currentModel,
+        '你是一个严谨的上下文压缩器，专门为长任务 agent 保留可继续执行的关键信息。',
+        helperOptions
+      );
+      updateCompressionHistoryAttempt(historyRecord, initialHistoryAttempt, {
+        response: compressionString(summary)
+      });
+    } catch (callError) {
+      updateCompressionHistoryAttempt(historyRecord, initialHistoryAttempt, {
+        error: compressionShortErrorMessage(callError)
+      });
+      throw callError;
+    }
     if (!summary || !String(summary).trim()) {
       throw new Error('压缩模型返回了空摘要');
     }
@@ -1765,8 +1966,20 @@ async function compressChat(chat, options = {}) {
     let patchedSummary = compressionAutoPatchSummary(finalSummary, validation, requiredRefs);
     finalSummary = patchedSummary.summary;
     validation = patchedSummary.validation;
+    updateCompressionHistoryAttempt(historyRecord, initialHistoryAttempt, {
+      validationOk: validation.ok,
+      validationFeedback: validation.ok ? '' : compressionValidationFeedback(validation)
+    });
+    finalizeCompressionHistoryRecord(historyRecord, {
+      finalSummary,
+      finalValidationOk: validation.ok,
+      validationFeedback: validation.ok ? '' : compressionValidationFeedback(validation)
+    });
     for (let repairAttempt = 1; !validation.ok && repairAttempt <= validationRepairAttempts; repairAttempt++) {
       const feedback = compressionValidationFeedback(validation);
+      updateCompressingPlaceholder(
+        `🗜️ 正在压缩对话历史... 摘要校验未通过，正在重写摘要 ${repairAttempt}/${validationRepairAttempts}（可点停止中断）`
+      );
       if (options.reason === 'auto') {
         TokensUiService.toast(`自动压缩摘要校验未通过，正在把错误反馈给 AI 重写（${repairAttempt}/${validationRepairAttempts}）...`, 2500);
       }
@@ -1782,15 +1995,31 @@ ${feedback}
 - 必须补齐全部固定标题。
 - 必须逐字保留上面列出的 artifact_id / checkpoint_id。
 - 不要解释校验过程，只输出修正后的结构化摘要。`;
-      const retrySummary = await tokensApiCore().callOnceWithRole(
-        [{ role: 'user', content: retryPrompt }],
-        tokensState.settings.currentModel,
-        '你是一个严谨的上下文压缩器。你正在修复一份未通过校验的摘要，必须保留指定引用。',
-        {
-          ...helperOptions,
-          sourceLabel: `上下文压缩 · ${options.reason || 'manual'} · 重写 ${repairAttempt}/${validationRepairAttempts}`
-        }
-      );
+      const retryHistoryAttempt = addCompressionHistoryAttempt(historyRecord, {
+        kind: 'repair',
+        title: `校验重写 ${repairAttempt}/${validationRepairAttempts}`,
+        prompt: retryPrompt
+      });
+      let retrySummary;
+      try {
+        retrySummary = await tokensApiCore().callOnceWithRole(
+          [{ role: 'user', content: retryPrompt }],
+          tokensState.settings.currentModel,
+          '你是一个严谨的上下文压缩器。你正在修复一份未通过校验的摘要，必须保留指定引用。',
+          {
+            ...helperOptions,
+            sourceLabel: `上下文压缩 · ${options.reason || 'manual'} · 重写 ${repairAttempt}/${validationRepairAttempts}`
+          }
+        );
+        updateCompressionHistoryAttempt(historyRecord, retryHistoryAttempt, {
+          response: compressionString(retrySummary)
+        });
+      } catch (callError) {
+        updateCompressionHistoryAttempt(historyRecord, retryHistoryAttempt, {
+          error: compressionShortErrorMessage(callError)
+        });
+        throw callError;
+      }
       if (!retrySummary || !String(retrySummary).trim()) {
         throw new Error('摘要校验失败，重写返回空结果');
       }
@@ -1799,9 +2028,23 @@ ${feedback}
       patchedSummary = compressionAutoPatchSummary(finalSummary, validation, requiredRefs);
       finalSummary = patchedSummary.summary;
       validation = patchedSummary.validation;
+      updateCompressionHistoryAttempt(historyRecord, retryHistoryAttempt, {
+        validationOk: validation.ok,
+        validationFeedback: validation.ok ? '' : compressionValidationFeedback(validation)
+      });
+      finalizeCompressionHistoryRecord(historyRecord, {
+        finalSummary,
+        finalValidationOk: validation.ok,
+        validationFeedback: validation.ok ? '' : compressionValidationFeedback(validation)
+      });
     }
-    if (!validation.ok) {
+    const finalValidationFeedback = validation.ok ? '' : compressionValidationFeedback(validation);
+    const appliedInvalidSummary = !validation.ok && compressionAllowInvalidSummary(options);
+    if (!validation.ok && !appliedInvalidSummary) {
       throw new Error(`摘要校验失败：${compressionValidationFeedback(validation)}`);
+    }
+    if (appliedInvalidSummary) {
+      updateCompressingPlaceholder('🗜️ 正在压缩对话历史... 摘要校验仍未通过，已按设置放行最后一次摘要');
     }
     removeCompressingPlaceholder();
     
@@ -1814,7 +2057,9 @@ ${feedback}
       _compressionReason: options.reason || 'manual',
       _compressionUndoId: undoId,
       _summaryLayer: summaryLayer,
-      _estimatedBefore: estimatedBefore
+      _estimatedBefore: estimatedBefore,
+      _compressionValidationOk: validation.ok,
+      _compressionValidationFeedback: finalValidationFeedback
     };
     const replacementSummaries = summaryLayer === 'delta'
       ? [...preservedSummaries, summaryMsg]
@@ -1839,7 +2084,10 @@ ${feedback}
       originalCount: compressedCount,
       summaryLayer,
       reason: options.reason || 'manual',
-      estimatedBefore
+      estimatedBefore,
+      validationOk: validation.ok,
+      validationFeedback: finalValidationFeedback,
+      invalidSummaryApplied: appliedInvalidSummary
     };
     applyCompressionSummaryMarkers(chat);
     compressionApplied = true;
@@ -1860,7 +2108,27 @@ ${feedback}
     if (isVisible && typeof updateTokenDisplay === 'function') updateTokenDisplay();
     scheduleAccurateTokenCount(chat.id);
     const saved = Math.max(0, estimatedBefore - summaryMsg._estimatedAfter);
-    TokensUiService.toast(`✓ 已压缩 ${compressedCount} 条消息，预计节省 ${formatNumber(saved)} token`);
+    finalizeCompressionHistoryRecord(historyRecord, {
+      status: validation.ok ? 'success' : 'degraded',
+      finalSummary,
+      finalValidationOk: validation.ok,
+      validationFeedback: finalValidationFeedback,
+      estimatedAfter: summaryMsg._estimatedAfter,
+      savedTokens: saved,
+      error: ''
+    });
+    if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+      try {
+        await storage.flush();
+      } catch (flushError) {
+        console.warn('[compression] history flush after success failed:', flushError);
+      }
+    }
+    if (validation.ok) {
+      TokensUiService.toast(`✓ 已压缩 ${compressedCount} 条消息，预计节省 ${formatNumber(saved)} token`);
+    } else {
+      TokensUiService.toast(`⚠️ 已压缩 ${compressedCount} 条消息，但摘要校验未通过，已按设置放行`, 5000);
+    }
     return true;
   } catch (e) {
     delete _compressionUndoSnapshots[undoId];
@@ -1884,6 +2152,17 @@ ${feedback}
     } else {
       console.warn('[compression] 压缩失败:', e);
       TokensUiService.toast(`❌ 压缩失败：${compressionShortErrorMessage(e)}`, 4000);
+    }
+    finalizeCompressionHistoryRecord(historyRecord, {
+      status: e && e.name === 'AbortError' ? 'aborted' : 'failed',
+      error: compressionShortErrorMessage(e)
+    });
+    if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+      try {
+        await storage.flush();
+      } catch (flushError) {
+        console.warn('[compression] history flush after failure failed:', flushError);
+      }
     }
     return false;
   } finally {
@@ -1918,6 +2197,17 @@ window.showTokenDetails = showTokenDetails;
 window.resetTokenStats = resetTokenStats;
 window.compressionBudgetInfo = compressionBudgetInfo;
 window.compressionBoundaryIndexForChat = compressionBoundaryIndexForChat;
+window.compressionDefaultPromptTemplate = compressionDefaultPromptTemplate;
+window.compressionPromptTemplateForUse = compressionPromptTemplateForUse;
+window.renderCompressionPromptTemplate = renderCompressionPromptTemplate;
+window.compressionBuildSummaryPrompt = compressionBuildSummaryPrompt;
+window.compressionAllowInvalidSummary = compressionAllowInvalidSummary;
+window.readCompressionHistory = readCompressionHistory;
+window.createCompressionHistoryRecord = createCompressionHistoryRecord;
+window.addCompressionHistoryAttempt = addCompressionHistoryAttempt;
+window.updateCompressionHistoryAttempt = updateCompressionHistoryAttempt;
+window.finalizeCompressionHistoryRecord = finalizeCompressionHistoryRecord;
+window.clearCompressionHistory = clearCompressionHistory;
 window.applyCompressionSummaryMarkers = applyCompressionSummaryMarkers;
 window.rehydrateCompressionMarkersForChat = rehydrateCompressionMarkersForChat;
 window.rehydrateCompressionMarkersForAllChats = rehydrateCompressionMarkersForAllChats;
@@ -1957,6 +2247,17 @@ window.AgentApp.define('tokens', {
   resetTokenStats,
   compressionBudgetInfo,
   compressionBoundaryIndexForChat,
+  compressionDefaultPromptTemplate,
+  compressionPromptTemplateForUse,
+  renderCompressionPromptTemplate,
+  compressionBuildSummaryPrompt,
+  compressionAllowInvalidSummary,
+  readCompressionHistory,
+  createCompressionHistoryRecord,
+  addCompressionHistoryAttempt,
+  updateCompressionHistoryAttempt,
+  finalizeCompressionHistoryRecord,
+  clearCompressionHistory,
   applyCompressionSummaryMarkers,
   rehydrateCompressionMarkersForChat,
   rehydrateCompressionMarkersForAllChats,

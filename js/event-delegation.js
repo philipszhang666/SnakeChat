@@ -304,6 +304,10 @@
     'saveContextLimitRulesFromUI',
     'testContextLimitMatch',
     'resetContextLimitRulesToDefault',
+    'closeCompressionSettings',
+    'saveCompressionSettingsFromUI',
+    'resetCompressionPromptTemplate',
+    'clearCompressionHistoryFromUI',
     'manualCompress',
     'showTokenDetails',
     'resetTokenStats'

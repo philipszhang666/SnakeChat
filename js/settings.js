@@ -362,6 +362,293 @@ function testContextLimitMatch() {
   }
 }
 
+function compressionSettingsDefaultPromptTemplate() {
+  return typeof compressionDefaultPromptTemplate === 'function'
+    ? compressionDefaultPromptTemplate()
+    : '';
+}
+
+function openCompressionSettings() {
+  const wrap = document.querySelector('.more-menu-wrap');
+  if (wrap) wrap.classList.remove('open');
+  let modal = document.getElementById('compressionSettingsModal');
+  if (modal && !modal.querySelector('.modal')) {
+    modal.remove();
+    modal = null;
+  }
+  if (!modal) {
+    modal = buildCompressionSettingsModal();
+    document.body.appendChild(modal);
+  }
+  renderCompressionSettings();
+  modal.classList.add('show');
+}
+
+function closeCompressionSettings() {
+  const modal = document.getElementById('compressionSettingsModal');
+  if (modal) modal.classList.remove('show');
+}
+
+function buildCompressionSettingsModal() {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal-mask compression-settings-mask';
+  wrap.id = 'compressionSettingsModal';
+  wrap.innerHTML = `
+    <div class="modal wide compression-settings-modal">
+      <h2>🗜️ 压缩设置 <button class="modal-close" data-action="closeCompressionSettings">×</button></h2>
+
+      <div class="json-help">
+        这里记录最近 10 次普通对话压缩。每次记录都会保存发给 AI 的提示词和 AI 返回的原始摘要；即使摘要校验失败，也会保留下来。
+      </div>
+
+      <div class="compression-settings-grid">
+        <div class="form-group compression-settings-switch">
+          <div>
+            <label style="margin:0;">自动压缩</label>
+            <div class="form-hint" style="margin-top:2px;">达到阈值时自动总结历史对话</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="compressionSettingsAutoEnabled"><span class="switch-slider"></span></label>
+        </div>
+
+        <div class="form-group">
+          <label>自动压缩阈值（上下文使用率）</label>
+          <div class="slider-row">
+            <input type="range" id="compressionSettingsAutoThreshold" min="50" max="95" step="5" data-input-action="setLabelFromValue" data-label-target="compressionSettingsThresholdVal" data-suffix="%">
+            <span class="slider-val" id="compressionSettingsThresholdVal">75%</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>压缩时保留最近几条消息</label>
+          <div class="slider-row">
+            <input type="range" id="compressionSettingsKeepLast" min="2" max="10" step="1" data-input-action="setLabelFromValue" data-label-target="compressionSettingsKeepLastVal">
+            <span class="slider-val" id="compressionSettingsKeepLastVal">4</span>
+          </div>
+          <div class="form-hint">最近消息保留原样，前面的消息会交给 AI 总结成摘要。</div>
+        </div>
+
+        <div class="form-group compression-settings-switch">
+          <div>
+            <label style="margin:0;">允许放行格式不完整的摘要</label>
+            <div class="form-hint" style="margin-top:2px;">重写次数用完仍未通过校验时，继续应用最后一次摘要，并在历史记录里保留警告。</div>
+          </div>
+          <label class="switch"><input type="checkbox" id="compressionSettingsAllowInvalidSummary"><span class="switch-slider"></span></label>
+        </div>
+      </div>
+
+      <div class="pricing-section-title compression-section-title">
+        <span>默认压缩提示词</span>
+        <span class="pricing-section-hint">支持 {{previousBlock}}、{{conversationText}}、{{summaryKind}}、{{layerGuidance}} 等占位符</span>
+      </div>
+      <div class="form-group compression-prompt-group">
+        <textarea id="compressionPromptTemplate" class="json-editor compression-prompt-template" rows="18" spellcheck="false"></textarea>
+        <div class="form-hint">
+          关键占位符：<code>{{conversationText}}</code> 是待压缩对话，<code>{{previousBlock}}</code> 是已有摘要，<code>{{historyLabel}}</code> 是历史标题。留空或恢复默认时使用内置模板。
+        </div>
+      </div>
+
+      <div class="pricing-toolbar compression-settings-toolbar">
+        <button class="pricing-btn pricing-btn-success" data-action="saveCompressionSettingsFromUI">
+          <span>💾</span><span>保存压缩设置</span>
+        </button>
+        <button class="pricing-btn pricing-btn-warning" data-action="resetCompressionPromptTemplate">
+          <span>↩</span><span>恢复默认提示词</span>
+        </button>
+      </div>
+
+      <div class="pricing-section-title compression-section-title">
+        <span>压缩历史（最近 10 次）</span>
+        <button class="pricing-btn compression-history-clear" data-action="clearCompressionHistoryFromUI">
+          <span>🧹</span><span>清空历史</span>
+        </button>
+      </div>
+      <div id="compressionHistoryList" class="compression-history-list"></div>
+
+      <div class="modal-footer">
+        <button class="btn" data-action="closeCompressionSettings">关闭</button>
+      </div>
+    </div>
+  `;
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) closeCompressionSettings();
+  });
+  return wrap;
+}
+
+function renderCompressionSettings() {
+  settingsState.settings = settingsState.settings || {};
+  const s = settingsState.settings;
+  const enabled = document.getElementById('compressionSettingsAutoEnabled');
+  const threshold = document.getElementById('compressionSettingsAutoThreshold');
+  const thresholdVal = document.getElementById('compressionSettingsThresholdVal');
+  const keepLast = document.getElementById('compressionSettingsKeepLast');
+  const keepLastVal = document.getElementById('compressionSettingsKeepLastVal');
+  const allowInvalid = document.getElementById('compressionSettingsAllowInvalidSummary');
+  const prompt = document.getElementById('compressionPromptTemplate');
+  const thresholdValue = settingsNormalizeCompressAutoThreshold(s.compressAutoThreshold);
+  const keepValue = Math.max(2, Math.min(10, parseInt(s.compressKeepLast) || 4));
+
+  if (enabled) enabled.checked = !!s.compressAutoEnabled;
+  if (threshold) threshold.value = thresholdValue;
+  if (thresholdVal) thresholdVal.textContent = thresholdValue + '%';
+  if (keepLast) keepLast.value = keepValue;
+  if (keepLastVal) keepLastVal.textContent = String(keepValue);
+  if (allowInvalid) allowInvalid.checked = !!s.compressionAllowInvalidSummary;
+  if (prompt) prompt.value = s.compressionPromptTemplate || compressionSettingsDefaultPromptTemplate();
+
+  renderCompressionSettingsHistory();
+}
+
+function saveCompressionSettingsFromUI() {
+  settingsState.settings = settingsState.settings || {};
+  const s = settingsState.settings;
+  const enabled = document.getElementById('compressionSettingsAutoEnabled');
+  const threshold = document.getElementById('compressionSettingsAutoThreshold');
+  const keepLast = document.getElementById('compressionSettingsKeepLast');
+  const allowInvalid = document.getElementById('compressionSettingsAllowInvalidSummary');
+  const prompt = document.getElementById('compressionPromptTemplate');
+  const defaultPrompt = compressionSettingsDefaultPromptTemplate();
+
+  if (enabled) s.compressAutoEnabled = enabled.checked;
+  if (threshold) s.compressAutoThreshold = settingsNormalizeCompressAutoThreshold(threshold.value);
+  if (keepLast) {
+    const keepValue = parseInt(keepLast.value, 10);
+    s.compressKeepLast = Number.isFinite(keepValue) ? Math.max(2, Math.min(10, keepValue)) : 4;
+  }
+  if (allowInvalid) s.compressionAllowInvalidSummary = allowInvalid.checked;
+  if (prompt) {
+    const raw = prompt.value || '';
+    s.compressionPromptTemplate = raw.trim() && raw !== defaultPrompt ? raw : '';
+  }
+
+  settingsPersistSettings();
+  if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+    storage.flush().catch(() => {});
+  }
+  SettingsUiService.toast('✓ 压缩设置已保存');
+  if (typeof updateTokenDisplay === 'function') updateTokenDisplay();
+  if (typeof scheduleAccurateTokenCount === 'function') scheduleAccurateTokenCount();
+  renderCompressionSettings();
+}
+
+function resetCompressionPromptTemplate() {
+  const prompt = document.getElementById('compressionPromptTemplate');
+  const defaultPrompt = compressionSettingsDefaultPromptTemplate();
+  if (prompt) prompt.value = defaultPrompt;
+  if (settingsState.settings) settingsState.settings.compressionPromptTemplate = '';
+  settingsPersistSettings();
+  if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+    storage.flush().catch(() => {});
+  }
+  SettingsUiService.toast('↩ 已恢复默认压缩提示词');
+}
+
+function compressionHistoryStatusBadge(record) {
+  const status = record && record.status || 'running';
+  if (status === 'success') return '<span class="compression-status success">成功</span>';
+  if (status === 'degraded') return '<span class="compression-status warning">已放行</span>';
+  if (status === 'aborted') return '<span class="compression-status warning">已停止</span>';
+  if (status === 'failed') return '<span class="compression-status danger">失败</span>';
+  return '<span class="compression-status warning">进行中</span>';
+}
+
+function compressionHistoryReasonLabel(reason) {
+  if (reason === 'auto') return '自动';
+  if (reason === 'manual') return '手动';
+  return reason || '未知';
+}
+
+function compressionHistoryLayerLabel(layer) {
+  if (layer === 'delta') return '增量';
+  if (layer === 'base') return '基础';
+  return layer || '-';
+}
+
+function renderCompressionSettingsHistory() {
+  const el = document.getElementById('compressionHistoryList');
+  if (!el) return;
+  const history = typeof readCompressionHistory === 'function'
+    ? readCompressionHistory()
+    : (Array.isArray(settingsState.settings.compressionHistory) ? settingsState.settings.compressionHistory : []);
+  if (!history.length) {
+    el.innerHTML = '<div class="json-help compression-history-empty">暂无压缩记录。完成一次手动或自动压缩后，这里会显示发给 AI 的提示词和原始摘要。</div>';
+    return;
+  }
+  el.innerHTML = history.slice(0, 10).map((record, idx) => renderCompressionHistoryRecord(record, idx)).join('');
+}
+
+function renderCompressionHistoryRecord(record, idx) {
+  const fmt = typeof formatNumber === 'function' ? formatNumber : n => String(n);
+  const time = record.createdAt ? new Date(record.createdAt).toLocaleString('zh-CN') : '-';
+  const count = Number(record.originalCount || 0);
+  const attempts = Array.isArray(record.attempts) ? record.attempts : [];
+  const saved = Number(record.savedTokens || 0);
+  const title = record.chatTitle || record.chatId || '未命名对话';
+  return `
+    <div class="json-history-item compression-history-item">
+      <div class="json-history-header compression-history-header" data-action="toggleParentCollapsed" data-toggle-class="expanded">
+        <span class="json-history-time">${escapeHtml(time)}</span>
+        ${compressionHistoryStatusBadge(record)}
+        <span class="compression-history-meta">${escapeHtml(compressionHistoryReasonLabel(record.reason))} · ${escapeHtml(compressionHistoryLayerLabel(record.summaryLayer))} · ${fmt(count)} 条 · ${escapeHtml(record.model || 'unknown')}</span>
+        <span class="compression-history-open">点击展开</span>
+      </div>
+      <div class="json-history-body compression-history-body">
+        <div class="compression-history-summary">
+          <span title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+          ${record.estimatedBefore ? `<span>压缩前 ${fmt(record.estimatedBefore)} tokens</span>` : ''}
+          ${record.estimatedAfter ? `<span>压缩后 ${fmt(record.estimatedAfter)} tokens</span>` : ''}
+          ${saved ? `<span>节省 ${fmt(saved)} tokens</span>` : ''}
+        </div>
+        ${record.error ? `<div class="compression-history-error">错误：${escapeHtml(record.error)}</div>` : ''}
+        ${record.validationFeedback ? `<div class="compression-history-validation">校验反馈：<pre>${escapeHtml(record.validationFeedback)}</pre></div>` : ''}
+        ${attempts.length ? attempts.map((attempt, attemptIdx) => renderCompressionHistoryAttempt(attempt, attemptIdx)).join('') : '<div class="json-help">这条记录没有保存到 AI 调用尝试。</div>'}
+      </div>
+    </div>
+  `;
+}
+
+function renderCompressionHistoryAttempt(attempt, idx) {
+  const validation = attempt.validationOk === true
+    ? '<span class="compression-attempt-validation ok">校验通过</span>'
+    : (attempt.validationOk === false
+      ? '<span class="compression-attempt-validation bad">校验失败</span>'
+      : '<span class="compression-attempt-validation muted">未校验</span>');
+  const title = attempt.title || (attempt.kind === 'repair' ? `校验重写 ${idx + 1}` : '首次摘要');
+  return `
+    <div class="compression-attempt">
+      <div class="compression-attempt-head">
+        <span>${escapeHtml(title)}</span>
+        ${validation}
+      </div>
+      ${attempt.error ? `<div class="compression-history-error">调用错误：${escapeHtml(attempt.error)}</div>` : ''}
+      ${attempt.validationFeedback ? `<div class="compression-history-validation">本轮校验反馈：<pre>${escapeHtml(attempt.validationFeedback)}</pre></div>` : ''}
+      <div class="json-history-section compression-history-section">
+        <div class="json-history-label">发给 AI 的提示词</div>
+        <textarea class="compression-history-text" readonly rows="8" spellcheck="false">${escapeHtml(attempt.prompt || '')}</textarea>
+      </div>
+      <div class="json-history-section compression-history-section">
+        <div class="json-history-label">AI 原始压缩摘要</div>
+        <textarea class="compression-history-text" readonly rows="8" spellcheck="false" placeholder="本轮没有收到 AI 回复">${escapeHtml(attempt.response || '')}</textarea>
+      </div>
+    </div>
+  `;
+}
+
+function clearCompressionHistoryFromUI() {
+  if (!confirm('清空最近 10 次压缩历史？\n\n只会删除调试记录，不会删除对话摘要或聊天内容。')) return;
+  if (typeof clearCompressionHistory === 'function') clearCompressionHistory();
+  else {
+    settingsState.settings = settingsState.settings || {};
+    settingsState.settings.compressionHistory = [];
+    settingsPersistSettings();
+  }
+  if (typeof storage !== 'undefined' && storage && typeof storage.flush === 'function') {
+    storage.flush().catch(() => {});
+  }
+  renderCompressionSettingsHistory();
+  SettingsUiService.toast('✓ 压缩历史已清空');
+}
+
 function closeSettings() {
   closeMainSettingsSelectSkins();
   document.getElementById('settingsModal').classList.remove('show');
@@ -1304,6 +1591,13 @@ window.removeContextLimitRow = removeContextLimitRow;
 window.saveContextLimitRulesFromUI = saveContextLimitRulesFromUI;
 window.resetContextLimitRulesToDefault = resetContextLimitRulesToDefault;
 window.testContextLimitMatch = testContextLimitMatch;
+window.openCompressionSettings = openCompressionSettings;
+window.closeCompressionSettings = closeCompressionSettings;
+window.renderCompressionSettings = renderCompressionSettings;
+window.renderCompressionSettingsHistory = renderCompressionSettingsHistory;
+window.saveCompressionSettingsFromUI = saveCompressionSettingsFromUI;
+window.resetCompressionPromptTemplate = resetCompressionPromptTemplate;
+window.clearCompressionHistoryFromUI = clearCompressionHistoryFromUI;
 
 if (typeof window !== 'undefined' && window.AgentApp) {
   window.AgentApp.define('settings', {
@@ -1318,6 +1612,13 @@ if (typeof window !== 'undefined' && window.AgentApp) {
     refreshModelSelect,
     refreshModelPickerState,
     onProviderChange,
-    onFetchModels
+    onFetchModels,
+    openCompressionSettings,
+    closeCompressionSettings,
+    renderCompressionSettings,
+    renderCompressionSettingsHistory,
+    saveCompressionSettingsFromUI,
+    resetCompressionPromptTemplate,
+    clearCompressionHistoryFromUI
   });
 }

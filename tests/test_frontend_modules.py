@@ -1346,7 +1346,7 @@ class FrontendModuleTests(unittest.TestCase):
         tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
         refs_fn = tokens_js[tokens_js.index('function compressionCollectRequiredRefs'):tokens_js.index('function compressionMissingRefs')]
         missing_fn = tokens_js[tokens_js.index('function compressionMissingRefs'):tokens_js.index('function compressionValidateSummary')]
-        retry_block = tokens_js[tokens_js.index('请重写摘要。要求：'):tokens_js.index('const retrySummary = await')]
+        retry_block = tokens_js[tokens_js.index('请重写摘要。要求：'):tokens_js.index('let retrySummary;')]
         self.assertIn('artifactIds: new Set()', refs_fn)
         self.assertIn('checkpointIds: new Set()', refs_fn)
         self.assertNotIn('filePaths', refs_fn)
@@ -1404,23 +1404,47 @@ class FrontendModuleTests(unittest.TestCase):
     def test_auto_compression_threshold_setting_is_respected(self):
         tokens_js = (ROOT / 'js' / 'tokens.js').read_text(encoding='utf-8')
         settings_js = (ROOT / 'js' / 'settings.js').read_text(encoding='utf-8')
+        state_js = (ROOT / 'js' / 'state.js').read_text(encoding='utf-8')
+        settings_page_js = (ROOT / 'js' / 'settings-page.js').read_text(encoding='utf-8')
+        event_delegation_js = (ROOT / 'js' / 'event-delegation.js').read_text(encoding='utf-8')
         api_profiles_js = (ROOT / 'js' / 'api-profiles.js').read_text(encoding='utf-8')
         debate_js = (ROOT / 'js' / 'debate-mode.js').read_text(encoding='utf-8')
+        html = (ROOT / 'AI-Chat-大模型对话助手.html').read_text(encoding='utf-8')
 
         self.assertIn('function normalizeCompressAutoThreshold(value)', tokens_js)
         self.assertIn('const COMPRESS_AUTO_THRESHOLD_DEFAULT = 75;', tokens_js)
         self.assertEqual(tokens_js.count('normalizeCompressAutoThreshold(tokensState.settings.compressAutoThreshold)'), 2)
         self.assertNotIn('tokensState.settings.compressAutoThreshold || 75', tokens_js)
+        self.assertIn('compressionDefaultPromptTemplate()', tokens_js)
+        self.assertIn('function compressionBuildSummaryPrompt(options = {})', tokens_js)
+        self.assertIn('window.compressionDefaultPromptTemplate = compressionDefaultPromptTemplate', tokens_js)
+        self.assertIn('window.readCompressionHistory = readCompressionHistory', tokens_js)
 
         self.assertIn('function settingsNormalizeCompressAutoThreshold(value)', settings_js)
         self.assertIn('settingsNormalizeCompressAutoThreshold(s.compressAutoThreshold)', settings_js)
         self.assertIn('settingsNormalizeCompressAutoThreshold(compThreshold.value)', settings_js)
+        self.assertIn('openCompressionSettings', settings_js)
+        self.assertIn('closeCompressionSettings', settings_js)
+        self.assertIn('renderCompressionSettingsHistory', settings_js)
+        self.assertIn('saveCompressionSettingsFromUI', settings_js)
+        self.assertIn('resetCompressionPromptTemplate', settings_js)
+        self.assertIn('clearCompressionHistoryFromUI', settings_js)
+        self.assertIn('compressionSettingsDefaultPromptTemplate()', settings_js)
+        self.assertIn('compressionPromptTemplate', settings_js)
+        self.assertIn('compressionHistory', settings_js)
+        self.assertIn("compressionPromptTemplate: ''", state_js)
+        self.assertIn('compressionHistory: []', state_js)
 
         self.assertIn("'compressAutoEnabled'", api_profiles_js)
         self.assertIn("'compressAutoThreshold'", api_profiles_js)
         self.assertIn("'compressKeepLast'", api_profiles_js)
         self.assertIn('apiProfilesNormalizeCompressAutoThreshold(compThreshold.value)', api_profiles_js)
         self.assertIn('apiProfilesNormalizeCompressAutoThreshold(s.compressAutoThreshold)', api_profiles_js)
+        self.assertIn('data-settings-section="compression"', html)
+        self.assertIn("compression: { open: 'openCompressionSettings', close: 'closeCompressionSettings', modalId: 'compressionSettingsModal' }", settings_page_js)
+        self.assertIn('saveCompressionSettingsFromUI', event_delegation_js)
+        self.assertIn('resetCompressionPromptTemplate', event_delegation_js)
+        self.assertIn('clearCompressionHistoryFromUI', event_delegation_js)
 
         self.assertIn('normalizeCompressAutoThreshold(debateState.settings.compressAutoThreshold)', debate_js)
         self.assertNotIn('debateState.settings.compressAutoThreshold || 75', debate_js)
@@ -2274,7 +2298,11 @@ class FrontendModuleTests(unittest.TestCase):
             ),
             'event-delegation.js': (
                 'domEvents',
-                ['init', 'handleClick', 'handleChange', 'handleInput', 'handleKeydown', 'openSettingsSection', 'openCurrentFileInMainPanel', 'applyPlanPreset', 'applyPreset', 'switchMcpSkillTab', 'initProjectInstructions', 'initProjectMemory', 'taskQueueOpenChat', 'taskQueueUpdateItemText', 'addPresetTool', 'hideModal', 'hideSelf', 'switchJsonTab', 'importFromFile', 'exportDialogManagedChat', 'setDialogExportChat', 'valueClick', 'valueChange', 'valueInput', 'enterGlobal', 'syncMaxToolRoundsRange', 'syncPlanSettingRange', 'syncPlanSettingInput', 'setLabelFromValue', 'directClickActions', 'changeActions', 'keydownActions']
+                ['init', 'handleClick', 'handleChange', 'handleInput', 'handleKeydown', 'openSettingsSection', 'openCurrentFileInMainPanel', 'applyPlanPreset', 'applyPreset', 'switchMcpSkillTab', 'initProjectInstructions', 'initProjectMemory', 'taskQueueOpenChat', 'taskQueueUpdateItemText', 'addPresetTool', 'hideModal', 'hideSelf', 'switchJsonTab', 'importFromFile', 'exportDialogManagedChat', 'setDialogExportChat', 'valueClick', 'valueChange', 'valueInput', 'enterGlobal', 'syncMaxToolRoundsRange', 'syncPlanSettingRange', 'syncPlanSettingInput', 'setLabelFromValue', 'directClickActions', 'changeActions', 'keydownActions', 'saveCompressionSettingsFromUI', 'resetCompressionPromptTemplate', 'clearCompressionHistoryFromUI', 'closeCompressionSettings']
+            ),
+            'settings.js': (
+                'settings',
+                ['openSettings', 'closeSettings', 'saveAndClose', 'saveSettings', 'openCompressionSettings', 'closeCompressionSettings', 'renderCompressionSettings', 'renderCompressionSettingsHistory', 'saveCompressionSettingsFromUI', 'resetCompressionPromptTemplate', 'clearCompressionHistoryFromUI']
             ),
             'api-core.js': (
                 'apiCore',
@@ -2762,6 +2790,7 @@ class FrontendModuleTests(unittest.TestCase):
             'data-change-action="onPickFiles"',
             'data-input-action="renderTracePanel"',
             'data-action="openSettingsSection"',
+            'data-settings-section="compression"',
             'data-action="toggleTheme"',
             'data-action="toggleCoolMode"',
             'data-action="toggleSecurityMode"',
