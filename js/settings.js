@@ -56,6 +56,11 @@ function openSettings() {
   if (searchProxyUrlEl) {
     searchProxyUrlEl.value = s.searchProxyUrl || 'http://127.0.0.1:7890';
   }
+  // 🔍 DeepSeek 官方搜索 API（可选，留空 = 只用免费引擎）
+  const searchApiKeyEl = document.getElementById('searchApiKey');
+  if (searchApiKeyEl) searchApiKeyEl.value = s.searchApiKey || '';
+  const searchBaseUrlEl = document.getElementById('searchBaseUrl');
+  if (searchBaseUrlEl) searchBaseUrlEl.value = s.searchBaseUrl || 'https://api.deepseek.com';
   // 🌿 Git 命令本地代理
   const gitProxyEnabledEl = document.getElementById('gitCommandProxyEnabled');
   if (gitProxyEnabledEl) gitProxyEnabledEl.checked = !!s.gitProxyEnabled;
@@ -686,6 +691,14 @@ function saveAndClose() {
     const v = (searchProxyUrlEl.value || '').trim();
     s.searchProxyUrl = v || 'http://127.0.0.1:7890';
   }
+  // 🔍 DeepSeek 官方搜索 API（可选）
+  const searchApiKeyEl = document.getElementById('searchApiKey');
+  if (searchApiKeyEl) s.searchApiKey = (searchApiKeyEl.value || '').trim();
+  const searchBaseUrlEl = document.getElementById('searchBaseUrl');
+  if (searchBaseUrlEl) {
+    const v = (searchBaseUrlEl.value || '').trim();
+    s.searchBaseUrl = v || 'https://api.deepseek.com';
+  }
   // 🌿 Git 命令本地代理
   const gitProxyEnabledEl = document.getElementById('gitCommandProxyEnabled');
   if (gitProxyEnabledEl) s.gitProxyEnabled = gitProxyEnabledEl.checked;
@@ -1038,6 +1051,20 @@ function onProviderChange() {
 function toggleKey() {
   const inp = document.getElementById('apiKey');
   const btn = document.getElementById('keyToggle');
+  if (inp.type === 'password') {
+    inp.type = 'text';
+    btn.textContent = '隐藏';
+  } else {
+    inp.type = 'password';
+    btn.textContent = '显示';
+  }
+}
+
+// 🔍 DeepSeek 搜索 API Key 的显示/隐藏（与主 API Key 分开，避免互相干扰）
+function toggleSearchApiKey() {
+  const inp = document.getElementById('searchApiKey');
+  const btn = document.getElementById('searchApiKeyToggle');
+  if (!inp || !btn) return;
   if (inp.type === 'password') {
     inp.type = 'text';
     btn.textContent = '隐藏';

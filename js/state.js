@@ -147,6 +147,10 @@ let state = {
     // 🌐 搜索工具代理：让 web_search / fetch_url 后端请求走本机 HTTP/SOCKS 代理，解决 Google 等网络问题
     searchProxyEnabled: false,
     searchProxyUrl: 'http://127.0.0.1:7890',
+    // 🔍 DeepSeek 官方搜索 API（可选）：留空 = 不启用，只走免费引擎抓取，不产生费用
+    //    填写后 web_search 会优先调用官方接口（约 ¥0.005 / 次），失败自动回退到免费引擎
+    searchApiKey: '',
+    searchBaseUrl: 'https://api.deepseek.com',
     // 🌿 Git 命令代理：应用级临时代理，不写入仓库 git config
     gitProxyEnabled: false,
     gitProxyUrl: 'http://127.0.0.1:7890',

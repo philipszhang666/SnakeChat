@@ -524,16 +524,17 @@ const BUILTIN_TOOLS = [
   },
   {
     name: 'web_search',
-    description: '查询在线参考资料：根据关键词通过多个在线搜索源检索公开网页，返回相关条目的标题、链接和摘要列表。支持自动回退，也可指定 Google、DuckDuckGo、Bing、360、搜狗、百度等搜索源。\n\n使用场景：\n- 用户询问的内容超出已有知识范围或需要最新信息\n- 需要查找具体资料、文档、教程的来源链接\n- 作为 fetch_url 的前置：先找到链接，再加载详情\n\n建议工作流：先 web_search 拿到链接 → 再 fetch_url 加载详细内容。',
+    description: '查询在线参考资料：根据关键词检索公开网页，返回相关条目的标题、链接和摘要列表。支持自动回退，也可指定 DeepSeek、Google、DuckDuckGo、Bing、360、搜狗、百度等搜索源。\n\nDeepSeek 官方搜索（可选）：若用户在设置里配置了 DeepSeek API Key，自动模式会优先调用 DeepSeek 官方搜索接口，结果额外带摘要、发布时间和权威度，失败自动回退到免费引擎；没有配置 Key 时只用免费引擎，不产生费用。工具返回的第一行会标明本次使用的是哪个引擎以及是否计费。\n\n使用场景：\n- 用户询问的内容超出已有知识范围或需要最新信息\n- 需要查找具体资料、文档、教程的来源链接\n- 作为 fetch_url 的前置：先找到链接，再加载详情\n\n建议工作流：先 web_search 拿到链接 → 再 fetch_url 加载详细内容。',
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', description: '查询关键词，可用中文或英文' },
         max_results: { type: 'number', description: '返回结果数量，默认 8，最多 20' },
         region: { type: 'string', description: '地区偏好，可选 cn（国内优先）/ global（海外优先）' },
-        engine: { type: 'string', description: '可选搜索源：auto（默认自动回退）/ google / duckduckgo / bing / bing-cn / bing-global / 360 / sogou / baidu' },
+        engine: { type: 'string', description: '可选搜索源：auto（默认自动回退）/ deepseek（DeepSeek 官方 API，需已配置 Key；指定后不回退）/ google / duckduckgo / bing / bing-cn / bing-global / 360 / sogou / baidu' },
         proxy_enabled: { type: 'boolean', description: '可选：是否为本次搜索启用本地代理。不传则使用主设置里的搜索代理开关。' },
-        proxy_url: { type: 'string', description: '可选：本次搜索使用的本地代理地址，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。不传则使用主设置里的搜索代理地址。' }
+        proxy_url: { type: 'string', description: '可选：本次搜索使用的本地代理地址，如 http://127.0.0.1:7890 或 socks5h://127.0.0.1:7890。不传则使用主设置里的搜索代理地址。' },
+        need_content: { type: 'boolean', description: '可选：走 DeepSeek 搜索时是否一并返回网页正文（更耗 token，默认 false）。仅在已配置 DeepSeek Key 时生效。' }
       },
       required: ['query']
     },

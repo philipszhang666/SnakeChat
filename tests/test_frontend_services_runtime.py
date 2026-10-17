@@ -2841,6 +2841,99 @@ class FrontendServiceRuntimeTests(unittest.TestCase):
         )
 
     @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
+    def test_file_explorer_switch_workspace_sends_absolute_target(self):
+        script = textwrap.dedent(
+            r"""
+            const assert = require('assert');
+            const fs = require('fs');
+            const path = require('path');
+            const vm = require('vm');
+
+            const root = process.cwd();
+            const calls = [];
+            const sandbox = {
+              console,
+              document: {
+                getElementById() { return null; },
+                querySelector() { return null; },
+                createElement() {
+                  return {
+                    appendChild() {},
+                    addEventListener() {},
+                    classList: { add() {}, remove() {}, toggle() {} }
+                  };
+                },
+                body: { appendChild() {}, removeChild() {} },
+                addEventListener() {},
+                removeEventListener() {}
+              },
+              navigator: { clipboard: { writeText() { return Promise.resolve(); } } },
+              TERMINAL_CONFIG: {
+                serverUrl: 'http://127.0.0.1:18765',
+                workspace: '/old/root',
+                cwd: '/old/root'
+              },
+              isRemoteAgentActive() { return true; },
+              callAgentBackend(action, params) {
+                calls.push({ action, params });
+                if (action === 'set_workspace') {
+                  return Promise.resolve({ ok: true, workspace: params.path, cwd: params.path });
+                }
+                if (action === 'list_dir') {
+                  return Promise.resolve({ ok: true, path: params.path === '.' ? '/old/root/subdir' : params.path, entries: [] });
+                }
+                return Promise.resolve({ ok: true });
+              },
+              toast() {}
+            };
+            sandbox.window = sandbox;
+            sandbox.globalThis = sandbox;
+            vm.createContext(sandbox);
+
+            function run(file) {
+              const code = fs.readFileSync(path.join(root, file), 'utf8');
+              vm.runInContext(code, sandbox, { filename: file });
+            }
+
+            run('js/app-context.js');
+            run('js/ui-service.js');
+            run('js/file-explorer.js');
+
+            (async () => {
+              const fileExplorer = sandbox.AgentApp.require('fileExplorer');
+              fileExplorer.FILE_EXPLORER_STATE.path = '.';
+              fileExplorer.FILE_EXPLORER_STATE.absolutePath = '/old/root';
+              fileExplorer.FILE_EXPLORER_STATE.workspaceRoot = '/old/root';
+
+              await fileExplorer.switchFileExplorerWorkspace('subdir');
+
+              assert.strictEqual(calls[0].action, 'set_workspace');
+              assert.strictEqual(calls[0].params.path, '/old/root/subdir');
+              assert.strictEqual(calls[0].params._workspace_base, '/old/root');
+            })().catch(err => {
+              console.error(err);
+              process.exit(1);
+            });
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            script_path = Path(tmpdir) / 'file_explorer_switch_workspace_test.js'
+            script_path.write_text(script, encoding='utf-8')
+            completed = subprocess.run(
+                ['node', str(script_path)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f'file explorer switch workspace runtime test failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}',
+        )
+
+    @unittest.skipIf(shutil.which('node') is None, 'node is required for frontend runtime smoke tests')
     def test_file_editor_ignores_stale_read_file_results(self):
         script = textwrap.dedent(
             r"""

@@ -378,6 +378,38 @@ function workspaceForToolChat(chatId, context) {
   return String(workspace || TERMINAL_CONFIG.workspace || '').trim();
 }
 
+function workspaceBindingForToolChat(chatId, context) {
+  const ctxChat = context && typeof context === 'object' ? context.chat : null;
+  const chat = (ctxChat && (!chatId || ctxChat.id === chatId))
+    ? ctxChat
+    : (chatId ? terminalChatById(chatId) : terminalCurrentChat());
+  const workspace = String(
+    (chat && (chat.workspace || chat.cwd))
+    || TERMINAL_CONFIG.workspace
+    || ''
+  ).trim();
+  const cwd = String(
+    (chat && (chat.cwd || chat.workspace))
+    || TERMINAL_CONFIG.cwd
+    || workspace
+    || ''
+  ).trim();
+  return { workspace, cwd: cwd || workspace };
+}
+
+function shouldAttachWorkspaceBinding(action) {
+  // 本地专属动作（web_search / fetch_url）由本地服务执行，与会话工作区无关；
+  // 远程会话的工作区可能是 Linux 路径，若作为 _session_workspace 发给本地
+  // （如 Windows）服务，会被误判为相对路径并前置盘符，导致“工作区绑定失败”。
+  if (LOCAL_ONLY_BACKEND_ACTIONS.has(action)) return false;
+  return ![
+    'set_workspace',
+    'select_workspace',
+    'choose_workspace_directory',
+    'reset_workspace_to_agent_home'
+  ].includes(action);
+}
+
 function ensurePendingAIAttachmentBuckets() {
   if (!terminalState.pendingAIAttachmentsByChat || typeof terminalState.pendingAIAttachmentsByChat !== 'object') {
     terminalState.pendingAIAttachmentsByChat = {};
@@ -919,10 +951,15 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
   const requestTimeoutMs = agentBackendRequestTimeoutMs(action, requestParams);
   const backendServerUrl = resolveAgentBackendServerUrl(action, context, chatId);
   const usesAlternateBackend = backendServerUrl !== (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765');
+  const workspaceBinding = shouldAttachWorkspaceBinding(action)
+    ? workspaceBindingForToolChat(chatId, context)
+    : { workspace: '', cwd: '' };
   const doFetch = async () => {
     const backendParams = { ...requestParams };
     delete backendParams.requestTimeoutMs;
     delete backendParams._requestTimeoutMs;
+    if (workspaceBinding.workspace) backendParams._session_workspace = workspaceBinding.workspace;
+    if (workspaceBinding.cwd) backendParams._session_cwd = workspaceBinding.cwd;
     return await fetchAgentBackendWithTimeout(backendServerUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1906,25 +1943,66 @@ async function generatePptWithProgress(data, context = {}) {
   }
 }
 
-// ⭐ 网络搜索（通过本地后端 → 多搜索源自动回退）
+// ⭐ 解析搜索用 DeepSeek Key：专用 Key 优先，其次复用当前 DeepSeek 档案的 Key
+//    - 设置了「DeepSeek 搜索 API Key」→ 用它
+//    - 留空但当前 API 服务商就是 DeepSeek → 复用对话用的 Key
+//    - 其它情况 → 返回空串，后端不启用 DeepSeek，只用免费引擎
+function resolveSearchApiKey(s) {
+  s = s || {};
+  const dedicated = String(s.searchApiKey || '').trim();
+  if (dedicated) return dedicated;
+  const provider = String(s.provider || '').toLowerCase();
+  const base = String(s.baseUrl || '').toLowerCase();
+  if (provider === 'deepseek' || base.includes('api.deepseek.com')) {
+    return String(s.apiKey || '').trim();
+  }
+  return '';
+}
+
+// ⭐ 网络搜索（通过本地后端 → DeepSeek 官方 API / 多搜索源自动回退）
 async function webSearch(query, maxResults, region, context) {
   const engine = (context && (context.engine || context.source)) || undefined;
   const s = (typeof terminalState !== 'undefined' && terminalState.settings) ? terminalState.settings : {};
   const proxyEnabled = context && context.proxy_enabled !== undefined ? !!context.proxy_enabled : !!s.searchProxyEnabled;
   const proxyUrl = (context && context.proxy_url) || s.searchProxyUrl || '';
+  const searchApiKey = resolveSearchApiKey(s);
   const r = await callAgentBackend('web_search', {
     query,
     max_results: maxResults || 8,
     region: region || 'wt-wt',
     engine,
     proxy_enabled: proxyEnabled,
-    proxy_url: proxyUrl
+    proxy_url: proxyUrl,
+    // 🔍 DeepSeek 官方搜索（可选）：后端据此决定是否优先调用官方 API
+    search_api_key: searchApiKey,
+    search_base_url: s.searchBaseUrl || '',
+    ori_question: (context && context.ori_question) || '',
+    need_content: !!(context && context.need_content)
   }, undefined, undefined, context);
   if (typeof r === 'string') return r;
   if (!r.ok) return `❌ 搜索失败：${r.error}`;
-  let output = `🌐 搜索 "${r.query}"（来源：${r.engine}，共 ${r.count} 条）：\n\n`;
+
+  // ⭐ 明确告诉用户本次用的是哪个引擎、是否计费
+  const label = r.engine_label || r.engine || 'unknown';
+  const engineLine = r.billed
+    ? `🔷 ${label} · 💰 计费${r.price_hint ? `（${r.price_hint}）` : ''}`
+    : `🆓 ${label} · 免费`;
+  let output = `🌐 搜索 "${r.query}"\n🔎 本次引擎：${engineLine}\n📊 共 ${r.count} 条\n\n`;
+  if (Array.isArray(r.fallback_errors) && r.fallback_errors.length) {
+    output = `⚠️ 已回退（${r.fallback_errors.join(' | ')}）\n\n` + output;
+  }
   r.results.forEach((m, i) => {
-    output += `${i + 1}. **${m.title}**\n   ${m.url}\n   ${m.snippet}\n\n`;
+    output += `${i + 1}. **${m.title}**\n   ${m.url}\n`;
+    // DeepSeek 的 summary 比 snippet 信息更全，优先给模型读
+    output += `   ${m.summary || m.snippet || ''}\n`;
+    const tags = [];
+    if (m.site_name) tags.push(m.site_name);
+    if (m.date) tags.push(String(m.date).slice(0, 10));
+    if (typeof m.authority === 'number' && m.authority >= 0) tags.push(`权威度 ${m.authority}/4`);
+    if (typeof m.rerank_score === 'number') tags.push(`相关度 ${m.rerank_score}`);
+    if (tags.length) output += `   _[${tags.join(' · ')}]_\n`;
+    if (m.content) output += `   > ${String(m.content).slice(0, 800)}\n`;
+    output += '\n';
   });
   return output;
 }

@@ -66,6 +66,7 @@ const FILE_EXPLORER_STATE = {
   inlineFileOpenSeq: 0,
   inlineFileSide: 'right',
   inlineChatWidth: 50,
+  workspaceVersion: 0,
   pendingReload: null
 };
 
@@ -525,6 +526,20 @@ function fileExplorerAbsolutePathFor(path) {
     return joinFileExplorerAbsolutePath(currentAbsolute, currentRelative);
   }
   return joinFileExplorerAbsolutePath(fileExplorerWorkspaceRoot(), normalizedPath);
+}
+
+function fileExplorerWorkspaceBasePath() {
+  return trimFileExplorerAbsolutePath(fileExplorerAbsolutePathFor(FILE_EXPLORER_STATE.path) || fileExplorerWorkspaceRoot());
+}
+
+function fileExplorerWorkspaceSwitchPath(path) {
+  const normalizedPath = normalizeExplorerPath(path);
+  if (isAbsoluteExplorerPath(normalizedPath)) return normalizedPath;
+  return trimFileExplorerAbsolutePath(fileExplorerAbsolutePathFor(normalizedPath)) || normalizedPath;
+}
+
+function bumpFileExplorerWorkspaceVersion() {
+  FILE_EXPLORER_STATE.workspaceVersion = (FILE_EXPLORER_STATE.workspaceVersion || 0) + 1;
 }
 
 function fileExplorerQuickAccessKey(path) {
@@ -2593,6 +2608,7 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
   FILE_EXPLORER_STATE.loading = true;
   const nextPath = normalizeExplorerPath(path);
   const pathChanged = nextPath !== FILE_EXPLORER_STATE.path;
+  const loadWorkspaceVersion = FILE_EXPLORER_STATE.workspaceVersion || 0;
   FILE_EXPLORER_STATE.path = nextPath;
   if (pathChanged) clearFileExplorerSelection({ render: false });
   if (pathChanged && options.preserveSearch !== true) clearGraphicalFileExplorerSearch({ render: false });
@@ -2605,6 +2621,7 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
       const r = await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerFullAccessBackendContext());
       if (typeof r === 'string') throw new Error(r);
       if (!r || !r.ok) throw new Error((r && r.error) || '读取本机磁盘失败');
+      if (loadWorkspaceVersion !== (FILE_EXPLORER_STATE.workspaceVersion || 0) || nextPath !== normalizeExplorerPath(FILE_EXPLORER_STATE.path)) return false;
       const entries = syncFileExplorerLocalDrives(Array.isArray(r.entries) ? r.entries : []);
       FILE_EXPLORER_STATE.absolutePath = '';
       FILE_EXPLORER_STATE.entries = entries;
@@ -2616,6 +2633,7 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
     const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerPathBackendContext(FILE_EXPLORER_STATE.path));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取目录失败');
+    if (loadWorkspaceVersion !== (FILE_EXPLORER_STATE.workspaceVersion || 0) || nextPath !== normalizeExplorerPath(FILE_EXPLORER_STATE.path)) return false;
     noteFileExplorerAbsolutePath(r.path, FILE_EXPLORER_STATE.path);
     FILE_EXPLORER_STATE.entries = Array.isArray(r.entries) ? r.entries : [];
     FILE_EXPLORER_STATE.autoRefreshSignature = fileExplorerEntriesSignature(FILE_EXPLORER_STATE.entries);
@@ -2664,13 +2682,14 @@ async function pollFileExplorerChanges() {
   if (!isFileExplorerViewActive() || FILE_EXPLORER_STATE.loading || FILE_EXPLORER_STATE.autoRefreshInFlight) return;
   FILE_EXPLORER_STATE.autoRefreshInFlight = true;
   const path = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+  const pollWorkspaceVersion = FILE_EXPLORER_STATE.workspaceVersion || 0;
   try {
     if (typeof callAgentBackend !== 'function') return;
     const r = isFileExplorerThisPcPath(path)
       ? await callAgentBackend('list_drives', {}, undefined, undefined, fileExplorerFullAccessBackendContext())
       : await callAgentBackend('list_dir', { path }, undefined, undefined, fileExplorerPathBackendContext(path));
     if (typeof r === 'string' || !r || !r.ok) return;
-    if (path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !isFileExplorerViewActive()) return;
+    if (pollWorkspaceVersion !== (FILE_EXPLORER_STATE.workspaceVersion || 0) || path !== normalizeExplorerPath(FILE_EXPLORER_STATE.path) || !isFileExplorerViewActive()) return;
     if (!isFileExplorerThisPcPath(path)) noteFileExplorerAbsolutePath(r.path, path);
     let entries = Array.isArray(r.entries) ? r.entries : [];
     if (isFileExplorerThisPcPath(path)) entries = syncFileExplorerLocalDrives(entries);
@@ -2718,6 +2737,7 @@ function refreshFileExplorer() {
 }
 
 function resetFileExplorerToRoot() {
+  bumpFileExplorerWorkspaceVersion();
   FILE_EXPLORER_STATE.path = '.';
   FILE_EXPLORER_STATE.entries = [];
   FILE_EXPLORER_STATE.absolutePath = '';
@@ -4250,12 +4270,23 @@ async function createFileExplorerFolder(basePath = FILE_EXPLORER_STATE.contextPa
 async function switchFileExplorerWorkspace(path = FILE_EXPLORER_STATE.contextPath) {
   const normalizedPath = normalizeExplorerPath(path || FILE_EXPLORER_STATE.path);
   try {
-    const r = await callAgentBackend('set_workspace', { path: normalizedPath }, undefined, undefined, fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true }));
+    const workspacePath = fileExplorerWorkspaceSwitchPath(normalizedPath);
+    const workspaceBase = fileExplorerWorkspaceBasePath();
+    const params = { path: workspacePath };
+    if (workspaceBase && !isAbsoluteExplorerPath(normalizedPath)) params._workspace_base = workspaceBase;
+    const r = await callAgentBackend('set_workspace', params, undefined, undefined, fileExplorerPathBackendContext(workspacePath, { skipConfirm: true }));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '切换工作区失败');
-    if (typeof noteRemoteWorkspaceChanged === 'function') noteRemoteWorkspaceChanged(r.workspace || r.cwd || normalizedPath);
+    if (typeof updateWorkspaceDisplay === 'function') updateWorkspaceDisplay(r);
+    if (typeof noteRemoteWorkspaceChanged === 'function') noteRemoteWorkspaceChanged(r.workspace || r.cwd || workspacePath);
+    if (typeof refreshWorkspaceDependentContext === 'function') refreshWorkspaceDependentContext();
+    bumpFileExplorerWorkspaceVersion();
     FILE_EXPLORER_STATE.path = '.';
     FILE_EXPLORER_STATE.entries = [];
+    FILE_EXPLORER_STATE.absolutePath = '';
+    FILE_EXPLORER_STATE.workspaceRoot = '';
+    FILE_EXPLORER_STATE.autoRefreshSignature = '';
+    FILE_EXPLORER_STATE.autoRefreshPath = '.';
     fileExplorerToast('已切换工作区');
     await loadFileExplorer('.');
   } catch (e) {

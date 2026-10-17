@@ -2,7 +2,7 @@
 # server/web.py - 网络搜索 & 网页抓取
 # ============================================================
 # 提供 WebMixin。包含：
-#   handle_web_search - 多搜索源自动回退（Bing / Google / DuckDuckGo / 360 / 搜狗 / 百度）
+#   handle_web_search - 多搜索源自动回退（DeepSeek 官方 API / Bing / Google / DuckDuckGo / 360 / 搜狗 / 百度）
 #   handle_fetch_url  - 抓取并提取网页正文
 #
 # 依赖第三方库 requests（仅这里和 LMS 教务工具用到）
@@ -12,6 +12,17 @@ import os
 import re
 from html import unescape
 from urllib.parse import quote_plus, parse_qs, unquote, urlparse
+
+# ============ 🔍 DeepSeek 官方搜索 API（可选引擎） ============
+# 文档：https://api-docs.deepseek.com/zh-cn/guides/search
+# 计费：每 1,000 次成功请求 5 元；无结果 / 失败 / 超时不计费；QPS 5
+DEEPSEEK_SEARCH_DEFAULT_BASE = 'https://api.deepseek.com'
+DEEPSEEK_SEARCH_PATH = '/v1/tools/search'
+DEEPSEEK_SEARCH_PRICE_HINT = '约 ¥0.005 / 次'
+
+# _dedupe() 需要原样保留的扩展字段（DeepSeek 搜索独有）
+_EXTRA_RESULT_FIELDS = ('summary', 'content', 'date', 'authority',
+                        'rerank_score', 'site_name', 'site_icon')
 
 
 class WebMixin:
@@ -82,11 +93,35 @@ class WebMixin:
                 text += '; check the local proxy type and port'
         return text
 
+    # 引擎名 → 前端展示用的中文名（让用户一眼看出本次用的是哪个引擎）
+    _WEB_ENGINE_LABELS = {
+        'deepseek':    'DeepSeek 官方搜索 API',
+        'bing-cn':     'Bing 国内',
+        'bing-global': 'Bing 国际',
+        'bing':        'Bing',
+        'google':      'Google',
+        'duckduckgo':  'DuckDuckGo',
+        'ddg':         'DuckDuckGo',
+        'sogou':       '搜狗',
+        '360':         '360 搜索',
+        'so':          '360 搜索',
+        'baidu':       '百度',
+    }
+
+    def _web_engine_label(self, name):
+        """引擎名 → 中文展示名。"""
+        return self._WEB_ENGINE_LABELS.get(str(name or '').strip().lower(), name or 'unknown')
+
     # ============ Web search ============
     def handle_web_search(self, body):
-        """网页搜索，返回标题 + URL + 摘要列表。不需要任何 API Key。
+        """网页搜索，返回标题 + URL + 摘要列表。
+
+        默认不需要任何 API Key（抓取公开搜索页）。若请求体带 search_api_key，
+        则优先调用 DeepSeek 官方搜索 API：结构化结果，额外返回摘要 / 发布时间 /
+        权威度 / 改写分数，按次计费（约 ¥0.005 / 次），失败自动回退到免费引擎。
 
         引擎按可用性排序（自动回退）：
+          0. DeepSeek 官方 API        — 仅当提供 search_api_key 时启用，计费
           1. Bing 国内 (cn.bing.com)   — 默认主力
           2. Google (google.com)       — 全球内容更全，可能受网络环境影响
           3. DuckDuckGo HTML           — 轻量页面，适合兜底
@@ -99,16 +134,28 @@ class WebMixin:
 
         engine/source（可选）：
           - auto / all：按 region 自动回退
-          - google / duckduckgo / bing / bing-cn / bing-global / sogou / 360 / baidu：指定单个搜索源
+          - deepseek / google / duckduckgo / bing / bing-cn / bing-global / sogou / 360 / baidu：指定单个搜索源
+            （显式指定 deepseek 时不做回退，失败直接报错，便于排查）
 
         proxy_enabled/proxy_url（可选）：
           - proxy_enabled=true 且 proxy_url 非空时，本次搜索请求走本地代理
           - proxy_url 示例：http://127.0.0.1:7890 / socks5://127.0.0.1:7890
+
+        search_api_key / search_base_url / ori_question / need_content（可选）：
+          - search_api_key：DeepSeek API Key；提供后 auto 模式把 deepseek 排第一位
+          - search_base_url：默认 https://api.deepseek.com
+          - ori_question：触发搜索的用户原始问题，帮助理解搜索意图
+          - need_content：是否让 DeepSeek 一并返回网页正文（更耗 token）
         """
         query = (body.get('query') or '').strip()
         max_results = min(int(body.get('max_results', 8)), 20)
         region = (body.get('region') or 'cn').lower()
         preferred_engine = (body.get('engine') or body.get('source') or 'auto').strip().lower()
+        # 🔍 DeepSeek 官方搜索（可选）：Key 由前端每次请求带上，后端不落盘
+        search_api_key = (body.get('search_api_key') or '').strip()
+        search_base_url = (body.get('search_base_url') or '').strip() or DEEPSEEK_SEARCH_DEFAULT_BASE
+        ori_question = (body.get('ori_question') or '').strip()
+        need_content = bool(body.get('need_content'))
         proxies, proxy_url, proxy_error = self._web_proxy_config(body)
 
         if not query:
@@ -117,7 +164,9 @@ class WebMixin:
             return self.response.json(200, {'ok': False, 'error': proxy_error})
 
         proxy_hint = proxy_url if proxies else 'off'
-        print(f'🌐 [网络搜索] "{query}" (max={max_results}, region={region}, engine={preferred_engine}, proxy={proxy_hint})')
+        deepseek_hint = 'on' if search_api_key else 'off'
+        print(f'🌐 [网络搜索] "{query}" (max={max_results}, region={region}, '
+              f'engine={preferred_engine}, deepseek={deepseek_hint}, proxy={proxy_hint})')
 
         try:
             import requests
@@ -148,11 +197,17 @@ class WebMixin:
                 if key in seen:
                     continue
                 seen.add(key)
-                out.append({
+                entry = {
                     'title': title,
                     'url': url,
                     'snippet': (item.get('snippet') or '').strip()
-                })
+                }
+                # 保留 DeepSeek 搜索的扩展字段（摘要 / 正文 / 时间 / 权威度等）
+                for extra_key in _EXTRA_RESULT_FIELDS:
+                    extra_val = item.get(extra_key)
+                    if extra_val not in (None, '', []):
+                        entry[extra_key] = extra_val
+                out.append(entry)
                 if len(out) >= max_results:
                     break
             return out
@@ -386,7 +441,64 @@ class WebMixin:
                     break
             return out
 
+        # ===== DeepSeek 官方搜索 API（可选，计费） =====
+        def search_deepseek():
+            """POST /v1/tools/search，返回结构化结果（含摘要 / 时间 / 权威度）。"""
+            if not search_api_key:
+                raise RuntimeError('未配置 DeepSeek API Key')
+
+            base = search_base_url.rstrip('/')
+            if base.endswith('/v1'):
+                base = base[:-3]
+            url = base + DEEPSEEK_SEARCH_PATH
+            api_payload = {
+                'query': query,
+                'count': max(1, min(max_results, 50)),
+                'need_content': need_content,
+            }
+            if ori_question:
+                api_payload['ori_question'] = ori_question
+
+            resp = requests.post(
+                url,
+                headers={
+                    'Authorization': f'Bearer {search_api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=api_payload,
+                timeout=20,
+                proxies=proxies,
+            )
+            if resp.status_code != 200:
+                # 400/401/402/403/429/5xx 统一抛错，交给回退链处理
+                detail = re.sub(r'\s+', ' ', (resp.text or '')).strip()[:200]
+                raise RuntimeError(f'HTTP {resp.status_code} {detail}'.strip())
+
+            data = resp.json() or {}
+            out = []
+            for item in data.get('results') or []:
+                if not isinstance(item, dict):
+                    continue
+                real_url = (item.get('url') or '').strip()
+                title = (item.get('title') or '').strip()
+                if not real_url or not title:
+                    continue
+                out.append({
+                    'title': title,
+                    'url': real_url,
+                    'snippet': (item.get('snippet') or '').strip(),
+                    'summary': (item.get('summary') or '').strip(),
+                    'content': (item.get('content') or '').strip(),
+                    'date': item.get('date'),
+                    'authority': item.get('authority'),
+                    'rerank_score': item.get('rerank_score'),
+                    'site_name': item.get('site_name'),
+                    'site_icon': item.get('site_icon'),
+                })
+            return out
+
         engine_map = {
+            'deepseek':    search_deepseek,
             'bing-cn':     lambda: search_bing('https://cn.bing.com', 'zh-CN'),
             'bing-global': lambda: search_bing('https://www.bing.com', 'en-US'),
             'bing':        lambda: search_bing('https://www.bing.com', 'en-US' if region in ('global', 'us-en', 'wt-wt', 'en') else 'zh-CN'),
@@ -399,17 +511,20 @@ class WebMixin:
             'baidu':       search_baidu,
         }
 
+        # 提供了 DeepSeek Key 时，auto 模式把它排第一位（失败自动回退到免费引擎）
+        deepseek_first = [('deepseek', search_deepseek)] if search_api_key else []
+
         # ===== 按 region / 指定 engine 决定回退顺序 =====
         if preferred_engine not in ('', 'auto', 'all'):
             fn = engine_map.get(preferred_engine)
             if not fn:
                 return self.response.json(200, {
                     'ok': False,
-                    'error': f'未知搜索源：{preferred_engine}。可选：auto, google, duckduckgo, bing, bing-cn, bing-global, 360, sogou, baidu'
+                    'error': f'未知搜索源：{preferred_engine}。可选：auto, deepseek, google, duckduckgo, bing, bing-cn, bing-global, 360, sogou, baidu'
                 })
             engines = [(preferred_engine, fn)]
         elif region in ('global', 'us-en', 'wt-wt', 'en'):
-            engines = [
+            engines = deepseek_first + [
                 ('google',      search_google),
                 ('duckduckgo',  search_duckduckgo),
                 ('bing-global', lambda: search_bing('https://www.bing.com', 'en-US')),
@@ -419,7 +534,7 @@ class WebMixin:
                 ('baidu',       search_baidu),
             ]
         else:  # cn / 缺省
-            engines = [
+            engines = deepseek_first + [
                 ('bing-cn',     lambda: search_bing('https://cn.bing.com',  'zh-CN')),
                 ('sogou',       search_sogou),
                 ('360',         search_360),
@@ -435,14 +550,27 @@ class WebMixin:
             try:
                 results = _dedupe(fn())
                 if results:
-                    print(f'✅ [网络搜索] {name} 命中 {len(results)} 条')
-                    return self.response.json(200, {
+                    billed = (name == 'deepseek')
+                    label = self._web_engine_label(name)
+                    if billed:
+                        print(f'✅ [网络搜索] {name} 命中 {len(results)} 条 '
+                              f'💰 计费 1 次（{DEEPSEEK_SEARCH_PRICE_HINT}）')
+                    else:
+                        print(f'✅ [网络搜索] {name} 命中 {len(results)} 条（免费引擎）')
+                    payload = {
                         'ok': True,
                         'query': query,
                         'engine': name,
+                        'engine_label': label,
+                        'billed': billed,
+                        'price_hint': DEEPSEEK_SEARCH_PRICE_HINT if billed else '',
                         'count': len(results),
-                        'results': results
-                    })
+                        'results': results,
+                    }
+                    if errors:
+                        # 前面失败的引擎（例如 DeepSeek 402/429），让用户知道已回退
+                        payload['fallback_errors'] = errors
+                    return self.response.json(200, payload)
                 else:
                     errors.append(f'{name}: 0 条结果')
                     print(f'⚠️ [网络搜索] {name} 无结果')

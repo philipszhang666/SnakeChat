@@ -365,7 +365,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('const remoteInit = initRemoteConnection();', main_js)
         self.assertIn("remoteInit.catch(e => console.warn('[remote] init failed:', e));", main_js)
         self.assertIn('noteRemoteWorkspaceChanged(r.workspace || r.cwd);', utils_js)
-        self.assertIn('noteRemoteWorkspaceChanged(r.workspace || r.cwd || normalizedPath);', file_explorer_js)
+        self.assertIn('noteRemoteWorkspaceChanged(r.workspace || r.cwd || workspacePath);', file_explorer_js)
 
     def test_remote_terminal_uses_local_controller_and_default_open_warns(self):
         terminal_launcher_js = (ROOT / 'js' / 'terminal-launcher.js').read_text(encoding='utf-8')
@@ -511,7 +511,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('SESSION_WORKSPACES = {}', config_py)
         self.assertIn('def get_session_workspace(session_id: str = \'\')', config_py)
         self.assertIn('config.bind_request_workspace(config.get_session_workspace(session_id))', handler_py)
-        self.assertIn('config.set_session_workspace(self.request_context.session_id, raw)', workspace_py)
+        self.assertIn('config.set_session_workspace(self.request_context.session_id, raw, base_dir=base_dir)', workspace_py)
 
     def test_auto_created_chats_default_to_agent_home_workspace(self):
         chat_js = (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8')

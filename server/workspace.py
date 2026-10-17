@@ -78,7 +78,7 @@ def choose_directory(initial_dir=''):
 
 
 class WorkspaceMixin:
-    def _apply_workspace(self, path):
+    def _apply_workspace(self, path, base_dir=''):
         raw = str(path or '').strip().strip('"')
         if not raw:
             return self.response.json(200, {
@@ -90,7 +90,7 @@ class WorkspaceMixin:
             })
 
         try:
-            workspace = config.set_session_workspace(self.request_context.session_id, raw)
+            workspace = config.set_session_workspace(self.request_context.session_id, raw, base_dir=base_dir)
         except FileNotFoundError as e:
             return self.response.json(200, {'ok': False, 'error': str(e)})
         except Exception as e:
@@ -104,7 +104,10 @@ class WorkspaceMixin:
         })
 
     def handle_set_workspace(self, body):
-        return self._apply_workspace(body.get('path') or body.get('workspace') or '')
+        return self._apply_workspace(
+            body.get('path') or body.get('workspace') or '',
+            base_dir=body.get('_workspace_base') or body.get('base_dir') or ''
+        )
 
     def handle_reset_workspace_to_agent_home(self, body):
         return self._apply_workspace(config.AGENT_HOME)

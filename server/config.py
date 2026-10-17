@@ -126,8 +126,30 @@ def set_workspace(path: str, persist: bool = True) -> None:
         save_last_workspace(p)
 
 
-def _resolve_workspace_path(path: str) -> str:
-    p = os.path.realpath(os.path.expanduser(str(path or '').strip()))
+def _looks_like_foreign_abs_path(raw: str) -> bool:
+    """识别“异平台绝对路径”，避免把远程（如 Linux）路径当作本机相对路径拼接。
+
+    Windows 上 os.path.isabs 对以斜杠开头的 POSIX 路径会返回 False，若直接与
+    本机 cwd 拼接，会拼出被前置盘符的错误路径（例如 C:/home/user/project）。
+    """
+    text = str(raw or '')
+    if sys.platform == 'win32':
+        # 本机绝对路径形如 C:/... 或 C:\\...；以 '/' 开头的是 POSIX 绝对路径
+        return text.startswith('/') and not re.match(r'^[A-Za-z]:[\\/]', text)
+    # 非 Windows：形如 C:/... 的盘符路径属于异平台绝对路径
+    return bool(re.match(r'^[A-Za-z]:[\\/]', text))
+
+
+def _resolve_workspace_path(path: str, base_dir: str = '') -> str:
+    raw = os.path.expanduser(str(path or '').strip())
+    if _looks_like_foreign_abs_path(raw):
+        # 异平台绝对路径在本机必然不存在：Windows 上 realpath 还会给 POSIX 路径
+        # 前置盘符（例如 /home/user -> C:\home\user），这里直接报错而非拼出错误路径。
+        raise FileNotFoundError(f'workspace 目录不存在（非本机路径）: {raw}')
+    if not os.path.isabs(raw):
+        base = os.path.realpath(os.path.expanduser(base_dir or get_current_cwd() or WORKSPACE_ROOT))
+        raw = os.path.join(base, raw)
+    p = os.path.realpath(raw)
     if not os.path.isdir(p):
         raise FileNotFoundError(f'workspace 目录不存在: {p}')
     return p
@@ -158,10 +180,10 @@ def get_session_workspace(session_id: str = '') -> str:
         return SESSION_WORKSPACES.get(sid, WORKSPACE_ROOT)
 
 
-def set_session_workspace(session_id: str, workspace: str, cwd: str = '', persist: bool = False) -> str:
+def set_session_workspace(session_id: str, workspace: str, cwd: str = '', persist: bool = False, base_dir: str = '') -> str:
     """更新指定 session 的 workspace；默认 session 走旧全局逻辑以保持兼容。"""
     sid = normalize_session_id(session_id)
-    p = _resolve_workspace_path(workspace)
+    p = _resolve_workspace_path(workspace, base_dir=base_dir)
     if sid == DEFAULT_SESSION_ID:
         set_workspace(p, persist=persist)
         return p

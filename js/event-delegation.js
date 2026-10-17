@@ -98,6 +98,7 @@
     'onDuplicateActiveProfile',
     'onDeleteActiveProfile',
     'toggleKey',
+    'toggleSearchApiKey',
     'onFetchModels',
     'testConnection',
     'saveAndClose',

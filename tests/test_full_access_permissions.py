@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 from server import config
-from server.sandbox import check_path_or_error, command_workspace_violation, is_inside_workspace
+from server.sandbox import check_path_or_error, command_workspace_violation, is_dangerous_command, is_inside_workspace
 
 
 class FullAccessPermissionTests(unittest.TestCase):
@@ -48,6 +48,55 @@ class FullAccessPermissionTests(unittest.TestCase):
                 violation, reason = command_workspace_violation('type C:\\outside\\secret.txt')
                 self.assertFalse(violation)
                 self.assertEqual('', reason)
+            finally:
+                config.reset_request_full_access(token)
+
+    def test_full_access_allows_specific_outside_recursive_cleanup(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside, self._with_workspace(root):
+            outside_path = os.path.realpath(outside).replace('\\', '/')
+            command = (
+                f'find "{outside_path}/weights/General" -path "*/AlphaRec-LGN/0722_best*" '
+                f'-type d -exec rm -rf {{}} + && '
+                f'rm -f "{outside_path}/experiments/alpharec_llminit/results_summary.csv"'
+            )
+
+            dangerous, reason = is_dangerous_command(command, cwd=root)
+            self.assertTrue(dangerous)
+            self.assertTrue(reason)
+
+            token = config.bind_request_full_access(True)
+            try:
+                dangerous, reason = is_dangerous_command(command, cwd=root)
+                self.assertFalse(dangerous, reason)
+            finally:
+                config.reset_request_full_access(token)
+
+    def test_full_access_still_blocks_destructive_delete_targets(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside, self._with_workspace(root):
+            outside_path = os.path.realpath(outside).replace('\\', '/')
+            drive, _ = os.path.splitdrive(os.path.realpath(root))
+            drive_root = ((drive + os.sep) if drive else os.sep).replace('\\', '/')
+            home_path = os.path.realpath(os.path.expanduser('~')).replace('\\', '/')
+            root_path = os.path.realpath(root).replace('\\', '/')
+            commands = (
+                'rm -rf /',
+                'rm -rf *',
+                'rm -rf ~',
+                'rm -rf .',
+                f'rm -rf "{drive_root}"',
+                f'rm -rf "{home_path}"',
+                f'rm -rf "{root_path}"',
+                'find / -name "*.tmp" -exec rm -f {} +',
+                f'find "{outside_path}" -exec rm -rf {{}} +',
+                f'find "{outside_path}" -path "*/tmp*" -exec sh -c "rm -rf {{}}" \\;',
+            )
+
+            token = config.bind_request_full_access(True)
+            try:
+                for command in commands:
+                    dangerous, reason = is_dangerous_command(command, cwd=root)
+                    self.assertTrue(dangerous, command)
+                    self.assertTrue(reason)
             finally:
                 config.reset_request_full_access(token)
 

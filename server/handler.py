@@ -75,6 +75,32 @@ def _body_flag_enabled(value):
     return str(value).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 
+_WORKSPACE_BINDING_EXCLUDED_ACTIONS = {
+    'set_workspace',
+    'select_workspace',
+    'choose_workspace_directory',
+    'reset_workspace_to_agent_home',
+    # 本地专属网络工具：由本地服务执行，不依赖会话工作区；且远程会话的工作区
+    # 可能是 Linux 路径，在本地（如 Windows）绑定会被误解析并前置盘符而失败。
+    'web_search',
+    'fetch_url',
+}
+
+
+def _apply_session_workspace_binding(session_id, action, body):
+    if action in _WORKSPACE_BINDING_EXCLUDED_ACTIONS or not isinstance(body, dict):
+        return None
+    workspace = str(body.get('_session_workspace') or '').strip()
+    if not workspace:
+        return None
+    cwd = str(body.get('_session_cwd') or workspace).strip() or workspace
+    try:
+        config.set_session_workspace(session_id, workspace, cwd=cwd, persist=False)
+        return None
+    except Exception as e:
+        return f'工作区绑定失败: {e}'
+
+
 class Handler(BaseHTTPRequestHandler,
               ExecMixin, FilesMixin, WebMixin, GitMixin, ProxyMixin, ScreenshotMixin,
               McpSkillsMixin, MusicMixin, PreviewMixin, RemoteMixin, WorkspaceMixin,
@@ -208,6 +234,10 @@ class Handler(BaseHTTPRequestHandler,
         action = body.get('action', 'execute')
         session_id = body.get('session_id') or self.headers.get('X-Session-Id', '')
         session_id = config.normalize_session_id(session_id)
+        workspace_binding_error = _apply_session_workspace_binding(session_id, action, body)
+        if workspace_binding_error:
+            self.response.json(200, {'ok': False, 'error': workspace_binding_error})
+            return
         workspace_token = config.bind_request_workspace(config.get_session_workspace(session_id))
         cwd_token = config.bind_request_cwd(config.get_session_cwd(session_id))
         full_access_token = config.bind_request_full_access(

@@ -564,6 +564,23 @@
       </div>
     </div>
 
+    <div class="form-group">
+      <label style="display:flex;align-items:center;justify-content:space-between;">
+        <span>DeepSeek 搜索 API Key（可选）</span>
+        <span class="form-hint" style="margin:0;">留空 = 只用免费引擎</span>
+      </label>
+      <div class="key-wrap">
+        <input type="password" id="searchApiKey" placeholder="留空则只用免费引擎，不产生任何费用">
+        <button class="key-toggle" data-action="toggleSearchApiKey" id="searchApiKeyToggle">显示</button>
+      </div>
+      <div class="form-hint">
+        填写后 <code>web_search</code> 会优先调用 DeepSeek 官方搜索接口（约 ¥0.005 / 次，5 QPS），结果带摘要 / 发布时间 / 权威度；失败自动回退到免费引擎。
+        留空（或当前服务商不是 DeepSeek）时完全不启用，<strong>不产生任何费用</strong>。
+      </div>
+      <input type="text" id="searchBaseUrl" placeholder="https://api.deepseek.com" style="margin-top:8px;">
+      <div class="form-hint">一般无需修改；仅当使用支持 <code>/v1/tools/search</code> 的中转商时才需要改。</div>
+    </div>
+
     <div class="form-group" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
       <div>
         <label style="margin:0;">Git 命令使用本地代理</label>

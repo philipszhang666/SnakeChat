@@ -152,6 +152,61 @@ def _resolve_rm_target(target, cwd):
     return os.path.realpath(os.path.join(base, raw))
 
 
+def _same_fs_path(left, right):
+    try:
+        left_real = os.path.normcase(os.path.normpath(os.path.realpath(left)))
+        right_real = os.path.normcase(os.path.normpath(os.path.realpath(right)))
+        return left_real == right_real
+    except Exception:
+        return False
+
+
+def _is_filesystem_root_path(path):
+    try:
+        real = os.path.normpath(os.path.realpath(path))
+    except Exception:
+        return False
+    drive, tail = os.path.splitdrive(real)
+    tail = tail.replace('\\', '/')
+    if drive:
+        return tail in ('', '/')
+    return tail == '/'
+
+
+def _is_current_user_home_path(path):
+    try:
+        home = os.path.expanduser('~')
+    except Exception:
+        return False
+    return bool(home and _same_fs_path(path, home))
+
+
+def _is_inside_workspace_strict(abs_path):
+    try:
+        real = os.path.realpath(abs_path)
+        workspace_root = os.path.realpath(config.get_current_workspace())
+        common = os.path.commonpath([real, workspace_root])
+    except ValueError:
+        return False
+    except Exception:
+        return False
+    return common == workspace_root
+
+
+def _is_protected_direct_delete_target(abs_path, cwd=None):
+    if _is_filesystem_root_path(abs_path) or _is_current_user_home_path(abs_path):
+        return True
+    if _same_fs_path(abs_path, config.get_current_workspace()):
+        return True
+    if cwd and _same_fs_path(abs_path, _resolve_rm_target(cwd, None)):
+        return True
+    return False
+
+
+def _is_protected_find_root(abs_path):
+    return _is_filesystem_root_path(abs_path) or _is_current_user_home_path(abs_path)
+
+
 def _is_safe_rm_target(target, cwd=None):
     raw = str(target or '').strip()
     if not raw or raw.startswith('-'):
@@ -166,10 +221,11 @@ def _is_safe_rm_target(target, cwd=None):
     if _GLOB_OR_EXPANSION_RE.search(raw):
         return False
     target_abs = _resolve_rm_target(raw, cwd)
-    workspace_abs = os.path.realpath(config.get_current_workspace())
-    if target_abs == workspace_abs:
+    if _is_protected_direct_delete_target(target_abs, cwd=cwd):
         return False
-    return is_inside_workspace(target_abs)
+    if config.is_full_access_enabled():
+        return True
+    return _is_inside_workspace_strict(target_abs)
 
 
 def _is_safe_find_root(target, cwd=None):
@@ -177,13 +233,18 @@ def _is_safe_find_root(target, cwd=None):
     if not raw or raw.startswith('-'):
         return False
     normalized = raw.replace('\\', '/').rstrip('/')
-    if normalized in ('/', '~', '..') or normalized.startswith('../') or '/../' in normalized:
+    if normalized in ('', '/', '~', '..') or normalized.startswith('../') or '/../' in normalized:
         return False
     if raw.startswith('~') or '$' in raw or '`' in raw or '\n' in raw or '\r' in raw:
         return False
     if _SHELL_META_RE.search(raw) or _GLOB_OR_EXPANSION_RE.search(raw):
         return False
-    return is_inside_workspace(_resolve_rm_target(raw, cwd))
+    root_abs = _resolve_rm_target(raw, cwd)
+    if _is_protected_find_root(root_abs):
+        return False
+    if config.is_full_access_enabled():
+        return True
+    return _is_inside_workspace_strict(root_abs)
 
 
 def _is_find_expression_token(token):
