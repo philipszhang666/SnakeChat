@@ -3284,3 +3284,98 @@ textarea{width:100%;border:none;background:transparent;resize:none;outline:none;
 @keyframes refBlink{0%,100%{opacity:.3}50%{opacity:1}}
 .ref-waiting{padding:8px 4px;font-size:12px;color:var(--text-secondary);font-style:italic}
 .ref-section-title{font-size:11px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin:8px 0 4px}
+
+/* ============ 🖥️ 显卡监控弹窗（远程服务器 GPU） ============ */
+.gpu-monitor-modal{width:min(1120px,96vw);max-height:88vh;display:flex;flex-direction:column;gap:10px;padding:20px}
+.gpu-monitor-modal h2{display:flex;align-items:center;gap:10px;margin:0;font-size:16px}
+.gpu-monitor-title{font-weight:700}
+.gpu-monitor-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:999px;background:var(--bg-input);color:var(--text-secondary);font-size:11px;font-weight:600;line-height:1.6}
+.gpu-monitor-pill::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.75}
+.gpu-monitor-pill.is-ok{background:rgba(16,185,129,.14);color:var(--success)}
+.gpu-monitor-pill.is-busy{background:rgba(79,70,229,.14);color:var(--primary)}
+.gpu-monitor-pill.is-busy::before{animation:gpuMonPulse 1s infinite}
+.gpu-monitor-pill.is-danger{background:rgba(239,68,68,.14);color:var(--danger)}
+@keyframes gpuMonPulse{0%,100%{opacity:.25}50%{opacity:1}}
+.gpu-monitor-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-input)}
+.gpu-monitor-target{flex:1 1 240px;min-width:0;font-family:var(--font-mono);font-size:11.5px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-monitor-toolbar-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.gpu-monitor-tabs{display:inline-flex;padding:2px;border-radius:8px;background:var(--bg-hover);gap:2px}
+.gpu-monitor-tab{padding:4px 10px;border:0;border-radius:6px;background:transparent;color:var(--text-secondary);font-size:12px;cursor:pointer}
+.gpu-monitor-tab:hover{color:var(--text)}
+.gpu-monitor-tab.active{background:var(--bg-sidebar);color:var(--primary);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.gpu-monitor-switch{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer}
+.gpu-monitor-switch input{width:13px;height:13px;cursor:pointer}
+.gpu-monitor-select{padding:4px 6px;border:1px solid var(--border);border-radius:7px;background:var(--bg-sidebar);color:var(--text);font-size:12px;cursor:pointer}
+.gpu-monitor-body{flex:1 1 auto;min-height:220px;max-height:62vh;overflow-y:auto;padding-right:4px;display:flex;flex-direction:column;gap:10px}
+.gpu-monitor-body::-webkit-scrollbar:vertical{width:8px!important;display:block!important}
+.gpu-monitor-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--border);padding-top:8px;font-size:11px;color:var(--text-secondary);flex-wrap:wrap}
+.gpu-monitor-source{font-family:var(--font-mono)}
+.gpu-mon-loading,.gpu-mon-error{padding:18px;border:1px dashed var(--border);border-radius:10px;font-size:12.5px;color:var(--text-secondary);white-space:pre-wrap;line-height:1.7}
+.gpu-mon-error{border-color:rgba(239,68,68,.4);background:rgba(239,68,68,.07);color:var(--danger)}
+.gpu-mon-overview{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-input)}
+.gpu-mon-overview-item{display:flex;align-items:baseline;gap:6px;min-width:0}
+.gpu-mon-overview-label{font-size:10.5px;font-weight:700;letter-spacing:.04em;color:var(--text-secondary);text-transform:uppercase}
+.gpu-mon-overview-value{font-family:var(--font-mono);font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-mon-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+.gpu-mon-card{border:1px solid var(--border);border-radius:12px;background:var(--bg-sidebar);padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.gpu-mon-card-head{display:flex;align-items:center;gap:8px;min-width:0}
+.gpu-mon-idx{padding:1px 8px;border-radius:999px;background:rgba(79,70,229,.12);color:var(--primary);font-family:var(--font-mono);font-size:11px;font-weight:700}
+.gpu-mon-name{flex:1 1 auto;min-width:0;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gpu-mon-perf{font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
+.gpu-mon-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(82px,1fr));gap:6px}
+.gpu-mon-metric{display:flex;flex-direction:column;gap:1px;min-width:0}
+.gpu-mon-label{font-size:10px;color:var(--text-secondary);letter-spacing:.03em}
+.gpu-mon-value{font-family:var(--font-mono);font-size:12.5px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gpu-mon-value.is-warn{color:var(--warning)}
+.gpu-mon-value.is-danger{color:var(--danger)}
+.gpu-mon-bars{display:flex;flex-direction:column;gap:4px}
+.gpu-mon-bar{display:grid;grid-template-columns:38px minmax(0,1fr) 92px;align-items:center;gap:8px}
+.gpu-mon-bar-label{font-family:var(--font-mono);font-size:9.5px;font-weight:700;letter-spacing:.05em;color:var(--text-secondary)}
+.gpu-mon-bar-track{position:relative;display:block;height:7px;border-radius:999px;background:var(--bg-hover);overflow:hidden}
+.gpu-mon-bar-track i{position:absolute;inset:0 auto 0 0;display:block;height:100%;border-radius:999px;background:var(--text-secondary);opacity:.55;transition:width .35s ease}
+.gpu-mon-bar-track i.is-ok{background:var(--success)}
+.gpu-mon-bar-track i.is-warn{background:var(--warning)}
+.gpu-mon-bar-track i.is-danger{background:var(--danger)}
+.gpu-mon-bar-val{font-family:var(--font-mono);font-size:10.5px;color:var(--text-secondary);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gpu-mon-bar-val.is-warn{color:var(--warning)}
+.gpu-mon-bar-val.is-danger{color:var(--danger)}
+.gpu-mon-procs{border-top:1px dashed var(--border);padding-top:6px;display:flex;flex-direction:column;gap:3px}
+.gpu-mon-proc-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;font-family:var(--font-mono);font-size:11px;color:var(--text-secondary)}
+.gpu-mon-proc-cmd{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.gpu-mon-proc-pid{white-space:nowrap;opacity:.85}
+.gpu-mon-proc-mem{white-space:nowrap;color:var(--primary)}
+.gpu-mon-proc-empty{font-size:11px;color:var(--text-secondary);opacity:.8}
+.gpu-mon-terminal{margin:0;padding:14px 16px;border-radius:10px;background:#12121a;color:#d8d8e0;font-family:var(--font-mono);font-size:11.5px;line-height:1.35;overflow:auto;max-height:56vh;white-space:pre;tab-size:4}
+.gpu-mon-terminal::-webkit-scrollbar:vertical{width:8px!important;display:block!important}
+.topbar-btn.gpu-monitor-active{background:rgba(16,185,129,.14);color:var(--success);border-color:rgba(16,185,129,.45)}
+.topbar-btn.gpu-monitor-active:hover{background:rgba(16,185,129,.22);color:var(--success);border-color:var(--success)}
+@media (max-width:768px){.gpu-monitor-modal{width:96vw;max-height:94vh;padding:14px}.gpu-mon-grid{grid-template-columns:1fr}.gpu-monitor-body{max-height:none}.gpu-mon-bar{grid-template-columns:34px minmax(0,1fr) 78px}}
+.gpu-monitor-modal h2 .modal-close{margin-left:auto}
+.gpu-monitor-env-row{display:flex;align-items:center;gap:8px}
+.gpu-monitor-env-label{flex:0 0 auto;font-size:11px;color:var(--text-secondary)}
+.gpu-monitor-env-input{flex:1 1 auto;min-width:0;padding:5px 9px;border:1px dashed var(--border);border-radius:8px;background:var(--bg-input);color:var(--text);font-family:var(--font-mono);font-size:11.5px}
+.gpu-monitor-env-input:focus{outline:none;border-style:solid;border-color:var(--primary)}
+/* 显卡监控：弹窗高度固定，让内容区自适应填满，终端 pre 撑满剩余空间 */
+.gpu-monitor-modal{height:min(84vh,940px);max-height:92vh}
+.gpu-monitor-body{min-height:0;max-height:none;overflow-y:auto}
+.gpu-monitor-body.is-raw{overflow:hidden;display:flex;min-height:0}
+.gpu-monitor-body.is-raw .gpu-mon-terminal{flex:1 1 auto;min-height:0;height:auto;max-height:none;width:100%;box-sizing:border-box}
+.gpu-mon-terminal::-webkit-scrollbar:horizontal{height:8px;display:block!important}
+/* 显卡监控：刷新间隔下拉（select 皮肤）—— 菜单右对齐并按内容收缩，不溢出弹窗、不出横向滚动条 */
+#gpuMonitorModal .gpu-monitor-select{width:96px;flex:0 0 auto}
+#gpuMonitorModal .gpu-monitor-toolbar-right .settings-select-skin{width:auto;min-width:96px}
+#gpuMonitorModal .gpu-monitor-toolbar-right .settings-select-menu{left:auto;right:0;width:max-content;min-width:100%;max-width:min(240px,calc(100vw - 24px));overflow-x:hidden}
+#gpuMonitorModal .gpu-monitor-toolbar-right .settings-select-label,
+#gpuMonitorModal .gpu-monitor-toolbar-right .settings-select-option-text{white-space:nowrap;text-overflow:clip}
+#gpuMonitorModal .gpu-monitor-toolbar-right .settings-select-option{min-width:0;padding:0 6px 0 10px;gap:6px}
+/* 显卡监控：nvitop 终端画面还原（纯黑底 + 关闭连字，保证表格边框对齐） */
+#gpuMonitorModal .gpu-mon-terminal{background:#000;color:#d0d0d0;font-variant-ligatures:none;
+  font-feature-settings:"liga" 0,"calt" 0;overscroll-behavior:contain;scrollbar-width:thin}
+/* 显卡监控弹窗：尺寸与「目录」弹窗（.modal.file-explorer-graph-modal）完全一致 */
+.modal.gpu-monitor-modal{
+  width:min(1180px,calc(100vw - 48px),calc((100vh - 48px) * 1.7778));
+  max-width:calc(100vw - 48px);
+  height:auto;max-height:calc(100vh - 48px);aspect-ratio:16 / 9;
+  border-radius:10px;box-sizing:border-box}
+@media (max-width:760px){.modal.gpu-monitor-modal{width:100vw;height:100vh;max-width:100vw;
+  max-height:100vh;aspect-ratio:auto;border-radius:0}}

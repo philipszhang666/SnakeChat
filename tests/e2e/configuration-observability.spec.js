@@ -210,12 +210,14 @@ test.describe('configuration and observability workflows without real API keys',
     await page.locator('[data-action="saveAndCloseRemoteControlSettings"]').click();
 
     await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
-    await expect(page.locator('#remoteControlBtn')).toHaveClass(/remote-control-active/);
     await expect.poll(() => backend.backendCalls.some(call => call.action === 'wechat_bridge' && call.body.op === 'start')).toBe(true);
     await expect.poll(() => backend.backendCalls.some(call => call.action === 'wechat_bridge' && call.body.op === 'send')).toBe(true);
 
-    await page.locator('#remoteControlBtn').click();
-    await expect(page.locator('#remoteControlBtn')).not.toHaveClass(/remote-control-active/);
+    // 顶栏遥控按钮已移除，遥控开关统一在设置页里操作
+    await openSettingsSection(page, 'remoteControl');
+    await setCheckbox(page, '#remoteControlEnabled', false);
+    await page.locator('[data-action="saveAndCloseRemoteControlSettings"]').click();
+    await expect(page.locator('#settingsPage')).not.toHaveClass(/show/);
     await expect.poll(() => backend.backendCalls.some(call => call.action === 'wechat_bridge' && call.body.op === 'stop')).toBe(true);
     clientErrors.expectNoErrors();
   });

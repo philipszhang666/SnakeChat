@@ -240,7 +240,7 @@
       <button class="topbar-btn" data-action="openLmsPanel" title="西安交大 LMS 学习助手"><img class="topbar-btn-icon" src="icon/学位帽_degree-hat.png" alt=""><span>学习</span></button>
       <button class="topbar-btn" id="traceToggleBtn" data-action="toggleTracePanel" title="Trace 提交记录（本地）"><img class="topbar-btn-icon" src="icon/日志_log.png" alt=""><span>日志</span></button>
       <button class="topbar-btn" data-action="runHealthCheck" title="上下文体检：测试 AI 是否还记得之前的对话"><img class="topbar-btn-icon" src="icon/健康_health.png" alt=""><span>体检</span></button>
-      <button class="topbar-btn" id="remoteControlBtn" data-action="toggleRemoteControl" title="遥控：轮询微信文件传输助手指令"><img class="topbar-btn-icon" src="icon/遥控器_remote-control.png" alt=""><span>遥控</span></button>
+      <button class="topbar-btn" id="gpuMonitorBtn" data-action="openGpuMonitor" title="显卡监控：查看远程服务器 GPU 使用情况"><img class="topbar-btn-icon" src="icon/条形图_chart-histogram-two.png" alt=""><span>监控</span></button>
     </div>
     
     <!-- Token + 频率统计栏（合并为单栏，左 Token 右 Rate） -->
@@ -737,6 +737,51 @@
     <div class="modal-footer">
       <button class="btn" data-action="closeRemoteControlSettings">取消</button>
       <button class="btn btn-primary" data-action="saveAndCloseRemoteControlSettings">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 显卡监控（远程服务器 GPU） -->
+<div class="modal-mask" id="gpuMonitorModal">
+  <div class="modal wide gpu-monitor-modal">
+    <h2>
+      <span class="gpu-monitor-title">显卡监控</span>
+      <span class="gpu-monitor-pill" id="gpuMonitorStatus">未连接</span>
+      <button class="modal-close" data-action="closeGpuMonitor">×</button>
+    </h2>
+
+    <div class="gpu-monitor-toolbar">
+      <div class="gpu-monitor-target" id="gpuMonitorTarget">—</div>
+      <div class="gpu-monitor-toolbar-right">
+        <div class="gpu-monitor-tabs">
+          <button type="button" class="gpu-monitor-tab active" data-gpu-view="dashboard">仪表盘</button>
+          <button type="button" class="gpu-monitor-tab" data-gpu-view="raw">nvitop 终端</button>
+        </div>
+        <label class="gpu-monitor-switch"><input type="checkbox" id="gpuMonitorAutoRefresh" checked><span>自动刷新</span></label>
+        <select class="gpu-monitor-select" id="gpuMonitorInterval" title="刷新间隔">
+          <option value="1000">1 秒</option>
+          <option value="2000">2 秒</option>
+          <option value="3000" selected>3 秒</option>
+          <option value="5000">5 秒</option>
+          <option value="10000">10 秒</option>
+        </select>
+        <button class="btn btn-sm" data-action="refreshGpuMonitor">刷新</button>
+      </div>
+    </div>
+
+    <div class="gpu-monitor-env-row">
+      <span class="gpu-monitor-env-label">环境</span>
+      <input class="gpu-monitor-env-input" id="gpuMonitorEnvCmd" type="text" spellcheck="false"
+             placeholder="可选：nvitop 所在 conda 环境的初始化命令，例：source $HOME/anaconda3/etc/profile.d/conda.sh &amp;&amp; conda activate MHL_env">
+    </div>
+
+    <div class="gpu-monitor-body" id="gpuMonitorBody">
+      <div class="gpu-mon-loading">正在读取服务器显卡信息…</div>
+    </div>
+
+    <div class="gpu-monitor-footer">
+      <span id="gpuMonitorUpdated">—</span>
+      <span class="gpu-monitor-source">数据来源：远程服务器 nvidia-smi（nvitop 同源采样）</span>
     </div>
   </div>
 </div>
@@ -2270,6 +2315,7 @@
 <script src="js/ppt-mode.js"></script>
 <script src="js/scheduled-tasks.js"></script>
 <script src="js/remote-control.js"></script>
+<script src="js/gpu-monitor.js"></script>
 <script src="js/task-queue.js"></script>
 <script src="js/concurrent-requests.js"></script>
 <script src="js/debate-mode.js"></script>

@@ -78,10 +78,10 @@ test.describe('application shell and settings', () => {
     await page.locator('[data-action="closeTracePanel"]').click();
     await expect(page.locator('#tracePanel')).not.toHaveClass(/show/);
 
-    await page.locator('#remoteControlBtn').click();
-    await expect(page.locator('#remoteControlBtn')).toHaveClass(/remote-control-active/);
-    await page.locator('#remoteControlBtn').click();
-    await expect(page.locator('#remoteControlBtn')).not.toHaveClass(/remote-control-active/);
+    // 遥控按钮已移出顶栏，改为顶栏「监控」按钮；本地对话点击只提醒、不打开监控弹窗
+    await expect(page.locator('#remoteControlBtn')).toHaveCount(0);
+    await page.locator('#gpuMonitorBtn').click();
+    await expect(page.locator('#gpuMonitorModal')).not.toHaveClass(/show/);
 
     await page.locator('[data-action="newChat"]').first().click();
     await page.locator('#temporaryChatBtn').click();
