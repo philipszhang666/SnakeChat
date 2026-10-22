@@ -402,12 +402,24 @@ async function resolveBareFileExplorerFileReference(path) {
   );
   if (typeof r === 'string') return { ok: false, error: r };
   if (!r || !r.ok) return { ok: false, error: (r && r.error) || `Unable to find file: ${name}` };
-  const matches = Array.isArray(r.matches) ? r.matches : [];
-  if (matches.length === 1 && matches[0] && matches[0].path) {
+  let matches = (Array.isArray(r.matches) ? r.matches : []).filter(m => m && m.path);
+  // .agent 是工作区里的备份/检查点目录，里面的同名副本不该参与"按文件名定位"
+  const isBackupExplorerPath = p => /(^|\/)\.agent(\/|$)/.test(String(p || '').replace(/\\/g, '/'));
+  const primaryMatches = matches.filter(m => !isBackupExplorerPath(m.path));
+  if (primaryMatches.length) matches = primaryMatches;
+  if (matches.length === 1) {
     return { ok: true, path: normalizeExplorerPath(matches[0].path) };
   }
   if (!matches.length) {
     return { ok: false, error: `File not found: ${name}` };
+  }
+  // 仍有多个同名文件时，优先取层级最浅的那个（如果最浅层级唯一）
+  const depthOf = p => String(p || '').replace(/\\/g, '/').split('/').filter(Boolean).length;
+  const minDepth = Math.min(...matches.map(m => depthOf(m.path)));
+  const shallowest = matches.filter(m => depthOf(m.path) === minDepth);
+  if (shallowest.length === 1) {
+    fileExplorerToast(`同名文件有 ${matches.length} 个，已打开层级最浅的：${shallowest[0].path}`, 4200);
+    return { ok: true, path: normalizeExplorerPath(shallowest[0].path) };
   }
   const shown = matches.slice(0, 5).map(m => m && m.path ? m.path : '').filter(Boolean).join('\n');
   const more = r.truncated || matches.length > 5 ? '\n...' : '';
@@ -3691,6 +3703,76 @@ function copyFileEditorContent() {
   });
 }
 
+// 下载当前编辑器里的文件（远程连接时同样可用：走 /preview-file 的二进制下载通道）
+function downloadFileEditorFile() {
+  const normalizedPath = normalizeExplorerPath(FILE_EXPLORER_STATE.editorPath || '');
+  if (!normalizedPath) {
+    fileExplorerToast('没有可下载的文件');
+    return;
+  }
+  if (typeof TERMINAL_CONFIG === 'undefined') {
+    fileExplorerToast('本地工具接口未加载');
+    return;
+  }
+  const base = (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765').replace(/\/+$/, '');
+  const url = `${base}/preview-file?path=${encodeURIComponent(normalizedPath)}&download=1&allow_full_access=1${fileExplorerSessionQuery()}`;
+  const name = fileExplorerBasename(normalizedPath) || 'download';
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  fileExplorerToast(isFileExplorerRemoteMode()
+    ? `已开始从远程工作区下载：${name}`
+    : `已开始下载：${name}`);
+}
+
+// 在资源管理器中定位当前编辑器里的文件：关闭编辑器后打开其所在目录并选中该文件
+async function revealFileEditorInExplorer() {
+  const normalizedPath = normalizeExplorerPath(FILE_EXPLORER_STATE.editorPath || '');
+  if (!normalizedPath) {
+    fileExplorerToast('没有可定位的文件');
+    return;
+  }
+  const dirPath = parentExplorerPath(normalizedPath);
+  const textarea = fileEditorTextarea();
+  syncFileEditorTextareaFromCodeMirror();
+  if (textarea && textarea.value !== FILE_EXPLORER_STATE.editorOriginal) {
+    if (!confirm('文件有未保存修改，定位后会关闭编辑器，继续？')) return;
+  }
+  closeFileEditor(true);
+  const graphModal = document.getElementById('fileExplorerGraphModal');
+  const graphOpen = !!(graphModal && graphModal.classList.contains('show'));
+  try {
+    if (graphOpen || FILE_EXPLORER_STATE.visible) {
+      await loadFileExplorer(dirPath);
+    } else {
+      await openGraphicalFileExplorer(dirPath);
+    }
+    selectFileExplorerFileInList(normalizedPath);
+  } catch (e) {
+    fileExplorerToast(e.message || String(e));
+  }
+}
+
+function selectFileExplorerFileInList(path) {
+  const normalizedPath = normalizeExplorerPath(path || '');
+  if (!normalizedPath) return;
+  if (!FILE_EXPLORER_STATE.selectedItems || typeof FILE_EXPLORER_STATE.selectedItems.set !== 'function') {
+    FILE_EXPLORER_STATE.selectedItems = new Map();
+  }
+  FILE_EXPLORER_STATE.selectedItems.clear();
+  FILE_EXPLORER_STATE.selectedItems.set(normalizedPath, {
+    path: normalizedPath,
+    type: 'file',
+    name: fileExplorerBasename(normalizedPath) || normalizedPath
+  });
+  renderFileExplorer();
+  fileExplorerToast(`已定位到：${fileExplorerBasename(normalizedPath) || normalizedPath}`);
+}
+
 async function openFileWithSystemDefault(path) {
   const normalizedPath = normalizeExplorerPath(path);
   if (isFileExplorerRemoteMode()) {
@@ -4913,6 +4995,8 @@ window.closeFileEditor = closeFileEditor;
 window.reloadFileEditor = reloadFileEditor;
 window.saveFileEditor = saveFileEditor;
 window.copyFileEditorContent = copyFileEditorContent;
+window.downloadFileEditorFile = downloadFileEditorFile;
+window.revealFileEditorInExplorer = revealFileEditorInExplorer;
 window.openPdfViewer = openPdfViewer;
 window.closePdfViewer = closePdfViewer;
 window.reloadPdfViewer = reloadPdfViewer;
@@ -4983,6 +5067,8 @@ window.AgentApp.define('fileExplorer', {
   openFileExplorerPath,
   openFileEditor,
   closeFileEditor,
+  downloadFileEditorFile,
+  revealFileEditorInExplorer,
   saveFileEditor,
   saveInlineFilePanel,
   openPdfViewer,

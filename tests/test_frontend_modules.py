@@ -3334,6 +3334,24 @@ class FrontendModuleTests(unittest.TestCase):
         ):
             self.assertIn(delegated_attr, dialog_manager_js)
 
+    def test_dialog_manager_multiselect_supports_ctrl_click_for_folders_and_chats(self):
+        dialog_manager_js = (ROOT / 'js' / 'dialog-manager.js').read_text(encoding='utf-8')
+        event_delegation_js = (ROOT / 'js' / 'event-delegation.js').read_text(encoding='utf-8')
+
+        self.assertIn('const dialogExplorerSelectedItems = new Map();', dialog_manager_js)
+        self.assertIn('function dialogExplorerToggleSelection(type, id)', dialog_manager_js)
+        self.assertIn('function dialogExplorerSelectedChats()', dialog_manager_js)
+        self.assertIn('function dialogExplorerEnterFolder(folderId, event)', dialog_manager_js)
+        self.assertIn('function switchDialogManagerChat(chatId, event)', dialog_manager_js)
+        self.assertIn('event.ctrlKey || event.metaKey', dialog_manager_js)
+        self.assertIn('data-pass-event="1"', dialog_manager_js)
+        self.assertIn("dialogExplorerIsSelected('chat', chat.id)", dialog_manager_js)
+        self.assertIn('function dialogExplorerDropMany(entries, targetFolderId)', dialog_manager_js)
+        self.assertIn('function dialogExplorerDeleteSelection()', dialog_manager_js)
+        self.assertIn('function dialogExplorerDeleteItems(options = {})', dialog_manager_js)
+        self.assertIn("target.dataset.passEvent === '1'", event_delegation_js)
+        self.assertIn('callGlobal(handler, [value, event])', event_delegation_js)
+
     def test_outline_render_uses_event_delegation(self):
         outline_render_js = (ROOT / 'js' / 'outline-render.js').read_text(encoding='utf-8')
 

@@ -61,6 +61,22 @@ class FileFindTests(unittest.TestCase):
             self.assertEqual(1, len(handler.response.data['matches']))
             self.assertTrue(handler.response.data['truncated'])
 
+    def test_find_file_skips_agent_backup_directory(self):
+        with tempfile.TemporaryDirectory() as root, self._with_workspace(root), mock.patch('builtins.print'):
+            os.makedirs(os.path.join(root, 'src'))
+            with open(os.path.join(root, 'src', 'main.py'), 'w', encoding='utf-8') as f:
+                f.write('real')
+            backup_dir = os.path.join(root, '.agent', 'checkpoints', 'ckpt_1', 'files', 'src')
+            os.makedirs(backup_dir)
+            with open(os.path.join(backup_dir, 'main.py'), 'w', encoding='utf-8') as f:
+                f.write('backup')
+
+            handler = FileFindHandler()
+            handler.handle_find_file({'name': 'main.py'})
+
+            self.assertTrue(handler.response.data['ok'])
+            self.assertEqual(['src/main.py'], [m['path'] for m in handler.response.data['matches']])
+
     def test_find_file_rejects_paths(self):
         with tempfile.TemporaryDirectory() as root, self._with_workspace(root), mock.patch('builtins.print'):
             handler = FileFindHandler()

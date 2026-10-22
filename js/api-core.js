@@ -1847,10 +1847,16 @@ async function callOnceWithRole(history, model, rolePrompt, options = {}) {
 
         // ⭐ 把辅助调用（Plan 规划/审查/整合、师生评审、压缩摘要等）的 usage 计入当前对话统计
         // 之前漏算导致 Plan/大纲/师生 模式的 token 都不进总账
-        if (usageForRecord && typeof recordUsageFromResponse === 'function') {
+        if (usageForRecord) {
           const _c = options.chat
             || (options.chatId ? apiCoreChatById(options.chatId) : null);
-          if (_c) recordUsageFromResponse(_c, usageForRecord, { model });
+          if (_c) {
+            // ⭐ 压缩上下文产生的 token 单独记账（不和对话 token 混在一起）
+            const _recorder = (options.usageBucket === 'compression' && typeof recordCompressionUsage === 'function')
+              ? recordCompressionUsage
+              : recordUsageFromResponse;
+            if (typeof _recorder === 'function') _recorder(_c, usageForRecord, { model });
+          }
         }
         if (!String(content || '').trim()) {
           throw _emptyAssistantResponseError('辅助调用');

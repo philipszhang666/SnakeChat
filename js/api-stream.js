@@ -16,26 +16,45 @@ const apiStreamIsAnyChatGenerating = ApiStreamStateModule.isAnyChatGenerating;
 
 function updateLastMsg(targetChat, targetIdx) {
   if (targetChat && !apiStreamIsCurrentChat(targetChat)) return;
-  // ⭐ 节流：连续 chunk 一帧只渲染一次，避免每个 chunk 都重做 markdown 解析 + DOM 重建
+  // ⭐ 节流：在 rAF 之外再加一个最小间隔。
+  //   144Hz 屏上 rAF 只有 7ms 间隔，逐帧重解析整段 markdown + 重建 DOM 会把主线程吃满，
+  //   表现就是"流式回复时鼠标移上去半天才变灰"。
+  //   60ms 一批 ≈ 16 次/秒，肉眼依然是连续输出，但主线程成本降到 1/8。
   if (_updateLastMsgScheduled) return;
   _updateLastMsgTarget = targetChat ? { chat: targetChat, idx: targetIdx } : null;
   _updateLastMsgScheduled = true;
-  _updateLastMsgRafId = requestAnimationFrame(() => {
-    _updateLastMsgScheduled = false;
-    _updateLastMsgRafId = null;
-    const target = _updateLastMsgTarget;
-    _updateLastMsgTarget = null;
-    _flushLastMsg(target && target.chat, target && target.idx);
-  });
+  const run = () => {
+    _updateLastMsgTimerId = null;
+    _updateLastMsgRafId = requestAnimationFrame(() => {
+      _updateLastMsgScheduled = false;
+      _updateLastMsgRafId = null;
+      const target = _updateLastMsgTarget;
+      _updateLastMsgTarget = null;
+      _lastStreamFlushAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      _flushLastMsg(target && target.chat, target && target.idx);
+    });
+  };
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const wait = STREAM_FLUSH_MIN_INTERVAL - (now - _lastStreamFlushAt);
+  if (wait > 1) _updateLastMsgTimerId = setTimeout(run, wait);
+  else run();
 }
 
+// 两次流式重渲染之间的最小间隔（ms）
+const STREAM_FLUSH_MIN_INTERVAL = 60;
 let _updateLastMsgScheduled = false;
 let _updateLastMsgRafId = null;
+let _updateLastMsgTimerId = null;
+let _lastStreamFlushAt = 0;
 let _updateLastMsgTarget = null;
 
 // ⭐ 取消任何待执行的流式刷新，并清除残留光标
 // 必须在流式结束、错误、abort、refreshMsgNode 之前调用
 function cancelPendingStreamFlush() {
+  if (_updateLastMsgTimerId != null) {
+    clearTimeout(_updateLastMsgTimerId);
+    _updateLastMsgTimerId = null;
+  }
   if (_updateLastMsgRafId != null) {
     cancelAnimationFrame(_updateLastMsgRafId);
     _updateLastMsgRafId = null;
@@ -76,10 +95,11 @@ function _flushLastMsg(targetChat, targetIdx) {
       ? renderMarkdownStreaming
       : renderMarkdown;
     wrap.innerHTML = renderFn(m.content || '') + '<span class="cursor"></span>';
-    // ⭐ 流式过程中跳过 KaTeX（公式可能写一半），完成后再统一渲染
-    // 只在当前消息节点范围内做 hljs
+    // ⭐ 流式过程中跳过 KaTeX（公式可能写一半）和 hljs 代码高亮：
+    //   innerHTML 重建会丢掉 dataset.highlighted，导致每一帧都要把整段代码重新高亮一次，
+    //   长回复里的代码块越多，这一项越致命。流式结束后 refreshMsgNode 会统一补上高亮。
     const msgNode = wrap.closest('.message');
-    if (msgNode) postRender(msgNode, { skipMath: true });
+    if (msgNode) postRender(msgNode, { skipMath: true, skipHighlight: true });
     
     // ⭐ 跟随底部：每次都贴底（scrollBottom 本身很轻，innerHTML 已经触发过 reflow 了）
     if (shouldFollow) scrollBottom();

@@ -107,6 +107,8 @@
     'toggleFileEditorMarkdownPreview',
     'toggleFileEditorCodePreview',
     'reloadFileEditor',
+    'downloadFileEditorFile',
+    'revealFileEditorInExplorer',
     'saveFileEditor',
     'closePdfViewer',
     'reloadPdfViewer',
@@ -659,11 +661,15 @@
       if (!valueClickActions.has(handler)) return undefined;
       const value = typedDatasetValue(target);
       const extraRaw = target.dataset.extraValue;
+      // data-pass-event="1"：把原始事件作为最后一个参数传给 handler（用于 Ctrl/Shift 多选等）
+      const passEvent = target.dataset.passEvent === '1';
       if (extraRaw !== undefined) {
         const extra = typedDatasetValue(target, 'extraValue');
-        return callGlobal(handler, [value, extra]);
+        return passEvent
+          ? callGlobal(handler, [value, extra, event])
+          : callGlobal(handler, [value, extra]);
       }
-      return callGlobal(handler, [value]);
+      return passEvent ? callGlobal(handler, [value, event]) : callGlobal(handler, [value]);
     }
   };
 

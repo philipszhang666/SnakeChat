@@ -1828,7 +1828,8 @@ function updateMsgContentNode(idx, targetChat, options = {}) {
     if (m._endTime) timer.dataset.frozen = '1';
     else delete timer.dataset.frozen;
   }
-  postRender(msgNode, { skipMath: isStreaming });
+  // 流式时同时跳过 KaTeX 与 hljs：每帧重建 innerHTML 会让父节点重复高亮整段代码
+  postRender(msgNode, { skipMath: isStreaming, skipHighlight: isStreaming });
   refreshChatSearchHighlightsIfAvailable();
   if (shouldFollow) scrollBottom();
   if (typeof updateDialogTimeline === 'function') requestAnimationFrame(updateDialogTimeline);

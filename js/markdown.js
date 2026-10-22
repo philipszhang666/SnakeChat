@@ -371,7 +371,9 @@ function postRender(root, opts) {
     });
   }
   // 代码高亮
-  if (window.hljs) {
+  // 流式渲染时传 skipHighlight：每帧 innerHTML 重建会让 dataset.highlighted 失效，
+  // 若不跳过就会把整段代码重复高亮一次，长回复时直接卡死主线程。
+  if (!opts.skipHighlight && window.hljs) {
     root.querySelectorAll('.code-block pre code').forEach(el => {
       if (!el.dataset.highlighted) {
         try {

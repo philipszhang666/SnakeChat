@@ -273,6 +273,16 @@ function _emptyTokenStats() {
     cacheCreateTokens: 0,     // 缓存创建
     thinkingTokens: 0,        // extended thinking
     totalRequests: 0,         // 累计请求次数
+    compressCount: 0,         // 压缩上下文次数（成功应用压缩的累计次数）
+    // ⭐ 压缩上下文过程产生的 token 单独记账，和对话 token 统计彻底分开
+    compression: {
+      requests: 0,            // 压缩请求次数（含校验重写）
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      thinkingTokens: 0
+    },
     source: null,
     time: 0,
     // ⭐ 全局 Token 统计用：逐次记录每次 API usage，来源与对话栏统计一致
@@ -292,7 +302,30 @@ function getChatTokenStats(chat) {
       if (typeof chat.tokenStats[k] === 'undefined') chat.tokenStats[k] = def[k];
     }
   }
+  tokenStatsCompressionStats(chat.tokenStats);
   return chat.tokenStats;
+}
+
+// 取/建"压缩上下文"独立账本（旧数据自动补齐字段）
+function tokenStatsCompressionStats(stats) {
+  if (!stats || typeof stats !== 'object') return null;
+  if (!stats.compression || typeof stats.compression !== 'object') {
+    stats.compression = {
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      thinkingTokens: 0
+    };
+  } else {
+    const keys = ['requests', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheCreateTokens', 'thinkingTokens'];
+    for (const k of keys) {
+      const n = Number(stats.compression[k]);
+      stats.compression[k] = Number.isFinite(n) ? n : 0;
+    }
+  }
+  return stats.compression;
 }
 
 function tokenStatsApiMessageCount(chat) {
@@ -490,6 +523,88 @@ function recordUsageFromResponse(chat, usage, meta = {}) {
   updateTokenDisplay();
 }
 
+/** 把任意格式的 usage 解析成统一字段（对话/压缩共用） */
+function tokenUsageBreakdown(usage) {
+  const empty = { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheCreate: 0, thinking: 0 };
+  if (!usage) return empty;
+  const usageSource = usage.usageMetadata || usage.usage || usage;
+  let inputTokens = tokenUsageNumber(
+    usageSource.input_tokens,
+    usageSource.prompt_tokens,
+    usageSource.inputTokens,
+    usageSource.promptTokens,
+    usageSource.promptTokenCount
+  );
+  const outputTokens = tokenUsageNumber(
+    usageSource.output_tokens,
+    usageSource.completion_tokens,
+    usageSource.outputTokens,
+    usageSource.completionTokens,
+    usageSource.candidatesTokenCount
+  );
+  const totalTokens = tokenUsageNumber(usageSource.total_tokens, usageSource.totalTokens, usageSource.totalTokenCount);
+  if (!inputTokens && !outputTokens && totalTokens) inputTokens = totalTokens;
+  const cacheRead = tokenUsageNumber(
+    usageSource.cache_read_input_tokens,
+    usageSource.prompt_tokens_details?.cached_tokens,
+    usageSource.promptTokensDetails?.cachedTokens,
+    usageSource.cachedContentTokenCount
+  );
+  const cacheCreate = tokenUsageNumber(usageSource.cache_creation_input_tokens, usageSource.cacheCreationInputTokens);
+  const thinking = tokenUsageNumber(
+    usageSource.output_tokens_details?.thinking_tokens,
+    usageSource.outputTokensDetails?.thinkingTokens,
+    usageSource.completion_tokens_details?.reasoning_tokens,
+    usageSource.completionTokensDetails?.reasoningTokens,
+    usageSource.thoughtsTokenCount
+  );
+  return { inputTokens, outputTokens, cacheRead, cacheCreate, thinking };
+}
+
+/**
+ * 记录"压缩上下文"过程产生的 token
+ * 与 recordUsageFromResponse 的区别：
+ *   - 只累加到 stats.compression，不改对话的输入/输出/请求次数
+ *   - 仍写入全局 token 账本（bucket: 'compression'），保证总花费不漏算
+ */
+function recordCompressionUsage(chat, usage, meta = {}) {
+  if (!chat || !usage) return;
+  const stats = getChatTokenStats(chat);
+  const comp = tokenStatsCompressionStats(stats);
+  if (!comp) return;
+  const breakdown = tokenUsageBreakdown(usage);
+  const now = Date.now();
+  const model = meta.model || tokensState.settings.currentModel || 'unknown';
+  comp.requests += 1;
+  comp.inputTokens += breakdown.inputTokens;
+  comp.outputTokens += breakdown.outputTokens;
+  comp.cacheReadTokens += breakdown.cacheRead;
+  comp.cacheCreateTokens += breakdown.cacheCreate;
+  comp.thinkingTokens += breakdown.thinking;
+  comp.time = now;
+  const usageEvent = {
+    id: `compusage_${now}_${Math.random().toString(36).slice(2, 10)}`,
+    chatId: chat.id || '',
+    chatTitle: chat.title || '未命名对话',
+    ts: now,
+    model,
+    provider: meta.provider || tokensState.settings.provider || '',
+    format: meta.format || tokensState.settings.apiFormat || '',
+    inputTokens: breakdown.inputTokens,
+    outputTokens: breakdown.outputTokens,
+    cacheReadTokens: breakdown.cacheRead,
+    cacheCreateTokens: breakdown.cacheCreate,
+    thinkingTokens: breakdown.thinking,
+    source: 'compression',
+    bucket: 'compression'
+  };
+  if (!Array.isArray(stats.events)) stats.events = [];
+  stats.events.push(usageEvent);
+  appendTokenUsageLedger(usageEvent);
+  try { tokensSaveData(); } catch (e) {}
+  updateTokenDisplay();
+}
+
 /**
  * 通过 Anthropic count_tokens API 获取当前上下文精确大小
  */
@@ -592,6 +707,20 @@ function scheduleAccurateTokenCount(chatId) {
 
 // ============ 显示 Token 统计 ============
 
+// 用户发送的消息条数（状态栏"消息数"口径）
+// 不含：AI 回复、工具返回、压缩摘要、隐藏信标、压缩中的占位消息
+function tokenUserMessageCount(chat) {
+  if (!chat || !Array.isArray(chat.messages)) return 0;
+  return chat.messages.filter(m => m
+    && m.role === 'user'
+    && !m._isBeacon
+    && !m._isSummary
+    && !m._isTransientSummary
+    && !m._isCompressing
+    && !m._compressionSummaryMarker
+  ).length;
+}
+
 function updateTokenDisplay() {
   const el = document.getElementById('tokenStats');
   if (!el) return;
@@ -643,7 +772,8 @@ function updateTokenDisplay() {
   const limitInfo = getContextLimitInfo(tokensState.settings.currentModel);
   const limit = limitInfo.limit;
   const pct = Math.min(100, Math.round(inputTokens / limit * 100));
-  const msgCount = compressedMessagesForApi(c).filter(m => m.role !== 'tool').length;
+  // ⭐ 状态栏"消息数"统计的是用户发送的消息条数（不是请求数，也不含 AI 回复）
+  const userMsgCount = tokenUserMessageCount(c);
   
   let pctClass = 'safe';
   if (pct >= 80) pctClass = 'danger';
@@ -672,7 +802,7 @@ function updateTokenDisplay() {
     : `输入 token 占上下文 ${pct}%`;
   
   el.innerHTML = `
-    <span class="token-msgs" title="消息数"><img class="status-icon" src="icon/评论_comment.png" alt="">${msgCount}</span>
+    <span class="token-msgs" title="用户消息数（不含 AI 回复与请求次数）"><img class="status-icon" src="icon/评论_comment.png" alt="">${userMsgCount}</span>
     <span class="token-count token-input" title="${inputTitle}"><span class="token-accuracy">${accuracyIcon}</span><img class="status-icon" src="icon/上传_upload.png" alt="">${formatNumber(inputTokens)} / ${formatNumber(limit)}</span>
     ${extras}
     <div class="token-bar" title="${barTitle}">
@@ -693,6 +823,17 @@ function formatNumber(n) {
 
 // ============ Token 详细统计弹窗 ============
 
+// 当前对话的压缩上下文次数：优先用对话自身累计值，旧数据回退到压缩历史记录
+function tokenCompressionCount(chat, stats) {
+  const own = Number(stats && stats.compressCount);
+  if (Number.isFinite(own) && own > 0) return own;
+  if (!chat || typeof readCompressionHistory !== 'function') return 0;
+  const chatId = String(chat.id || '');
+  if (!chatId) return 0;
+  return readCompressionHistory().filter(r => String(r.chatId || '') === chatId
+    && (r.status === 'success' || r.status === 'degraded')).length;
+}
+
 function showTokenDetails() {
   const c = tokensCurrentChat();
   if (!c || !c.messages.length) {
@@ -704,6 +845,37 @@ function showTokenDetails() {
   const model = tokensState.settings.currentModel;
   const limitInfo = getContextLimitInfo(model);
   const limit = limitInfo.limit;
+
+  // ⭐ 压缩上下文单独一节：压缩过程产生的 token 与对话 token 分开统计
+  const compressionSection = (() => {
+    const comp = tokenStatsCompressionStats(stats)
+      || { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreateTokens: 0, thinkingTokens: 0 };
+    const compCount = tokenCompressionCount(c, stats);
+    let s = `<div class="token-detail-section-title"><h4>压缩上下文累计</h4><span class="token-detail-section-meta">压缩过程单独记账，不计入上方「本对话累计」</span></div>`;
+    s += `<div class="token-detail-card token-detail-table">`;
+    // 没压缩过也保留栏目，只显示一行占位，避免用户找不到
+    if (!(compCount > 0 || comp.requests > 0)) {
+      s += `<div class="token-detail-row"><span>暂无压缩记录</span><strong>—</strong></div>`;
+      s += `</div>`;
+      return s;
+    }
+    s += `<div class="token-detail-row"><span>压缩上下文次数</span><strong>${compCount}</strong></div>`;
+    s += `<div class="token-detail-row"><span>压缩请求次数</span><strong>${comp.requests}</strong></div>`;
+    s += `<div class="token-detail-row"><span>累计输入 token</span><strong>${formatNumber(comp.inputTokens)}</strong></div>`;
+    s += `<div class="token-detail-row"><span>累计输出 token</span><strong>${formatNumber(comp.outputTokens)}</strong></div>`;
+    if (comp.cacheReadTokens > 0) {
+      s += `<div class="token-detail-row"><span>缓存命中（节省）</span><strong class="token-detail-success">${formatNumber(comp.cacheReadTokens)}</strong></div>`;
+    }
+    if (comp.cacheCreateTokens > 0) {
+      s += `<div class="token-detail-row"><span>缓存创建</span><strong>${formatNumber(comp.cacheCreateTokens)}</strong></div>`;
+    }
+    if (comp.thinkingTokens > 0) {
+      s += `<div class="token-detail-row"><span>思考 token</span><strong>${formatNumber(comp.thinkingTokens)}</strong></div>`;
+    }
+    s += `<div class="token-detail-row token-detail-total"><span>总计</span><strong>${formatNumber(comp.inputTokens + comp.outputTokens)}</strong></div>`;
+    s += `</div>`;
+    return s;
+  })();
   
   // ⭐ 从可配置定价表查价（来源：pricing.js）
   //   用户可在 ⋯ 更多 → 定价管理 中自定义。pricing.js 没加载时走简单内置 fallback。
@@ -729,6 +901,7 @@ function showTokenDetails() {
   html += `<div class="token-detail-meta">${limitModeText}<a class="token-detail-link" href="javascript:void(0)" data-action="hideModalAndCall" data-target="tokenDetailModal" data-handler="openContextLimitSettings">设置</a></div>`;
   const storedMsgCount = c.messages.filter(m => !(m && m._compressionSummaryMarker)).length;
   const apiMsgCount = tokenStatsApiMessageCount(c);
+  html += `<div class="token-detail-info-row"><span>用户消息数</span><strong>${tokenUserMessageCount(c)}</strong></div>`;
   html += `<div class="token-detail-info-row"><span>实际请求消息数</span><strong>${apiMsgCount}</strong></div>`;
   if (storedMsgCount !== apiMsgCount) {
     html += `<div class="token-detail-info-row"><span>本地保留消息数</span><strong>${storedMsgCount}</strong></div>`;
@@ -744,6 +917,10 @@ function showTokenDetails() {
     if (stats.cacheReadTokens > 0) {
       html += `<div class="token-detail-row"><span>缓存命中（节省）</span><strong class="token-detail-success">${formatNumber(stats.cacheReadTokens)}</strong></div>`;
     }
+    if (stats.cacheReadTokens > 0 && stats.inputTokens > 0) {
+      const hitRate = Math.max(0, Math.min(100, stats.cacheReadTokens / stats.inputTokens * 100));
+      html += `<div class="token-detail-row"><span>缓存命中率</span><strong${hitRate > 0 ? ' class="token-detail-success"' : ''} title="缓存命中 token ÷ 累计输入 token">${hitRate.toFixed(1)}%</strong></div>`;
+    }
     if (stats.cacheCreateTokens > 0) {
       html += `<div class="token-detail-row"><span>缓存创建</span><strong>${formatNumber(stats.cacheCreateTokens)}</strong></div>`;
     }
@@ -752,6 +929,7 @@ function showTokenDetails() {
     }
     html += `<div class="token-detail-row token-detail-total"><span>总计</span><strong>${formatNumber(stats.inputTokens + stats.outputTokens)}</strong></div>`;
     html += `</div>`;
+    html += compressionSection;
     
     html += `<div class="token-detail-section-title"><h4>估算费用（参考）</h4><span class="token-detail-section-meta">${pricing.matched ? '匹配关键词：<code>' + escapeHtml(pricing.matched) + '</code>' : '未匹配，使用默认价'}<a class="token-detail-link" href="javascript:void(0)" data-action="hideModalAndCall" data-target="tokenDetailModal" data-handler="openPricingManager">编辑</a></span></div>`;
     html += `<div class="token-detail-card token-detail-cost">`;
@@ -786,6 +964,7 @@ function showTokenDetails() {
     }
   } else {
     html += `<div class="token-detail-empty">还没有发送过请求</div>`;
+    html += compressionSection;
   }
   
   html += `<div class="token-detail-hint">提示：缓存命中能大幅降低成本（Anthropic 缓存读取约为正常输入价的 1/10）</div></div>`;
@@ -1110,6 +1289,7 @@ function undoCompressionSnapshot(undoId) {
     delete _compressionUndoSnapshots[undoId];
 
     const stats = getChatTokenStats(c);
+    if (Number(stats.compressCount) > 0) stats.compressCount -= 1;
     stats.lastInputTokens = 0;
     stats.msgCount = tokenStatsApiMessageCount(c);
     stats.time = 0;
@@ -1135,6 +1315,7 @@ function undoCompressionSnapshot(undoId) {
   delete _compressionUndoSnapshots[undoId];
   
   const stats = getChatTokenStats(c);
+  if (Number(stats.compressCount) > 0) stats.compressCount -= 1;
   stats.lastInputTokens = 0;
   stats.msgCount = tokenStatsApiMessageCount(c);
   stats.time = 0;
@@ -1519,7 +1700,8 @@ async function compressTransientMessagesForAgent(messages, options = {}) {
     stream: true,
     timeoutMs: options.timeoutMs || COMPRESSION_HELPER_TIMEOUT_MS,
     retryMaxAttempts: Object.prototype.hasOwnProperty.call(options, 'retryMaxAttempts') ? options.retryMaxAttempts : COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS,
-    sourceLabel: `${label} · 内部压缩`
+    sourceLabel: `${label} · 内部压缩`,
+    usageBucket: 'compression'
   };
   const conversationText = middleTrimText(
     messagesForSummary
@@ -1817,7 +1999,8 @@ async function compressChat(chat, options = {}) {
     stream: true,
     timeoutMs: options.timeoutMs || COMPRESSION_HELPER_TIMEOUT_MS,
     retryMaxAttempts: Object.prototype.hasOwnProperty.call(options, 'retryMaxAttempts') ? options.retryMaxAttempts : COMPRESSION_HELPER_RETRY_MAX_ATTEMPTS,
-    sourceLabel: `上下文压缩 · ${options.reason || 'manual'}`
+    sourceLabel: `上下文压缩 · ${options.reason || 'manual'}`,
+    usageBucket: 'compression'
   };
   
   // ⭐ 切点策略：toKeep 必须以 user 消息开头（且不能是摘要消息）
@@ -2098,6 +2281,8 @@ ${feedback}
     const compStats = getChatTokenStats(chat);
     compStats.lastInputTokens = 0;
     compStats.msgCount = tokenStatsApiMessageCount(chat);
+    // 压缩成功应用一次，累计压缩次数 +1
+    compStats.compressCount = (Number(compStats.compressCount) || 0) + 1;
     compStats.time = 0;
     
     tokensSaveData();
@@ -2188,6 +2373,8 @@ window.estimateChatTokens = estimateChatTokens;
 window.normalizeCompressAutoThreshold = normalizeCompressAutoThreshold;
 window.getChatTokenStats = getChatTokenStats;
 window.recordUsageFromResponse = recordUsageFromResponse;
+window.recordCompressionUsage = recordCompressionUsage;
+window.tokenStatsCompressionStats = tokenStatsCompressionStats;
 window.fetchAnthropicTokenCount = fetchAnthropicTokenCount;
 window.refreshAccurateTokenCount = refreshAccurateTokenCount;
 window.scheduleAccurateTokenCount = scheduleAccurateTokenCount;
@@ -2238,6 +2425,7 @@ window.AgentApp.define('tokens', {
   appendTokenUsageLedger,
   migrateChatTokenStatsToLedger,
   recordUsageFromResponse,
+  recordCompressionUsage,
   fetchAnthropicTokenCount,
   refreshAccurateTokenCount,
   scheduleAccurateTokenCount,

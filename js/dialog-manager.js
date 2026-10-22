@@ -496,10 +496,18 @@ function updateDialogTimeline() {
   main.classList.toggle('dialog-timeline-visible', enabled && anchors.length > 0);
   timeline.hidden = !(enabled && anchors.length > 0);
   if (!enabled || !anchors.length) {
-    list.innerHTML = '';
+    if (_dialogTimelineSignature !== '') {
+      list.innerHTML = '';
+      _dialogTimelineSignature = '';
+    }
     return;
   }
   const activeIdx = getNearestDialogTimelineIndex(anchors);
+  // ⭐ 流式回复期间本函数每帧都会被调用，而锚点（用户消息）在流式过程中根本不会变。
+  //   这里做签名缓存：只有锚点集合或高亮点变化时才重建 DOM，否则直接返回。
+  const signature = `${activeIdx}|${anchors.length}|` + anchors.map(a => `${a.index}${a.discarded ? 'x' : ''}`).join(',');
+  if (signature === _dialogTimelineSignature) return;
+  _dialogTimelineSignature = signature;
   list.innerHTML = anchors.map((anchor, i) => `
     <button class="dialog-timeline-point ${i === activeIdx ? 'active' : ''} ${anchor.discarded ? 'discarded' : ''}" type="button" data-action="valueClick" data-handler="jumpToDialogMessage" data-value="${anchor.index}" data-value-type="number" data-tip="${escapeHtml(anchor.tip)}" aria-label="${escapeHtml('跳转到 ' + anchor.title)}">
       <span class="dialog-timeline-point-dot"></span>
@@ -507,6 +515,8 @@ function updateDialogTimeline() {
   `).join('');
   syncDialogTimelineListScroll(list);
 }
+
+let _dialogTimelineSignature = '';
 
 function syncDialogTimelineListScroll(list) {
   const wrap = list || document.getElementById('dialogTimelineList');
@@ -587,6 +597,77 @@ function closeDialogManagerSurface() {
 }
 
 let dialogManagerCurrentFolderId = '';
+
+// 栏目多选（Ctrl/Cmd 点击）：文件夹和对话都可以选中，key = `${type}:${id}`
+const dialogExplorerSelectedItems = new Map();
+
+function dialogExplorerSelectionKey(type, id) {
+  return `${type === 'chat' ? 'chat' : 'folder'}:${String(id || '')}`;
+}
+
+function dialogExplorerSelectedIdsOfType(type) {
+  const key = type === 'chat' ? 'chat' : 'folder';
+  const dm = ensureDialogManagerSettings();
+  return Array.from(dialogExplorerSelectedItems.values())
+    .filter(entry => entry && entry.type === key)
+    .map(entry => entry.id)
+    .filter(id => key === 'folder'
+      ? dm.folders.some(f => f.id === id)
+      : !!dialogManagerChatById(id));
+}
+
+function dialogExplorerSelectedFolders() {
+  return dialogExplorerSelectedIdsOfType('folder');
+}
+
+function dialogExplorerSelectedChats() {
+  return dialogExplorerSelectedIdsOfType('chat');
+}
+
+function dialogExplorerSelectionCount() {
+  return dialogExplorerSelectedFolders().length + dialogExplorerSelectedChats().length;
+}
+
+function dialogExplorerIsSelected(type, id) {
+  return dialogExplorerSelectedItems.has(dialogExplorerSelectionKey(type, id));
+}
+
+function dialogExplorerIsFolderSelected(folderId) {
+  return dialogExplorerIsSelected('folder', folderId);
+}
+
+function dialogExplorerClearFolderSelection(options = {}) {
+  const had = dialogExplorerSelectedItems.size > 0;
+  dialogExplorerSelectedItems.clear();
+  if (had && options.render !== false) renderDialogManagerFolders();
+  return had;
+}
+
+function dialogExplorerToggleSelection(type, id) {
+  const key = type === 'chat' ? 'chat' : 'folder';
+  const value = String(id || '');
+  if (!value) return;
+  const dm = ensureDialogManagerSettings();
+  if (key === 'folder' && !dm.folders.some(f => f.id === value)) return;
+  if (key === 'chat' && !dialogManagerChatById(value)) return;
+  const itemKey = dialogExplorerSelectionKey(key, value);
+  if (dialogExplorerSelectedItems.has(itemKey)) dialogExplorerSelectedItems.delete(itemKey);
+  else dialogExplorerSelectedItems.set(itemKey, { type: key, id: value });
+  renderDialogManagerFolders();
+}
+
+function dialogExplorerToggleFolderSelection(folderId) {
+  dialogExplorerToggleSelection('folder', folderId);
+}
+
+function dialogExplorerPruneSelection() {
+  const dm = ensureDialogManagerSettings();
+  for (const [key, entry] of Array.from(dialogExplorerSelectedItems.entries())) {
+    if (!entry) { dialogExplorerSelectedItems.delete(key); continue; }
+    if (entry.type === 'folder' && !dm.folders.some(f => f.id === entry.id)) dialogExplorerSelectedItems.delete(key);
+    if (entry.type === 'chat' && !dialogManagerChatById(entry.id)) dialogExplorerSelectedItems.delete(key);
+  }
+}
 
 function chatLatestMessageTime(chat) {
   if (!chat || !Array.isArray(chat.messages)) return 0;
@@ -738,6 +819,7 @@ function dialogFolderPath(folderId) {
 
 function renderDialogManagerFolders() {
   const dm = ensureDialogManagerSettings();
+  dialogExplorerPruneSelection();
   renderDialogExplorerNav(dm);
   renderDialogExplorerItems(dm);
 }
@@ -963,9 +1045,10 @@ function renderDialogExplorerItems(dm) {
       // Regular folders first
       folders.forEach(folder => {
         html += `
-          <div class="dialog-explorer-item" draggable="true"
+          <div class="dialog-explorer-item${dialogExplorerIsFolderSelected(folder.id) ? ' multi-selected' : ''}" draggable="true"
                data-explorer-type="folder" data-explorer-id="${escapeHtml(folder.id)}"
                data-action="valueClick" data-handler="dialogExplorerEnterFolder" data-value="${escapeHtml(folder.id)}"
+               data-pass-event="1"
                data-contextmenu-action="dialogExplorerContextMenu" data-contextmenu-value="folder" data-contextmenu-extra-value="${escapeHtml(folder.id)}"
                data-dragstart-action="dialogExplorerDragStart" data-dragstart-value="folder" data-dragstart-extra-value="${escapeHtml(folder.id)}"
                data-dragend-action="dialogExplorerDragEnd"
@@ -995,9 +1078,10 @@ function renderDialogExplorerItems(dm) {
           const title = dialogManagerChatTitle(chat);
           const count = dialogManagerVisibleMessages(chat).length;
           html += `
-            <div class="dialog-explorer-item ${chat.id === dialogManagerState.currentId ? 'selected' : ''}" draggable="true"
+            <div class="dialog-explorer-item ${chat.id === dialogManagerState.currentId ? 'selected' : ''}${dialogExplorerIsSelected('chat', chat.id) ? ' multi-selected' : ''}" draggable="true"
                  data-explorer-type="chat" data-explorer-id="${escapeHtml(chat.id)}"
                  data-action="valueClick" data-handler="switchDialogManagerChat" data-value="${escapeHtml(chat.id)}"
+                 data-pass-event="1"
                  data-contextmenu-action="dialogExplorerContextMenu" data-contextmenu-value="chat" data-contextmenu-extra-value="${escapeHtml(chat.id)}"
                  data-dragstart-action="dialogExplorerDragStart" data-dragstart-value="chat" data-dragstart-extra-value="${escapeHtml(chat.id)}"
                  data-dragend-action="dialogExplorerDragEnd">
@@ -1024,6 +1108,13 @@ function renderDialogExplorerItems(dm) {
       return dialogExplorerContextMenu(e, 'area', '');
     }
   };
+  area.onclick = function(e) {
+    const item = e.target && e.target.closest
+      ? e.target.closest('.dialog-explorer-item[data-explorer-type]')
+      : null;
+    // 点空白处取消多选
+    if (!item) dialogExplorerClearFolderSelection();
+  };
   area.ondragover = function(e) {
     const itemDropTarget = dialogExplorerActionTarget(e, 'data-drop-action');
     if (itemDropTarget && area.contains(itemDropTarget)) {
@@ -1047,6 +1138,11 @@ function renderDialogExplorerItems(dm) {
     area.classList.remove('drag-over');
     const type = e.dataTransfer.getData('text/type');
     const id = e.dataTransfer.getData('text/id');
+    const selection = dialogExplorerDropSelectionFromEvent(e);
+    if (selection.length > 1) {
+      dialogExplorerDropMany(selection, currentId);
+      return;
+    }
     if (type && id) dialogExplorerDrop(id, type, currentId);
   };
 }
@@ -1055,6 +1151,7 @@ function dialogExplorerToggleView(mode) {
   const dm = ensureDialogManagerSettings();
   dm.explorerViewMode = mode;
   dialogManagerPersistSettings();
+  dialogExplorerClearFolderSelection({ render: false });
   renderDialogManagerFolders();
 }
 
@@ -1062,6 +1159,7 @@ function dialogExplorerToggleSort(mode) {
   const dm = ensureDialogManagerSettings();
   dm.explorerSortMode = mode;
   dialogManagerPersistSettings();
+  dialogExplorerClearFolderSelection({ render: false });
   renderDialogManagerFolders();
 }
 
@@ -1084,6 +1182,14 @@ function dialogExplorerActionTarget(e, attr) {
 function dialogExplorerDragStart(e, type, id) {
   e.dataTransfer.setData('text/type', type);
   e.dataTransfer.setData('text/id', id);
+  // 拖动的是已选中的条目时，把整个选中集合（文件夹 + 对话）一起带走
+  if (dialogExplorerIsSelected(type, id)) {
+    const entries = [
+      ...dialogExplorerSelectedFolders().map(folderId => ({ type: 'folder', id: folderId })),
+      ...dialogExplorerSelectedChats().map(chatId => ({ type: 'chat', id: chatId }))
+    ];
+    if (entries.length > 1) e.dataTransfer.setData('text/selection', JSON.stringify(entries));
+  }
   e.dataTransfer.effectAllowed = 'move';
   const target = dialogExplorerActionTarget(e, 'data-dragstart-action') || e.target;
   if (target && target.classList) target.classList.add('dragging');
@@ -1114,7 +1220,53 @@ function dialogExplorerItemDrop(e, targetFolderId) {
   if (target && target.classList) target.classList.remove('drag-over');
   const type = e.dataTransfer.getData('text/type');
   const id = e.dataTransfer.getData('text/id');
+  const selection = dialogExplorerDropSelectionFromEvent(e);
+  if (selection.length > 1) {
+    dialogExplorerDropMany(selection, targetFolderId);
+    return;
+  }
   if (type && id) dialogExplorerDrop(id, type, targetFolderId);
+}
+
+function dialogExplorerDropSelectionFromEvent(e) {
+  try {
+    const raw = e.dataTransfer ? e.dataTransfer.getData('text/selection') : '';
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(entry => entry && entry.id && (entry.type === 'folder' || entry.type === 'chat'));
+  } catch (_) {
+    return [];
+  }
+}
+
+function dialogExplorerDropMany(entries, targetFolderId) {
+  const list = (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry && entry.id && (entry.type === 'folder' || entry.type === 'chat'));
+  if (!list.length) return;
+  const targetId = dialogExplorerResolveFolderTarget(targetFolderId);
+  if (targetId === null) {
+    dialogManagerToast('目标文件夹不存在', 2000);
+    renderDialogManagerFolders();
+    return;
+  }
+  let movedFolders = 0;
+  let movedChats = 0;
+  for (const entry of list) {
+    if (entry.type === 'folder') {
+      if (entry.id === targetId) continue;
+      dialogExplorerDrop(entry.id, 'folder', targetId);
+      movedFolders++;
+    } else {
+      dialogExplorerDrop(entry.id, 'chat', targetId);
+      movedChats++;
+    }
+  }
+  dialogExplorerClearFolderSelection({ render: false });
+  renderDialogManagerFolders();
+  const parts = [];
+  if (movedFolders) parts.push(`${movedFolders} 个文件夹`);
+  if (movedChats) parts.push(`${movedChats} 个对话`);
+  if (parts.length) dialogManagerToast(`已移动 ${parts.join('、')}`);
 }
 
 function dialogExplorerDrop(id, type, targetFolderId) {
@@ -1172,7 +1324,14 @@ function dialogExplorerDrop(id, type, targetFolderId) {
 
 // --- Navigation ---
 
-function dialogExplorerEnterFolder(folderId) {
+function dialogExplorerEnterFolder(folderId, event) {
+  // Ctrl/Cmd 点击：多选文件夹（不进入），普通点击仍然进入
+  if (event && (event.ctrlKey || event.metaKey) && folderId && !String(folderId).startsWith('__group_')) {
+    if (event.preventDefault) event.preventDefault();
+    dialogExplorerToggleFolderSelection(folderId);
+    return;
+  }
+  dialogExplorerClearFolderSelection({ render: false });
   if (folderId && folderId.startsWith('__group_')) {
     dialogManagerCurrentFolderId = folderId;
     renderDialogManagerFolders();
@@ -1219,6 +1378,16 @@ function dialogExplorerContextMenu(e, type, id) {
   const renameBtn = menu.querySelector('[data-explorer-action="rename"]');
   const deleteBtn = menu.querySelector('[data-explorer-action="delete"]');
   const hideBtn = menu.querySelector('[data-explorer-action="hideChat"]');
+  // 右键未选中的条目时，先清掉旧的多选，避免误删别的条目
+  if ((type === 'folder' || type === 'chat') && dialogExplorerSelectedItems.size && !dialogExplorerIsSelected(type, id)) {
+    dialogExplorerSelectedItems.clear();
+    renderDialogManagerFolders();
+  }
+  // 多选：右键已选中的条目（文件夹或对话）时，删除作用于整个选中集合
+  const multiSelectionCount = dialogExplorerIsSelected(type, id) ? dialogExplorerSelectionCount() : 0;
+  const multiDelete = multiSelectionCount > 1;
+  const multiSelectedFolders = multiDelete ? dialogExplorerSelectedFolders() : [];
+  const multiSelectedChats = multiDelete ? dialogExplorerSelectedChats() : [];
   if (renameBtn) renameBtn.hidden = (type === 'area' || inGroupView);
   if (deleteBtn) deleteBtn.hidden = (type === 'area' || inGroupView);
   if (hideBtn) {
@@ -1255,6 +1424,16 @@ function dialogExplorerContextMenu(e, type, id) {
   // Adjust danger styling
   if (deleteBtn) {
     deleteBtn.classList.toggle('danger', type === 'chat' || type === 'folder');
+    if (multiDelete) {
+      const parts = [];
+      if (multiSelectedFolders.length) parts.push(`${multiSelectedFolders.length} 个文件夹`);
+      if (multiSelectedChats.length) parts.push(`${multiSelectedChats.length} 个对话`);
+      deleteBtn.innerHTML = '<span class="dialog-explorer-context-icon">' + ICON_DELETE + '</span>' + `删除所选 ${parts.join(' + ')}`;
+      deleteBtn.title = '删除当前选中的文件夹/对话';
+    } else {
+      deleteBtn.innerHTML = '<span class="dialog-explorer-context-icon">' + ICON_DELETE + '</span>删除';
+      deleteBtn.title = '';
+    }
   }
 
   menu.hidden = false;
@@ -1310,14 +1489,14 @@ function dialogExplorerHandleContextAction(e) {
       if (dialogExplorerTargetHidden('folder', target.id)) dialogExplorerUnhideFolderChats(target.id);
       else dialogExplorerHideFolderChats(target.id);
     }
-    else if (action === 'delete') dialogExplorerDeleteFolder(target.id);
+    else if (action === 'delete') dialogExplorerDeleteTarget('folder', target.id);
   } else if (target.type === 'chat') {
     if (action === 'rename') dialogExplorerRenameChat(target.id);
     else if (action === 'hideChat') {
       if (dialogExplorerTargetHidden('chat', target.id)) dialogExplorerUnhideChat(target.id);
       else dialogExplorerHideChat(target.id);
     }
-    else if (action === 'delete') dialogExplorerDeleteChat(target.id);
+    else if (action === 'delete') dialogExplorerDeleteTarget('chat', target.id);
   }
 }
 
@@ -1369,9 +1548,37 @@ function dialogExplorerRenameFolder(folderId) {
 }
 
 function dialogExplorerDeleteFolder(folderId) {
+  return dialogExplorerDeleteItems({ folderIds: [folderId] });
+}
+
+function dialogExplorerDeleteFolders(folderIds) {
+  return dialogExplorerDeleteItems({ folderIds });
+}
+
+// 右键删除入口：右键的条目在多选集合里且不止一项时，批量删除整个选中集合
+function dialogExplorerDeleteTarget(type, id) {
+  if (dialogExplorerIsSelected(type, id) && dialogExplorerSelectionCount() > 1) {
+    return dialogExplorerDeleteSelection();
+  }
+  if (type === 'chat') return dialogExplorerDeleteChat(id);
+  return dialogExplorerDeleteFolder(id);
+}
+
+function dialogExplorerDeleteSelection() {
+  return dialogExplorerDeleteItems({
+    folderIds: dialogExplorerSelectedFolders(),
+    chatIds: dialogExplorerSelectedChats()
+  });
+}
+
+// 统一删除流程：支持文件夹（级联）与对话混选，只弹一次确认
+function dialogExplorerDeleteItems(options = {}) {
   const dm = ensureDialogManagerSettings();
-  const folder = dm.folders.find(f => f.id === folderId);
-  if (!folder) return;
+  const rootIds = Array.from(new Set((options.folderIds || []).map(id => String(id || '')).filter(Boolean)))
+    .filter(id => dm.folders.some(f => f.id === id));
+  const roots = rootIds.map(id => dm.folders.find(f => f.id === id)).filter(Boolean);
+  const explicitChatIds = Array.from(new Set((options.chatIds || []).map(id => String(id || '')).filter(Boolean)));
+  if (!roots.length && !explicitChatIds.length) return;
 
   // Collect all descendant folder IDs
   const descendantIds = new Set();
@@ -1383,16 +1590,29 @@ function dialogExplorerDeleteFolder(folderId) {
       }
     });
   }
-  collectDescendants(folderId);
-  descendantIds.add(folderId);
+  rootIds.forEach(id => {
+    collectDescendants(id);
+    descendantIds.add(id);
+  });
   const allIds = Array.from(descendantIds);
-  const childFolderCount = Math.max(0, allIds.length - 1);
+  const childFolderCount = Math.max(0, allIds.length - rootIds.length);
 
-  // Count chats to be deleted
-  const affectedChats = (dialogManagerState.chats || []).filter(c => allIds.includes(c.dialogFolderId || ''));
+  // 受影响对话 = 文件夹里的对话 + 单独选中的对话
+  const chatsInFolders = (dialogManagerState.chats || []).filter(c => allIds.includes(c.dialogFolderId || ''));
+  const standaloneChats = (dialogManagerState.chats || []).filter(c => explicitChatIds.includes(c.id)
+    && !allIds.includes(c.dialogFolderId || ''));
+  const affectedChats = chatsInFolders.concat(standaloneChats);
   const totalChats = affectedChats.length;
 
-  if (!confirm(`删除文件夹"${folder.name}"？\n将级联删除 ${childFolderCount} 个子文件夹和 ${totalChats} 个对话，不可恢复。`)) return;
+  const labelParts = [];
+  if (roots.length === 1) labelParts.push(`文件夹"${roots[0].name}"`);
+  else if (roots.length > 1) labelParts.push(`${roots.length} 个文件夹`);
+  if (standaloneChats.length) labelParts.push(`${standaloneChats.length} 个对话`);
+  const label = labelParts.join(' 和 ') || '所选内容';
+  const detail = roots.length
+    ? `\n将级联删除 ${childFolderCount} 个子文件夹和 ${totalChats} 个对话，不可恢复。`
+    : '\n不可恢复。';
+  if (!confirm(`删除${label}？${detail}`)) return;
 
   // Abort generating chats before deletion
   affectedChats.forEach(c => {
@@ -1415,10 +1635,13 @@ function dialogExplorerDeleteFolder(folderId) {
   dialogManagerSyncGlobalTaskState(dialogManagerState.currentId);
 
   // Delete all descendant folders
-  const parentId = folder.parentId || '';
+  const parentIds = Array.from(new Set(roots.map(f => f.parentId || '')));
   dm.folders = dm.folders.filter(f => !allIds.includes(f.id));
 
-  touchFolder(parentId);
+  parentIds.forEach(parentId => touchFolder(parentId));
+  standaloneChats.forEach(chat => touchFolder(chat.dialogFolderId || ''));
+  allIds.forEach(id => dialogExplorerSelectedItems.delete(dialogExplorerSelectionKey('folder', id)));
+  affectedChats.forEach(chat => dialogExplorerSelectedItems.delete(dialogExplorerSelectionKey('chat', chat.id)));
   dialogManagerPersistSettings();
   dialogManagerSaveData();
   dialogManagerRenderChatList();
@@ -1599,7 +1822,14 @@ function dialogExplorerDeleteChat(chatId) {
   renderDialogManagerFolders();
 }
 
-function switchDialogManagerChat(chatId) {
+function switchDialogManagerChat(chatId, event) {
+  // Ctrl/Cmd 点击：多选对话（不切换），之后可批量删除或拖入文件夹
+  if (event && (event.ctrlKey || event.metaKey) && chatId) {
+    if (event.preventDefault) event.preventDefault();
+    dialogExplorerToggleSelection('chat', chatId);
+    return;
+  }
+  dialogExplorerClearFolderSelection({ render: false });
   if (!dialogManagerChatById(chatId)) return;
   dialogManagerSelectedChatId = chatId;
   switchChat(chatId);

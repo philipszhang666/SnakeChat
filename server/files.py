@@ -1419,7 +1419,8 @@ class FilesMixin:
             return self.response.json(200, {'ok': False, 'error': f'不是目录: {path}'})
         print(f'馃攳 [鏌ユ壘鏂囦欢] "{name}" in {path}')
 
-        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache'}
+        # .agent 是工作区内部的备份/检查点目录，里面的同名文件副本会干扰"按文件名定位"，一律跳过
+        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', '.agent'}
         case_insensitive = sys.platform == 'win32'
         target_name = name.lower() if case_insensitive else name
         base = os.path.realpath(path)
@@ -1463,7 +1464,7 @@ class FilesMixin:
         if not os.path.isdir(path):
             return self.response.json(200, {'ok': False, 'error': f'不是目录: {path}'})
 
-        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache'}
+        skip_dirs = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.pytest_cache', '.agent'}
         target = query.lower()
         base = os.path.realpath(path)
         cwd = os.path.realpath(config.get_current_cwd())
@@ -1543,7 +1544,7 @@ class FilesMixin:
         results = []
         try:
             for root, dirs, files in os.walk(path):
-                dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '__pycache__', '.venv', 'venv')]
+                dirs[:] = [d for d in dirs if d not in ('.git', 'node_modules', '__pycache__', '.venv', 'venv', '.agent')]
                 for fname in files:
                     if not fnmatch.fnmatch(fname, file_glob):
                         continue
