@@ -88,6 +88,14 @@ _WORKSPACE_BINDING_EXCLUDED_ACTIONS = {
 
 
 def _apply_session_workspace_binding(session_id, action, body):
+    """应用前端带来的会话工作区提示（best-effort）。
+
+    注意：`_session_workspace` 只是提示，真正的切换走 set_workspace / select_workspace
+    （这些 action 已在排除名单里）。当提示在本机不成立时——典型是远程会话里混进了
+    本机路径（Windows 的 C:\\ 路径发到 Linux agent），或目录已被删除——必须忽略它并
+    保留当前会话已有的有效工作区，绝不能让整轮工具调用失败。
+    否则同一条脏提示会让该会话后续 *所有* 工具调用都返回“工作区绑定失败”。
+    """
     if action in _WORKSPACE_BINDING_EXCLUDED_ACTIONS or not isinstance(body, dict):
         return None
     workspace = str(body.get('_session_workspace') or '').strip()
@@ -96,9 +104,18 @@ def _apply_session_workspace_binding(session_id, action, body):
     cwd = str(body.get('_session_cwd') or workspace).strip() or workspace
     try:
         config.set_session_workspace(session_id, workspace, cwd=cwd, persist=False)
-        return None
     except Exception as e:
-        return f'工作区绑定失败: {e}'
+        try:
+            kept = config.get_session_workspace(session_id)
+        except Exception:
+            kept = config.get_current_workspace()
+        # 注意：这里不能抛任何异常，也不要用 emoji（Windows 控制台是 GBK，
+        # 打印 emoji 会抛 UnicodeEncodeError，反而把整个请求搞崩）。
+        try:
+            print(f'[工作区绑定] 已忽略无效的工作区提示 {workspace!r}（继续使用 {kept}）: {e}')
+        except Exception:
+            pass
+    return None
 
 
 class Handler(BaseHTTPRequestHandler,

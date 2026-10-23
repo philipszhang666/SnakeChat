@@ -59,6 +59,7 @@ ACTION_ROUTES = (
     ActionRoute('rename_file', 'handle_rename_file'),
     ActionRoute('copy_file', 'handle_copy_file'),
     ActionRoute('move_file', 'handle_move_file'),
+    ActionRoute('extract_zip', 'handle_extract_zip'),
     ActionRoute('list_dir', 'handle_list_dir'),
     ActionRoute('list_drives', 'handle_list_drives'),
     ActionRoute('find_file', 'handle_find_file'),

@@ -378,6 +378,32 @@ function workspaceForToolChat(chatId, context) {
   return String(workspace || TERMINAL_CONFIG.workspace || '').trim();
 }
 
+// 判断一个工作区路径是否与目标后端“跨平台”：远程（Linux）后端收到 C:\... 会被判为
+// “非本机路径”并拒绝绑定，而且这个错误会让整轮工具调用直接失败（表现为所有工具都执行不了）。
+function isWindowsStyleWorkspacePath(path) {
+  const raw = String(path || '').trim();
+  return /^[A-Za-z]:[\\/]/.test(raw) || /^\\\\/.test(raw);
+}
+
+function isPosixStyleWorkspacePath(path) {
+  const raw = String(path || '').trim();
+  return raw.startsWith('/') && !raw.startsWith('//');
+}
+
+function workspacePathConflictsWithBackend(workspace, backendServerUrl) {
+  const raw = String(workspace || '').trim();
+  if (!raw) return false;
+  const remoteTarget = !!(
+    typeof REMOTE_CONTROLLER !== 'undefined' &&
+    REMOTE_CONTROLLER.serverUrl &&
+    backendServerUrl &&
+    backendServerUrl !== REMOTE_CONTROLLER.serverUrl
+  );
+  if (remoteTarget) return isWindowsStyleWorkspacePath(raw);
+  const localIsWindows = typeof navigator !== 'undefined' && /win/i.test(navigator.platform || '');
+  return localIsWindows && isPosixStyleWorkspacePath(raw);
+}
+
 function workspaceBindingForToolChat(chatId, context) {
   const ctxChat = context && typeof context === 'object' ? context.chat : null;
   const chat = (ctxChat && (!chatId || ctxChat.id === chatId))
@@ -450,6 +476,34 @@ function clearPendingAIAttachments(chatId) {
     terminalState.pendingAIAttachments = [];
   }
 }
+
+// ⭐ 按 id 消费"已内联投递"的 AI 附件：
+// attach_file 的附件一旦作为隐藏 user 消息进了本轮上下文，就必须从待发桶里移除，
+// 否则 autoResend 会在这一轮结束后再补发一次（用户看到"AI 答完又凭空多一轮"）。
+function consumePendingAIAttachmentsByIds(chatId, ids) {
+  const want = new Set((Array.isArray(ids) ? ids : [ids]).filter(Boolean));
+  if (!want.size) return 0;
+  const id = chatId || resolveToolChatId() || 'default';
+  const buckets = ensurePendingAIAttachmentBuckets();
+  let removed = 0;
+  const list = Array.isArray(buckets[id]) ? buckets[id] : null;
+  if (list) {
+    const kept = list.filter(item => {
+      if (item && want.has(item.id)) { removed++; return false; }
+      return true;
+    });
+    if (kept.length) buckets[id] = kept;
+    else delete buckets[id];
+  }
+  if (id === (terminalState.currentId || '') && Array.isArray(terminalState.pendingAIAttachments)) {
+    terminalState.pendingAIAttachments = terminalState.pendingAIAttachments.filter(item => {
+      if (item && want.has(item.id)) { removed++; return false; }
+      return true;
+    });
+  }
+  return removed;
+}
+window.consumePendingAIAttachmentsByIds = consumePendingAIAttachmentsByIds;
 
 function cancelAutoResendForChat(chatId, clearAttachments = true) {
   const id = chatId || resolveToolChatId() || 'default';
@@ -951,9 +1005,22 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
   const requestTimeoutMs = agentBackendRequestTimeoutMs(action, requestParams);
   const backendServerUrl = resolveAgentBackendServerUrl(action, context, chatId);
   const usesAlternateBackend = backendServerUrl !== (TERMINAL_CONFIG.serverUrl || 'http://localhost:8765');
-  const workspaceBinding = shouldAttachWorkspaceBinding(action)
+  let workspaceBinding = shouldAttachWorkspaceBinding(action)
     ? workspaceBindingForToolChat(chatId, context)
     : { workspace: '', cwd: '' };
+  // 跨平台路径一律不要带给后端：远程容器/主机（Linux）收到 C:\... 会返回
+  // “工作区绑定失败：workspace 目录不存在（非本机路径）”，并且整个请求就此中止，
+  // 于是同一条脏工作区会让后续所有工具都失败。这里改成降级为不带绑定。
+  if (workspaceBinding.workspace && workspacePathConflictsWithBackend(workspaceBinding.workspace, backendServerUrl)) {
+    const toolChat = chatId ? terminalChatById(chatId) : terminalCurrentChat();
+    const remoteWorkspace = toolChat && toolChat.backend && toolChat.backend.type === 'remote'
+      ? String(toolChat.backend.remoteWorkspace || '').trim()
+      : '';
+    console.warn('[workspace] 丢弃跨平台的工作区绑定:', workspaceBinding.workspace, '→ 目标后端:', backendServerUrl);
+    workspaceBinding = (remoteWorkspace && !workspacePathConflictsWithBackend(remoteWorkspace, backendServerUrl))
+      ? { workspace: remoteWorkspace, cwd: remoteWorkspace }
+      : { workspace: '', cwd: '' };
+  }
   const doFetch = async () => {
     const backendParams = { ...requestParams };
     delete backendParams.requestTimeoutMs;
@@ -990,8 +1057,13 @@ async function callAgentBackend(action, params, confirmTitle, confirmCommand, co
     }
     // ⭐ 如果响应里带了 workspace/cwd，顺手刷新顶部沙箱栏显示
     if (r && (r.workspace || r.cwd) && usesAlternateBackend) {
+      // 本地专属工具（web_search / fetch_url 等）由本地服务执行，返回的 workspace
+      // 必然是本机路径；如果这个对话绑的是远程后端，写进 chat.workspace 之后
+      // 后续远程调用就会带上 C:\... 被拒（“工作区绑定失败”，然后所有工具失败）。
+      const binding = backendBindingForToolChat(chatId, context);
+      const pollutesRemoteChat = LOCAL_ONLY_BACKEND_ACTIONS.has(action) && !!(binding && binding.type === 'remote');
       const toolChat = chatId ? terminalChatById(chatId) : null;
-      if (typeof recordChatWorkspace === 'function' && recordChatWorkspace(toolChat, r, { preserveBackend: true })) {
+      if (!pollutesRemoteChat && typeof recordChatWorkspace === 'function' && recordChatWorkspace(toolChat, r, { preserveBackend: true })) {
         terminalSaveData();
       }
     } else if (!usesAlternateBackend && r && (r.workspace || r.cwd)) {
@@ -2419,9 +2491,19 @@ async function attachFileForAI(path, description, context) {
       return `✅ 已加载 ${r.name}（${(r.size / 1024).toFixed(1)} KB）\n\n` +
              `📌 系统：附件已加入对话上下文。如还需加载其他文件请继续调用 attach_file，否则继续推进任务。`;
     }
+    // ⭐ 内联投递：附件随工具结果直接注入"本轮上下文"（api-core 会补一条隐藏 user 消息），
+    //    紧随其后的递归请求就带上它，AI 当轮即可看到附件内容。
+    //    这样不再需要"等这轮答完、3 秒后再补发一轮"，也就不会出现"答完又自动重发一次"。
+    //    scheduleAutoResend 保留为兜底：内联投递成功后附件会被从桶里消费掉，
+    //    3 秒后 tryAutoResend 发现桶为空，会自动放弃补发。
     scheduleAutoResend(r, description, { chatId });
-    return `✅ 已加载 ${r.name}（${(r.size / 1024).toFixed(1)} KB）\n\n` +
-           `📌 系统：附件已加入。如果还要加载其他文件，请继续调用 attach_file；否则简短回复完成。前端会自动重发让你看到附件。`;
+    return {
+      ok: true,
+      _inlineAttachment: attachment,
+      _inlineContextText: `系统：以下附件由 attach_file 工具加载。${description ? '\n说明：' + description : ''}\n请结合该附件继续完成用户任务。`,
+      text: `✅ 已加载 ${r.name}（${(r.size / 1024).toFixed(1)} KB）\n\n` +
+            `📌 系统：附件已加入本轮上下文，直接查看即可。如还需加载其他文件请继续调用 attach_file，否则继续完成用户任务。`
+    };
   } else {
     attachment._hidden = false;
     if (chatId === terminalState.currentId) {
@@ -2469,6 +2551,13 @@ async function tryAutoResend(chatId) {
   }
   if (isCancelled()) return;
   if (!_pendingAutoResendByChat[chatId]) return;
+
+  // ⭐ 附件已经被"内联投递"进本轮上下文（并已从桶里消费），
+  //    说明 AI 在当轮的后续请求里就能看到它，这里不需要再补发一轮。
+  if (!pendingAIAttachmentsForChat(chatId, false).length) {
+    delete _pendingAutoResendByChat[chatId];
+    return;
+  }
 
   let waitCount = 0;
   const MAX_WAIT = 240;
@@ -2672,6 +2761,7 @@ window.AgentApp.define('terminal', {
   pendingAIAttachmentsForChat,
   pushPendingAIAttachment,
   takePendingAIAttachments,
+  consumePendingAIAttachmentsByIds,
   clearPendingAIAttachments,
   cancelAutoResendForChat,
   isOutlinePermissionAutoAllowContext,

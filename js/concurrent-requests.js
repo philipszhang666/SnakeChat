@@ -1187,6 +1187,7 @@ function _concurrentMutationPaths(action, params, context) {
     p.path,
     p.new_path || p.newPath || p.target_path || p.targetPath || p.target_dir || p.targetDir || p.dest_dir || p.destDir
   ].filter(Boolean);
+  if (action === 'extract_zip') return [p.path].filter(Boolean);
   if (action === 'apply_patch') return p.dry_run ? [] : _concurrentPatchPaths(p.patch);
   if (action === 'restore_checkpoint') {
     const ctx = _concurrentContext(context);
@@ -1199,7 +1200,7 @@ function _concurrentMutationPaths(action, params, context) {
 }
 
 function _concurrentIsMutationAction(action, params) {
-  return ['write_file', 'copy_file', 'move_file', 'append_file', 'edit_file', 'delete_file', 'apply_patch', 'restore_checkpoint', 'git_restore'].includes(action)
+  return ['write_file', 'copy_file', 'move_file', 'extract_zip', 'append_file', 'edit_file', 'delete_file', 'apply_patch', 'restore_checkpoint', 'git_restore'].includes(action)
     && !(action === 'apply_patch' && params && params.dry_run);
 }
 

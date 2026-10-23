@@ -2438,6 +2438,7 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertIn('reader.readAsArrayBuffer(file)', file_explorer_js)
         self.assertNotIn('reader.readAsDataURL(file)', file_explorer_js)
         self.assertNotIn('FILE_EXPLORER_UPLOAD_MAX_BYTES', file_explorer_js)
+
         self.assertIn("callAgentBackend(\n      'file_upload_chunk'", file_explorer_js)
         self.assertIn('total_chunks: totalChunks', file_explorer_js)
         self.assertIn('checkpoint_id: checkpointId || undefined', file_explorer_js)
@@ -2446,6 +2447,54 @@ class FrontendModuleTests(unittest.TestCase):
         self.assertNotIn('.file-explorer-list.is-drag-over', base_css)
         self.assertIn('def _compact_large_write_payload', handler_py)
         self.assertIn("action not in ('write_file', 'file_upload_chunk')", handler_py)
+
+    def test_file_explorer_supports_remote_zip_extract(self):
+        file_explorer_js = (ROOT / 'js' / 'file-explorer.js').read_text(encoding='utf-8')
+        routes_py = (ROOT / 'server' / 'routes.py').read_text(encoding='utf-8')
+        files_py = (ROOT / 'server' / 'files.py').read_text(encoding='utf-8')
+
+        for snippet in (
+            'data-action="extract-zip" data-zip-only="true"',
+            'function isFileExplorerZipFile(path)',
+            'function extractFileExplorerZip(path = FILE_EXPLORER_STATE.contextPath)',
+            "menu.querySelectorAll('[data-zip-only]')",
+            'isFileExplorerRemoteMode() && isFileExplorerZipFile(path)',
+            "action === 'extract-zip'",
+            "'extract-zip'",
+            "'extract_zip'",
+        ):
+            self.assertIn(snippet, file_explorer_js)
+
+        self.assertIn("ActionRoute('extract_zip', 'handle_extract_zip')", routes_py)
+        self.assertIn('def handle_extract_zip(self, body):', files_py)
+        self.assertIn('zipfile.is_zipfile(path)', files_py)
+
+    def test_attach_file_inlines_attachment_without_extra_round(self):
+        """attach_file 的附件要随工具结果内联进本轮上下文，不走"答完再补发一轮"。"""
+        terminal_js = (ROOT / 'js' / 'terminal.js').read_text(encoding='utf-8')
+        api_core_js = (ROOT / 'js' / 'api-core.js').read_text(encoding='utf-8')
+
+        # 1) attach_file 返回带 _inlineAttachment 的对象，供 api-core 内联投递
+        for snippet in (
+            'function consumePendingAIAttachmentsByIds(chatId, ids)',
+            'window.consumePendingAIAttachmentsByIds = consumePendingAIAttachmentsByIds;',
+            'consumePendingAIAttachmentsByIds,',
+            '_inlineAttachment: attachment,',
+            '_inlineContextText',
+        ):
+            self.assertIn(snippet, terminal_js)
+
+        # 2) 不再提示"前端会自动重发"
+        self.assertNotIn('前端会自动重发让你看到附件', terminal_js)
+
+        # 3) autoResend 在附件已被内联消费后必须立即放弃补发
+        self.assertIn('附件已经被"内联投递"进本轮上下文', terminal_js)
+        self.assertIn('if (!pendingAIAttachmentsForChat(chatId, false).length) {', terminal_js)
+
+        # 4) api-core 两条执行路径都要识别内联附件并消费待发桶
+        self.assertIn('result.value._inlineAttachment', api_core_js)
+        self.assertEqual(2, api_core_js.count('_inlineAttachmentDelivery: true'))
+        self.assertEqual(4, api_core_js.count('window.consumePendingAIAttachmentsByIds'))
 
     def test_chat_attachment_reading_avoids_browser_data_url_limit(self):
         chat_js = (ROOT / 'js' / 'chat.js').read_text(encoding='utf-8')

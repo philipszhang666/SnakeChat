@@ -532,12 +532,38 @@ function fileExplorerAbsolutePathFor(path) {
   const normalizedPath = normalizeExplorerPath(path);
   if (isFileExplorerThisPcPath(normalizedPath)) return '';
   if (isAbsoluteExplorerPath(normalizedPath)) return trimFileExplorerAbsolutePath(normalizedPath);
-  const currentAbsolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath);
+  const currentAbsolute = fileExplorerAbsoluteBasis();
   const currentRelative = fileExplorerPathRelativeToCurrent(normalizedPath);
   if (currentAbsolute && currentRelative) {
     return joinFileExplorerAbsolutePath(currentAbsolute, currentRelative);
   }
+  const root = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.workspaceRoot || fileExplorerWorkspaceRoot());
+  if (root) return joinFileExplorerAbsolutePath(root, normalizedPath);
   return joinFileExplorerAbsolutePath(fileExplorerWorkspaceRoot(), normalizedPath);
+}
+
+// absolutePath 只在"列目录成功"时更新；一旦某次导航失败，它就和 path 脱节了。
+// 拿陈旧的 absolutePath 去拼相对路径，就会拼出「…/10_A系列SID编码/验证实验」这种
+// 不存在的路径（10_A系列SID编码 是父目录，验证实验 又被重复接了一次）。
+function fileExplorerAbsoluteBasis() {
+  const current = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+  const currentAbsolute = trimFileExplorerAbsolutePath(FILE_EXPLORER_STATE.absolutePath);
+  if (!currentAbsolute) return '';
+  if (current === '.') return currentAbsolute;
+  const baseName = fileExplorerBasename(currentAbsolute);
+  const tailName = current.split('/').filter(Boolean).pop() || '';
+  return baseName === tailName ? currentAbsolute : '';
+}
+
+// 后端 resolve_path() 把相对路径解析到"可变的会话 cwd"上（AI 执行过 cd 就会变），
+// 而前端的相对路径语义是"相对工作区根目录"。同一个相对路径在不同时刻会被解析成
+// 不同目录，表现就是导航时好时坏、还回不到上一级。所以发请求前统一转成绝对路径。
+function fileExplorerRequestPath(path) {
+  const normalizedPath = normalizeExplorerPath(path);
+  if (!normalizedPath || isFileExplorerThisPcPath(normalizedPath)) return normalizedPath;
+  if (isAbsoluteExplorerPath(normalizedPath)) return trimFileExplorerAbsolutePath(normalizedPath);
+  if (isFileExplorerRemoteMode()) return normalizedPath;
+  return trimFileExplorerAbsolutePath(fileExplorerAbsolutePathFor(normalizedPath)) || normalizedPath;
 }
 
 function fileExplorerWorkspaceBasePath() {
@@ -861,7 +887,7 @@ function requireFileExplorerRemoteAction() {
 }
 
 function isFileExplorerRemoteOnlyAction(action) {
-  return action === 'download' || action === 'upload-files' || action === 'upload-folder';
+  return action === 'download' || action === 'upload-files' || action === 'upload-folder' || action === 'extract-zip';
 }
 
 function setFileExplorerPathDisplay(path) {
@@ -909,6 +935,10 @@ function isFileExplorerPythonFile(path) {
 
 function isFileExplorerTexFile(path) {
   return /^tex$/i.test(fileExplorerExtension(path));
+}
+
+function isFileExplorerZipFile(path) {
+  return /^zip$/i.test(fileExplorerExtension(path));
 }
 
 function isFileExplorerPdfFile(path) {
@@ -1871,6 +1901,7 @@ function ensureFileExplorerContextMenu() {
       <button type="button" data-action="paste" data-paste-only="true" data-dir-only="true" hidden>粘贴到此文件夹</button>
       <button type="button" data-action="clear-clipboard" data-clipboard-only="true" hidden>取消复制/剪切</button>
       <button type="button" data-action="download" data-remote-only="true">下载</button>
+      <button type="button" data-action="extract-zip" data-zip-only="true" hidden>解压到当前文件夹</button>
       <button type="button" data-action="rename">重命名</button>
       <button type="button" data-action="copy-path">复制相对路径</button>
       <button type="button" data-action="copy-absolute-path">复制绝对路径</button>
@@ -2621,6 +2652,10 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
   const nextPath = normalizeExplorerPath(path);
   const pathChanged = nextPath !== FILE_EXPLORER_STATE.path;
   const loadWorkspaceVersion = FILE_EXPLORER_STATE.workspaceVersion || 0;
+  // 失败回滚快照：导航失败时绝不能把当前目录停在坏路径上
+  const previousPath = normalizeExplorerPath(FILE_EXPLORER_STATE.path);
+  const previousAbsolutePath = FILE_EXPLORER_STATE.absolutePath;
+  const previousWorkspaceRoot = FILE_EXPLORER_STATE.workspaceRoot;
   FILE_EXPLORER_STATE.path = nextPath;
   if (pathChanged) clearFileExplorerSelection({ render: false });
   if (pathChanged && options.preserveSearch !== true) clearGraphicalFileExplorerSearch({ render: false });
@@ -2642,7 +2677,10 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
       renderFileExplorer();
       return true;
     }
-    const r = await callAgentBackend('list_dir', { path: FILE_EXPLORER_STATE.path }, undefined, undefined, fileExplorerPathBackendContext(FILE_EXPLORER_STATE.path));
+    // 说明：相对路径必须转成绝对路径再发，否则后端会按可变的会话 cwd 解析，
+    // 同一个"10_A系列SID编码"在不同时刻可能被解析到不同目录（回不到上一级的元凶）。
+    const requestPath = fileExplorerRequestPath(FILE_EXPLORER_STATE.path);
+    const r = await callAgentBackend('list_dir', { path: requestPath }, undefined, undefined, fileExplorerPathBackendContext(requestPath));
     if (typeof r === 'string') throw new Error(r);
     if (!r || !r.ok) throw new Error((r && r.error) || '读取目录失败');
     if (loadWorkspaceVersion !== (FILE_EXPLORER_STATE.workspaceVersion || 0) || nextPath !== normalizeExplorerPath(FILE_EXPLORER_STATE.path)) return false;
@@ -2653,13 +2691,24 @@ async function loadFileExplorer(path = FILE_EXPLORER_STATE.path, options = {}) {
     renderFileExplorer();
     return true;
   } catch (e) {
+    const message = (e && e.message) ? e.message : String(e);
+    // 关键修复：列目录失败时不要把当前目录停在坏路径上。否则「上一级」/面包屑/
+    // 自动刷新都会基于这条坏路径继续拼接，越点越错（表现为反复报「不是目录」回不去）。
+    if (previousPath !== nextPath) {
+      FILE_EXPLORER_STATE.path = previousPath;
+      FILE_EXPLORER_STATE.absolutePath = previousAbsolutePath;
+      FILE_EXPLORER_STATE.workspaceRoot = previousWorkspaceRoot;
+      renderFileExplorer();
+      fileExplorerToast(message, 5200);
+      return false;
+    }
     const list = document.getElementById('fileExplorerList');
     if (list) {
-      list.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(e.message || String(e))}</div>`;
+      list.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(message)}</div>`;
     }
     const graphList = document.getElementById('fileExplorerGraphList');
     if (graphList) {
-      graphList.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(e.message || String(e))}</div>`;
+      graphList.innerHTML = `<div class="file-explorer-empty error">${escapeHtml(message)}</div>`;
     }
     updateGraphicalFileExplorerToolbar();
     return false;
@@ -3736,7 +3785,10 @@ async function revealFileEditorInExplorer() {
     fileExplorerToast('没有可定位的文件');
     return;
   }
-  const dirPath = parentExplorerPath(normalizedPath);
+  // 编辑器里的路径可能是相对的（相对工作区），本身也可能直接就是一个文件。
+  // 先统一转成绝对路径再取父目录，避免把"文件"当成"目录"去列（会报「不是目录」）。
+  const absoluteTarget = fileExplorerRequestPath(normalizedPath);
+  const dirPath = parentExplorerPath(absoluteTarget);
   const textarea = fileEditorTextarea();
   syncFileEditorTextareaFromCodeMirror();
   if (textarea && textarea.value !== FILE_EXPLORER_STATE.editorOriginal) {
@@ -3745,13 +3797,30 @@ async function revealFileEditorInExplorer() {
   closeFileEditor(true);
   const graphModal = document.getElementById('fileExplorerGraphModal');
   const graphOpen = !!(graphModal && graphModal.classList.contains('show'));
+  // 目录可能已被删除或移动：逐级向上回退，至少落到一个能打开的目录，不卡在报错上
+  const candidates = [];
+  let candidate = dirPath;
+  for (let i = 0; i < 4 && candidate; i++) {
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+    const up = parentExplorerPath(candidate);
+    if (!up || up === candidate) break;
+    candidate = up;
+  }
   try {
-    if (graphOpen || FILE_EXPLORER_STATE.visible) {
-      await loadFileExplorer(dirPath);
-    } else {
-      await openGraphicalFileExplorer(dirPath);
+    let opened = false;
+    for (const target of candidates) {
+      opened = await loadFileExplorer(target, { silent: true });
+      if (opened) break;
     }
-    selectFileExplorerFileInList(normalizedPath);
+    if (!opened) {
+      fileExplorerToast(`定位失败：${dirPath} 打不开（可能已被删除或移动）`, 5200);
+      return;
+    }
+    if (!graphOpen && !FILE_EXPLORER_STATE.visible) {
+      await openGraphicalFileExplorer(FILE_EXPLORER_STATE.path);
+    }
+    // 选中路径要与列表项口径一致（列表项路径是 joinExplorerPath(当前目录, 名字)）
+    selectFileExplorerFileInList(joinExplorerPath(FILE_EXPLORER_STATE.path, fileExplorerBasename(absoluteTarget)));
   } catch (e) {
     fileExplorerToast(e.message || String(e));
   }
@@ -4192,6 +4261,9 @@ function showFileExplorerContextMenu(event, item, options = {}) {
   });
   menu.querySelectorAll('[data-remote-only]').forEach(btn => {
     btn.hidden = !isFileExplorerRemoteMode();
+  });
+  menu.querySelectorAll('[data-zip-only]').forEach(btn => {
+    btn.hidden = !(isItem && type !== 'dir' && isFileExplorerRemoteMode() && isFileExplorerZipFile(path));
   });
   const currentInQuickAccess = FILE_EXPLORER_STATE.contextScope === 'blank'
     && currentFileExplorerQuickAccessIndex() >= 0;
@@ -4856,6 +4928,37 @@ function downloadFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath, type =
   fileExplorerToast(type === 'dir' ? '已开始打包下载文件夹' : '已开始下载');
 }
 
+async function extractFileExplorerZip(path = FILE_EXPLORER_STATE.contextPath) {
+  if (!requireFileExplorerRemoteAction()) return;
+  const normalizedPath = normalizeExplorerPath(path);
+  if (!normalizedPath) {
+    fileExplorerToast('没有可解压的文件');
+    return;
+  }
+  if (!isFileExplorerZipFile(normalizedPath)) {
+    fileExplorerToast('只能解压 zip 文件');
+    return;
+  }
+  try {
+    if (typeof callAgentBackend !== 'function') throw new Error('本地工具接口未加载');
+    fileExplorerToast('正在解压…', 6000);
+    const r = await callAgentBackend(
+      'extract_zip',
+      { path: normalizedPath },
+      undefined,
+      undefined,
+      fileExplorerPathBackendContext(normalizedPath, { skipConfirm: true })
+    );
+    if (typeof r === 'string') throw new Error(r);
+    if (!r || !r.ok) throw new Error((r && r.error) || '解压失败');
+    const folder = fileExplorerBasename(r.dest_dir || '') || fileExplorerBasename(normalizedPath) || '';
+    fileExplorerToast(`已解压${folder ? `到 ${folder}/` : ''}（${Number(r.entries || 0)} 个文件）`);
+    await loadFileExplorer(FILE_EXPLORER_STATE.path, { silent: true });
+  } catch (e) {
+    fileExplorerToast(e.message || String(e));
+  }
+}
+
 async function renameFileExplorerPath(path = FILE_EXPLORER_STATE.contextPath) {
   const normalizedPath = normalizeExplorerPath(path);
   const currentName = fileExplorerBasename(normalizedPath);
@@ -4943,6 +5046,7 @@ function handleFileExplorerContextMenuAction(event) {
   else if (action === 'clear-clipboard') clearFileExplorerClipboard();
   else if (action === 'paste') pasteFileExplorerItem(path);
   else if (action === 'download') downloadFileExplorerPath(path, type);
+  else if (action === 'extract-zip') extractFileExplorerZip(path);
   else if (action === 'upload-files') openFileExplorerUploadPicker('files', path);
   else if (action === 'upload-folder') openFileExplorerUploadPicker('folder', path);
   else if (action === 'rename') renameFileExplorerPath(path);

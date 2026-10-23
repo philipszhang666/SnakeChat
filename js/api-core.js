@@ -1270,6 +1270,32 @@ async function callAPI(roundLimit, options = {}) {
         }
         apiCoreSaveData();
 
+        // ⭐ attach_file 内联投递：把附件作为隐藏 user 消息插入本轮上下文，
+        //    紧随其后的递归请求就会带上它，AI 当轮即可看到附件；
+        //    同时把附件从"待发桶"里消费掉，autoResend 3 秒后检查为空就会放弃补发，
+        //    从而消除"AI 正常答完却自动重发一轮"的现象。
+        const inlineAttachment = result && result.value && typeof result.value === 'object'
+          && result.value._inlineAttachment
+          ? result.value._inlineAttachment
+          : null;
+        if (inlineAttachment && !isError && !stopAll) {
+          const inlineAtt = { ...inlineAttachment };
+          c.messages.push({
+            role: 'user',
+            content: result.value._inlineContextText
+              || `系统：附件 ${inlineAtt.name || 'attachment'} 已通过 attach_file 加载，请结合该附件继续完成用户任务。`,
+            attachments: [inlineAtt],
+            _hiddenFromUI: true,
+            _inlineAttachmentDelivery: true,
+            _startTime: Date.now(),
+            _endTime: Date.now()
+          });
+          if (typeof window !== 'undefined' && typeof window.consumePendingAIAttachmentsByIds === 'function') {
+            try { window.consumePendingAIAttachmentsByIds(taskChatId, [inlineAtt.id]); } catch (e) {}
+          }
+          apiCoreSaveData();
+        }
+
         if (hasPendingGuidance()) {
           pruneToolCallsToExecuted(msg, executedToolCallIds);
           await appendPendingGuidanceAndContinue(Math.max(0, roundLimit - 1));
@@ -2453,6 +2479,13 @@ async function runAgentLoop({
         && result.value._concurrentAttachment
           ? result.value
           : null;
+      const inlineAttachmentResult = !concurrentAttachmentResult
+        && result
+        && result.value
+        && typeof result.value === 'object'
+        && result.value._inlineAttachment
+          ? result.value
+          : null;
       if (typeof result.value === 'string') {
         contentText = result.value;
         isError = !result.ok;
@@ -2469,6 +2502,23 @@ async function runAgentLoop({
               _hiddenFromUI: true,
               _concurrentAttachment: true
             });
+          }
+        } else if (inlineAttachmentResult) {
+          contentText = inlineAttachmentResult.text || '附件已加入本轮上下文。';
+          isError = !result.ok || inlineAttachmentResult.ok === false;
+          if (!isError && inlineAttachmentResult._inlineAttachment) {
+            const attachment = { ...inlineAttachmentResult._inlineAttachment };
+            pendingConcurrentAttachmentMessages.push({
+              role: 'user',
+              content: inlineAttachmentResult._inlineContextText
+                || `系统：附件 ${attachment.name || 'attachment'} 已通过 attach_file 加载，请结合该附件继续完成用户任务。`,
+              attachments: [attachment],
+              _hiddenFromUI: true,
+              _inlineAttachmentDelivery: true
+            });
+            if (typeof window !== 'undefined' && typeof window.consumePendingAIAttachmentsByIds === 'function') {
+              try { window.consumePendingAIAttachmentsByIds(runToolContext.chatId, [attachment.id]); } catch (e) {}
+            }
           }
         } else if (result.value._stopAll || result.value._userRejected) {
           contentText = result.value.error || '用户中断';

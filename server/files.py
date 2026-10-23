@@ -26,6 +26,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import zipfile
 
 from . import config
 from .sandbox import check_path_or_error
@@ -101,6 +102,53 @@ def _dedupe_copy_target(path, source_is_dir):
     if not os.path.exists(path):
         return path
     return _copy_candidate_path(path, source_is_dir)
+
+
+def _zip_entry_name(info):
+    """修正 zip 内中文文件名：未设置 UTF-8 标志时按 GBK/UTF-8 重新解码。"""
+    name = info.filename or ''
+    if not name or (info.flag_bits & 0x800):
+        return name
+    try:
+        raw = name.encode('cp437')
+    except Exception:
+        return name
+    for encoding in ('utf-8', 'gbk'):
+        try:
+            return raw.decode(encoding)
+        except Exception:
+            continue
+    return name
+
+
+def _zip_member_target(root, member_name):
+    """把压缩包内的条目名解析为 root 下的安全绝对路径；越界或含 .. 时返回 None。"""
+    clean = str(member_name or '').replace('\\', '/')
+    parts = [part for part in clean.split('/') if part and part != '.']
+    if not parts or '..' in parts:
+        return None
+    target = os.path.join(root, *parts)
+    try:
+        if os.path.normcase(os.path.commonpath([os.path.realpath(target), root])) != os.path.normcase(root):
+            return None
+    except ValueError:
+        return None
+    return target
+
+
+def _zip_default_dest_dir(zip_path):
+    """默认解压目录：与压缩包同名的文件夹，已存在时自动加序号避免覆盖。"""
+    parent, name = os.path.split(zip_path)
+    stem = name[:-4] if name.lower().endswith('.zip') else name
+    stem = stem or 'unzipped'
+    candidate = os.path.join(parent, stem)
+    if not os.path.exists(candidate):
+        return candidate
+    for idx in range(2, 1000):
+        candidate = os.path.join(parent, f'{stem} ({idx})')
+        if not os.path.exists(candidate):
+            return candidate
+    raise RuntimeError('无法生成不冲突的解压目录名称')
 
 
 def _file_info_platform():
@@ -1245,6 +1293,67 @@ class FilesMixin:
         except Exception as e:
             self.response.json(200, {'ok': False, 'error': str(e)})
 
+    # ============ 解压 zip ============
+    def handle_extract_zip(self, body):
+        try:
+            raw_path = body.get('path') or body.get('source_path') or ''
+            path, err = check_path_or_error(raw_path, must_exist=True)
+            if err: return self.response.json(200, {'ok': False, 'error': err})
+            print(f'📦 [解压] {path}')
+            if not os.path.isfile(path):
+                return self.response.json(200, {'ok': False, 'error': '只能解压文件'})
+            if not zipfile.is_zipfile(path):
+                return self.response.json(200, {'ok': False, 'error': '不是有效的 zip 文件'})
+
+            raw_dest = body.get('dest_dir') or body.get('target_dir') or body.get('destDir') or ''
+            if raw_dest:
+                dest_dir, err = check_path_or_error(raw_dest)
+                if err: return self.response.json(200, {'ok': False, 'error': err})
+                if os.path.exists(dest_dir) and not os.path.isdir(dest_dir):
+                    return self.response.json(200, {'ok': False, 'error': '目标路径不是文件夹'})
+            else:
+                dest_dir, err = check_path_or_error(_zip_default_dest_dir(path))
+                if err: return self.response.json(200, {'ok': False, 'error': err})
+            root_real = os.path.realpath(dest_dir)
+            files_written = 0
+            dirs_created = 0
+            with zipfile.ZipFile(path) as zf:
+                # 先整体校验条目路径（防 zip slip），再落盘，避免解出半成品
+                plans = []
+                for info in zf.infolist():
+                    name = _zip_entry_name(info)
+                    target = _zip_member_target(root_real, name)
+                    if target is None:
+                        if not name.strip():
+                            continue
+                        return self.response.json(200, {
+                            'ok': False,
+                            'error': f'压缩包内含非法路径，已中止解压: {name}'
+                        })
+                    plans.append((info, name, target))
+
+                os.makedirs(dest_dir, exist_ok=True)
+                for info, name, target in plans:
+                    is_dir_entry = (info.is_dir() if hasattr(info, 'is_dir') else name.endswith('/'))
+                    if is_dir_entry:
+                        os.makedirs(target, exist_ok=True)
+                        dirs_created += 1
+                        continue
+                    os.makedirs(os.path.dirname(target) or root_real, exist_ok=True)
+                    with zf.open(info) as src, open(target, 'wb') as dst:
+                        shutil.copyfileobj(src, dst)
+                    files_written += 1
+
+            self.response.json(200, {
+                'ok': True,
+                'path': path,
+                'dest_dir': dest_dir,
+                'entries': files_written,
+                'directories': dirs_created
+            })
+        except Exception as e:
+            self.response.json(200, {'ok': False, 'error': str(e)})
+
     def handle_move_file(self, body):
         path, err = check_path_or_error(
             body.get('path') or body.get('source_path') or body.get('sourcePath') or ''
@@ -1365,8 +1474,10 @@ class FilesMixin:
         path, err = check_path_or_error(body.get('path', '') or '.')
         if err: return self.response.json(200, {'ok': False, 'error': err})
         print(f'📁 [列目录] {path}')
+        if not os.path.exists(path):
+            return self.response.json(200, {'ok': False, 'error': f'目录不存在: {path}'})
         if not os.path.isdir(path):
-            return self.response.json(200, {'ok': False, 'error': f'不是目录: {path}'})
+            return self.response.json(200, {'ok': False, 'error': f'不是目录（这是一个文件）: {path}'})
         try:
             entries = []
             for name in sorted(os.listdir(path)):

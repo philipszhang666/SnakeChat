@@ -135,6 +135,7 @@ def _print_banner():
     print('   - append_file      追加内容')
     print('   - edit_file        精确替换')
     print('   - delete_file      删除文件/空目录')
+    print('   - extract_zip      解压 zip 压缩包')
     print('   - list_dir         列目录')
     print('   - search           搜索文件内容')
     print('   - web_search       🌐 网络搜索（多引擎自动回退）')
